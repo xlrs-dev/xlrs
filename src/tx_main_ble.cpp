@@ -53,9 +53,20 @@ extern "C" {
 #define TOGGLE_SWITCH3_PIN 3
 #define TOGGLE_SWITCH4_PIN 9
 
+// BQ25620 charger / fuel (ADC) over I2C
+#define BQ25620_I2C_ADDR       0x6A  // Scan showed device at 0x6A
+#define BQ25620_REG_ADC_CONTROL 0x26
+#define BQ25620_REG_ADC_FUNC_DIS0 0x27
+#define BQ25620_REG_VBAT_ADC    0x30
+#define BQ25620_ADC_ENABLE_BIT  0x80
+#define BQ25620_ADC_STEP_V      0.0010f   // Empirically closer for VBAT (was 1.99mV)
+#define TX_BATT_EMPTY_V         3.2f
+#define TX_BATT_FULL_V          4.2f
+
 // Target service and characteristic UUIDs (16-bit short form)
 #define FPV_SERVICE_UUID16     0xFF00
 #define FPV_TX_CHAR_UUID16     0xFF01
+#define FPV_RX_CHAR_UUID16     0xFF02  // Telemetry characteristic (notify)
 #define FPV_PAIR_CHAR_UUID16   0xFF03  // Pairing key characteristic
 
 // Pairing key size
@@ -66,6 +77,10 @@ extern "C" {
 #define BOND_MAGIC_ADDR 99
 #define BOND_MAC_ADDR 100
 #define BOND_MAGIC_VALUE 0xAA
+// Calibration storage
+#define CAL_MAGIC_ADDR 150
+#define CAL_DATA_ADDR 152
+#define CAL_MAGIC_VALUE 0xC5
 
 // Connection states
 typedef enum {
@@ -86,7 +101,8 @@ typedef enum {
     MENU_SCANNING,
     MENU_SELECT_DEVICE,
     MENU_CONNECTING,
-    MENU_PAIRING          // New: Pairing in progress
+    MENU_PAIRING,         // Pairing in progress
+    MENU_CALIBRATION      // Stick calibration
 } menu_state_t;
 
 // Discovered device info
@@ -113,12 +129,64 @@ static bool connected = false;
 // GATT client state
 static gatt_client_service_t fpv_service;
 static gatt_client_characteristic_t tx_characteristic;
+static gatt_client_characteristic_t rx_characteristic;
 static gatt_client_characteristic_t pair_characteristic;
 static bool service_found = false;
 static bool characteristic_found = false;
+static bool rx_characteristic_found = false;
 static bool pair_characteristic_found = false;
 static uint16_t tx_char_value_handle = 0;
+static uint16_t rx_char_value_handle = 0;
 static uint16_t pair_char_value_handle = 0;
+static bool notifications_enabled = false;
+
+// Battery telemetry received from RX
+static float battery_voltage = 0.0f;
+static float battery_current = 0.0f;
+static uint8_t battery_remaining = 0;
+static bool battery_data_valid = false;
+static unsigned long last_battery_update = 0;
+
+// TX local battery (BQ25620)
+static float tx_batt_voltage = 0.0f;
+static uint8_t tx_batt_percent = 0;
+static uint8_t tx_batt_bars = 0;
+static bool tx_batt_valid = false;
+static bool tx_batt_low = false;
+static unsigned long last_tx_batt_read = 0;
+static const unsigned long TX_BATT_READ_INTERVAL = 5000; // ms
+static uint16_t tx_batt_raw_last = 0;
+
+// Calibration data for sticks
+typedef struct {
+    uint16_t min[4];
+    uint16_t max[4];
+    uint16_t center[4];
+} calib_data_t;
+
+static calib_data_t calib = {
+    {2917, 2917, 2917, 2917},
+    {23420, 23420, 23420, 23420},
+    {13199, 13199, 13199, 13199}
+};
+static bool calib_loaded = false;
+#define CAL_MOVE_MS   4000
+#define CAL_CENTER_MS 500
+#define CAL_SPAN_THRESHOLD 500  // minimum span required to accept an axis
+static const char* AXIS_LABELS[4] = {"Ail", "Ele", "Rud", "Thr"};
+static int current_cal_axis = 0;
+static bool cal_enter_event = false;
+
+typedef enum {
+    CAL_PHASE_MOVE,
+    CAL_PHASE_CENTER,
+    CAL_PHASE_DONE
+} cal_phase_t;
+
+static cal_phase_t cal_phase = CAL_PHASE_MOVE;
+static unsigned long cal_phase_start = 0;
+static uint32_t cal_center_accum[4] = {0,0,0,0};
+static uint16_t cal_center_samples = 0;
 
 // Pairing state
 static bool pairing_in_progress = false;
@@ -130,6 +198,7 @@ static uint8_t new_pairing_key[PAIRING_KEY_SIZE];
 static discovered_device_t discovered_devices[MAX_DEVICES];
 static int discovered_count = 0;
 static int selected_device = 0;
+static int main_menu_index = 0; // 0=Scan, 1=Exit
 
 // Bonded device
 static bd_addr_t bonded_address;
@@ -181,6 +250,16 @@ static void save_bonded_device(void);
 static void start_pairing(void);
 static void send_pairing_key(void);
 static void generate_pairing_key(void);
+static void enable_notifications(void);
+static bool bq25620_begin(void);
+static bool bq25620_read_voltage(float &voltage_out);
+static void update_tx_battery(void);
+static uint8_t voltage_to_percent(float v);
+static uint8_t percent_to_bars(uint8_t pct);
+static void load_calibration(void);
+static void save_calibration(void);
+static void start_calibration(void);
+static void process_calibration(void);
 
 // EEPROM functions
 static void load_bonded_device(void) {
@@ -395,9 +474,37 @@ static void discover_characteristics(void) {
     strcpy(status_str, "Finding chars");
     
     characteristic_found = false;
+    rx_characteristic_found = false;
     
     // Discover characteristics for our service
     gatt_client_discover_characteristics_for_service(gatt_client_callback, connection_handle, &fpv_service);
+}
+
+// Enable notifications on RX characteristic for battery telemetry
+static void enable_notifications(void) {
+    if (!rx_characteristic_found || rx_char_value_handle == 0) {
+        Serial.println("Cannot enable notifications - RX characteristic not found");
+        return;
+    }
+    
+    Serial.println("Enabling notifications on RX characteristic...");
+    
+    // Write to Client Characteristic Configuration Descriptor (CCCD) to enable notifications
+    // CCCD value 0x0001 = enable notifications
+    uint8_t status = gatt_client_write_client_characteristic_configuration(
+        gatt_client_callback,
+        connection_handle,
+        &rx_characteristic,
+        GATT_CLIENT_CHARACTERISTICS_CONFIGURATION_NOTIFICATION
+    );
+    
+    if (status == ERROR_CODE_SUCCESS) {
+        Serial.println("Notification enable request sent");
+        notifications_enabled = true;
+    } else {
+        Serial.print("Failed to enable notifications, status: ");
+        Serial.println(status);
+    }
 }
 
 // Send channel data
@@ -491,6 +598,15 @@ static void gatt_client_callback(uint8_t packet_type, uint16_t channel, uint8_t 
                     Serial.print("TX handle: 0x");
                     Serial.println(tx_char_value_handle, HEX);
                     
+                    if (rx_characteristic_found) {
+                        Serial.print("RX handle (telemetry): 0x");
+                        Serial.println(rx_char_value_handle, HEX);
+                        // Enable notifications for battery telemetry
+                        enable_notifications();
+                    } else {
+                        Serial.println("Note: RX telemetry characteristic not found");
+                    }
+                    
                     if (pair_characteristic_found) {
                         Serial.print("Pair handle: 0x");
                         Serial.println(pair_char_value_handle, HEX);
@@ -569,6 +685,14 @@ static void gatt_client_callback(uint8_t packet_type, uint16_t channel, uint8_t 
                 tx_char_value_handle = characteristic.value_handle;
             }
             
+            // Check if this is the RX characteristic (telemetry notifications)
+            if (characteristic.uuid16 == FPV_RX_CHAR_UUID16) {
+                Serial.println("*** RX Characteristic found (telemetry)! ***");
+                rx_characteristic_found = true;
+                rx_characteristic = characteristic;
+                rx_char_value_handle = characteristic.value_handle;
+            }
+            
             // Check if this is the Pairing characteristic
             if (characteristic.uuid16 == FPV_PAIR_CHAR_UUID16) {
                 Serial.println("*** Pairing Characteristic found! ***");
@@ -583,6 +707,35 @@ static void gatt_client_callback(uint8_t packet_type, uint16_t channel, uint8_t 
             // Handle write completion for pairing
             if (pairing_in_progress) {
                 Serial.println("Pairing key write acknowledged");
+            }
+            break;
+        }
+        
+        case GATT_EVENT_NOTIFICATION: {
+            // Handle incoming notification (battery telemetry from RX)
+            uint16_t value_handle = gatt_event_notification_get_value_handle(packet);
+            uint16_t value_length = gatt_event_notification_get_value_length(packet);
+            const uint8_t *value = gatt_event_notification_get_value(packet);
+            
+            // Check if this is from our RX characteristic
+            if (value_handle == rx_char_value_handle && value_length == 5) {
+                // Parse battery telemetry: voltage*10 (16-bit BE), current*10 (16-bit BE), remaining (8-bit)
+                uint16_t voltage_x10 = (value[0] << 8) | value[1];
+                uint16_t current_x10 = (value[2] << 8) | value[3];
+                
+                battery_voltage = voltage_x10 / 10.0f;
+                battery_current = current_x10 / 10.0f;
+                battery_remaining = value[4];
+                battery_data_valid = true;
+                last_battery_update = millis();
+                
+                Serial.print("[TELEM] Battery: ");
+                Serial.print(battery_voltage, 1);
+                Serial.print("V ");
+                Serial.print(battery_current, 1);
+                Serial.print("A ");
+                Serial.print(battery_remaining);
+                Serial.println("%");
             }
             break;
         }
@@ -753,11 +906,15 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
             connection_handle = HCI_CON_HANDLE_INVALID;
             connected = false;
             characteristic_found = false;
+            rx_characteristic_found = false;
             pair_characteristic_found = false;
             service_found = false;
             tx_char_value_handle = 0;
+            rx_char_value_handle = 0;
             pair_char_value_handle = 0;
             pairing_in_progress = false;
+            notifications_enabled = false;
+            battery_data_valid = false;
             ble_state = STATE_IDLE;
             strcpy(status_str, "Disconnected");
             
@@ -810,19 +967,22 @@ void readInputs() {
     // Map to channel values (1000-2000)
     // Calibrated based on actual ADC readings:
     // ADC range appears to be ~2917 (min) to ~23420 (max), center ~13199
+    // Map using calibration (even during calibration for live view)
+    auto mapCal = [](int16_t val, uint16_t vmin, uint16_t vmax) -> uint16_t {
+        if (vmax <= vmin + 10) return 1500; // avoid div0
+        return (uint16_t)constrain(map(val, vmin, vmax, 1000, 2000), 1000, 2000);
+    };
+    auto mapCalInverted = [](int16_t val, uint16_t vmin, uint16_t vmax) -> uint16_t {
+        if (vmax <= vmin + 10) return 1500; // avoid div0
+        // Invert mapping so ADC min -> CRSF max for this channel
+        return (uint16_t)constrain(map(val, vmin, vmax, 2000, 1000), 1000, 2000);
+    };
+    channels[0] = mapCalInverted(stick1_x, calib.min[0], calib.max[0]);  // Aileron (invert)
+    channels[1] = mapCal(stick1_y, calib.min[1], calib.max[1]);  // Elevator
+    channels[2] = mapCal(stick2_x, calib.min[2], calib.max[2]);  // Rudder
+    channels[3] = mapCal(stick2_y, calib.min[3], calib.max[3]);  // Throttle
+    
     if (menu_state == MENU_NORMAL_OPERATION) {
-        // Map from actual ADC range to desired RC range (1000-2000)
-        // Channel mapping: A,E,R,T
-        channels[0] = map(stick1_x, 2917, 23420, 1000, 2000);  // Aileron
-        channels[1] = map(stick1_y, 2917, 23420, 1000, 2000);  // Elevator
-        channels[2] = map(stick2_x, 2917, 23420, 1000, 2000);  // Rudder
-        channels[3] = map(stick2_y, 2917, 23420, 1000, 2000);  // Throttle
-        
-        // Clamp to valid RC range
-        channels[0] = constrain(channels[0], 1000, 2000);  // Aileron
-        channels[1] = constrain(channels[1], 1000, 2000);  // Elevator
-        channels[2] = constrain(channels[2], 1000, 2000);  // Rudder
-        channels[3] = constrain(channels[3], 1000, 2000);  // Throttle
         
         // Read toggle switches (active low - LOW = switch engaged)
         bool sw1 = digitalRead(TOGGLE_SWITCH1_PIN) == LOW;
@@ -886,13 +1046,33 @@ void updateDisplay() {
         case MENU_NORMAL_OPERATION:
             display.print("Status: ");
             display.println(status_str);
-            if (connected && characteristic_found) {
-                display.print("Handle: 0x");
-                display.println(tx_char_value_handle, HEX);
-                // Show if pairing is available
-                if (pair_characteristic_found) {
-                    display.println("Pairing: Ready");
+            // TX battery (local)
+            if (tx_batt_valid) {
+                display.print("TX: ");
+                display.print(tx_batt_voltage, 2);
+                display.print("V ");
+                display.print(tx_batt_percent);
+                display.print("% ");
+                // 4-bar indicator, blink last bar if low
+                bool blink = tx_batt_low && ((millis() / 500) % 2 == 0);
+                for (uint8_t i = 0; i < 4; i++) {
+                    bool filled = (i < tx_batt_bars);
+                    if (tx_batt_low && i == tx_batt_bars - 1) {
+                        filled = !blink;  // blink the last bar when low
+                    }
+                    display.print(filled ? "|" : ".");
                 }
+                display.println();
+            } else {
+                display.println("TX: --");
+            }
+            // RX battery (from telemetry) if available
+            if (battery_data_valid) {
+                display.print("RX: ");
+                display.print(battery_voltage, 1);
+                display.print("V ");
+                display.print(battery_remaining);
+                display.println("%");
             }
             display.print("Ch: ");
             display.print(channels[0]);
@@ -909,14 +1089,33 @@ void updateDisplay() {
             
         case MENU_MAIN:
             display.println("=== MENU ===");
-            display.println("> Scan Devices");
-            if (connected && pair_characteristic_found) {
-                display.println("  Pair with RX");
-            }
-            display.println("  Exit");
+            display.print(main_menu_index == 0 ? ">" : " ");
+            display.println("Scan Devices");
+            display.print(main_menu_index == 1 ? ">" : " ");
+            display.println("Exit");
             display.println("");
             display.println("GP18: Enter");
             display.println("GP13: Back/3s:Pair");
+            break;
+
+        case MENU_CALIBRATION:
+            display.println("=== CALIB ===");
+            display.print(AXIS_LABELS[current_cal_axis]);
+            display.print(" Min:");
+            display.println(calib.min[current_cal_axis]);
+            display.print("Max:");
+            display.println(calib.max[current_cal_axis]);
+            display.print("Span:");
+            display.println((calib.max[current_cal_axis] > calib.min[current_cal_axis]) ? (calib.max[current_cal_axis] - calib.min[current_cal_axis]) : 0);
+            display.print("Now:");
+            display.println(raw_adc[current_cal_axis]);
+            if (cal_phase == CAL_PHASE_MOVE) {
+                display.println("Move axis, Enter->next");
+            } else if (cal_phase == CAL_PHASE_CENTER) {
+                display.println("Centering...");
+            } else {
+                display.println("Saving...");
+            }
             break;
             
         case MENU_SCANNING:
@@ -964,6 +1163,42 @@ void handleButtons() {
     // Read menu navigation buttons (active high)
     bool enter_btn = digitalRead(ENTER_BUTTON_PIN) == HIGH;
     bool back_btn = digitalRead(BACK_BUTTON_PIN) == HIGH;
+
+    // Detect long hold of both buttons to enter calibration (5s).
+    // Run this BEFORE any menu handling and suppress normal button actions
+    // while both are held.
+    static unsigned long both_hold_start = 0;
+    static bool in_both_hold = false;
+    if (enter_btn && back_btn) {
+        if (!in_both_hold) {
+            in_both_hold = true;
+            both_hold_start = millis();
+        } else if (millis() - both_hold_start >= 5000) {
+            Serial.println("Both buttons held 5s - entering calibration");
+            start_calibration();
+            // prevent retrigger until released
+            in_both_hold = false;
+            both_hold_start = 0;
+        }
+        // When both are held, do not process individual button/menu actions
+        return;
+    } else {
+        in_both_hold = false;
+        both_hold_start = 0;
+    }
+
+    // If in calibration, only use Enter to advance; ignore other menu handling.
+    if (menu_state == MENU_CALIBRATION) {
+        static bool enter_pressed_cal = false;
+        if (enter_btn && !enter_pressed_cal) {
+            enter_pressed_cal = true;
+        } else if (!enter_btn && enter_pressed_cal) {
+            enter_pressed_cal = false;
+            cal_enter_event = true; // signal to calibration state machine
+        }
+        // Optional: allow Back to abort calibration (not required now)
+        return;
+    }
     
     // Store raw button states for logging
     raw_buttons[0] = enter_btn;
@@ -986,17 +1221,17 @@ void handleButtons() {
             if (duration >= 500) {
                 Serial.println("Both buttons pressed - entering menu");
                 menu_state = MENU_MAIN;
+                main_menu_index = 0;
             }
         }
         // Don't process individual buttons when connected and transmitting
         return;
     }
     
-    // Joystick navigation - delta-based (requires 10% change from last position to trigger)
-    // This prevents continuous scrolling when stick is held deflected
-    const int16_t NAV_CENTER_DEADZONE = 2000;  // Must be outside this deadzone from center
-    const int16_t NAV_DELTA_THRESHOLD = 3277;  // 10% of 32767 = ~3277 to trigger navigation
-    const unsigned long NAV_DEBOUNCE = 100;    // ms between navigation events
+    // Joystick navigation - delta-based (loose)
+    const int16_t NAV_CENTER_DEADZONE = 400;   // must be outside this deadzone from center
+    const int16_t NAV_DELTA_THRESHOLD = 600;   // delta needed to trigger another move
+    const unsigned long NAV_DEBOUNCE = 120;    // ms between navigation events
     
     static int16_t last_nav_value = 0;  // Track last position that triggered navigation
     static unsigned long last_nav = 0;
@@ -1024,7 +1259,7 @@ void handleButtons() {
     }
     
     // Handle menu navigation with joystick - delta-based
-    // Only navigate if the position changed by >10% from the last trigger point
+    // Only navigate if position changed enough from last trigger point
     int16_t delta = nav_y - last_nav_value;
     
     if (abs(nav_y) > NAV_CENTER_DEADZONE && 
@@ -1041,6 +1276,15 @@ void handleButtons() {
             }
             last_nav = millis();
             last_nav_value = nav_y;  // Remember this position as the new reference
+        } else if (menu_state == MENU_MAIN) {
+            // Two items: 0=Scan, 1=Exit
+            if (delta > 0) {
+                main_menu_index = min(main_menu_index + 1, 1);
+            } else {
+                main_menu_index = max(main_menu_index - 1, 0);
+            }
+            last_nav = millis();
+            last_nav_value = nav_y;
         }
     }
     
@@ -1058,8 +1302,12 @@ void handleButtons() {
             if (menu_state == MENU_SELECT_DEVICE && discovered_count > 0) {
                 connect_to_device(selected_device);
             } else if (menu_state == MENU_MAIN) {
-                menu_state = MENU_SCANNING;
-                start_scan();
+                if (main_menu_index == 0) {
+                    menu_state = MENU_SCANNING;
+                    start_scan();
+                } else {
+                    menu_state = MENU_NORMAL_OPERATION;
+                }
             }
         }
     }
@@ -1254,6 +1502,13 @@ void setup() {
         Wire.setClock(400000);  // 400kHz fast mode
         Serial.println("I2C bus speed increased to 400kHz");
     }
+
+    // Initialize BQ25620 ADC for TX battery monitoring
+    if (bq25620_begin()) {
+        Serial.println("BQ25620 ADC enabled");
+    } else {
+        Serial.println("BQ25620 init failed");
+    }
     
     // Initialize menu navigation buttons (active high - use INPUT_PULLDOWN)
     pinMode(ENTER_BUTTON_PIN, INPUT_PULLDOWN);
@@ -1267,6 +1522,9 @@ void setup() {
     
     // Load bonded device
     load_bonded_device();
+
+    // Load stick calibration (if present)
+    load_calibration();
     
     // Initialize security
     if (security.begin()) {
@@ -1310,6 +1568,11 @@ void loop() {
     // Handle buttons
     handleButtons();
     
+    // Calibration processing
+    if (menu_state == MENU_CALIBRATION) {
+        process_calibration();
+    }
+    
     // Send data if ready
     if (ble_state == STATE_READY && menu_state == MENU_NORMAL_OPERATION) {
         send_channel_data();
@@ -1317,6 +1580,9 @@ void loop() {
     
     // Update display (rate-limited internally)
     updateDisplay();
+    
+    // Periodically read TX battery (BQ25620)
+    update_tx_battery();
     
     // Heartbeat and input logging
     static unsigned long lastHeart = 0;
@@ -1359,4 +1625,226 @@ void loop() {
     }
     
     delay(1);
+}
+
+// ==========================================
+// Calibration helpers
+// ==========================================
+
+static void load_calibration(void) {
+    EEPROM.begin(EEPROM_SIZE);
+    if (EEPROM.read(CAL_MAGIC_ADDR) != CAL_MAGIC_VALUE) {
+        Serial.println("Calibration not found, using defaults");
+        calib_loaded = false;
+        return;
+    }
+    EEPROM.get(CAL_DATA_ADDR, calib);
+    // Basic sanity clamp
+    for (int i = 0; i < 4; i++) {
+        if (calib.min[i] >= calib.max[i]) {
+            calib.min[i] = 2917;
+            calib.max[i] = 23420;
+        }
+        if (calib.center[i] == 0 || calib.center[i] >= calib.max[i]) {
+            calib.center[i] = 13199;
+        }
+    }
+    calib_loaded = true;
+    Serial.println("Calibration loaded");
+}
+
+static void save_calibration(void) {
+    EEPROM.begin(EEPROM_SIZE);
+    EEPROM.write(CAL_MAGIC_ADDR, CAL_MAGIC_VALUE);
+    EEPROM.put(CAL_DATA_ADDR, calib);
+    EEPROM.commit();
+    Serial.println("Calibration saved");
+}
+
+static void start_calibration(void) {
+    menu_state = MENU_CALIBRATION;
+    cal_phase = CAL_PHASE_MOVE;
+    cal_phase_start = millis();
+    current_cal_axis = 0;
+    for (int i = 0; i < 4; i++) {
+        calib.min[i] = 0xFFFF;
+        calib.max[i] = 0;
+        calib.center[i] = 0;
+        cal_center_accum[i] = 0;
+    }
+    cal_center_samples = 0;
+    strcpy(status_str, "Calibrating");
+    lastDisplayUpdate = 0;
+}
+
+static void process_calibration(void) {
+    unsigned long now = millis();
+    int ax = current_cal_axis;
+
+    if (cal_phase == CAL_PHASE_MOVE) {
+        // Track min/max for current axis
+        uint16_t v = (uint16_t)raw_adc[ax];
+        if (v < calib.min[ax]) calib.min[ax] = v;
+        if (v > calib.max[ax]) calib.max[ax] = v;
+
+        if (cal_enter_event) {
+            cal_enter_event = false;
+            uint16_t span = (calib.max[ax] > calib.min[ax]) ? (calib.max[ax] - calib.min[ax]) : 0;
+            if (span < CAL_SPAN_THRESHOLD) {
+                Serial.println("Cal: span too small, move more");
+                strcpy(status_str, "Move more");
+                lastDisplayUpdate = 0;
+            } else {
+                cal_phase = CAL_PHASE_CENTER;
+                cal_phase_start = now;
+                cal_center_samples = 0;
+                cal_center_accum[ax] = 0;
+                Serial.println("Cal: center this axis");
+                strcpy(status_str, "Centering...");
+                lastDisplayUpdate = 0;
+            }
+        }
+    } else if (cal_phase == CAL_PHASE_CENTER) {
+        uint16_t v = (uint16_t)raw_adc[ax];
+        cal_center_accum[ax] += (uint32_t)v;
+        cal_center_samples++;
+        if (now - cal_phase_start >= CAL_CENTER_MS) {
+            if (cal_center_samples > 0) {
+                calib.center[ax] = (uint16_t)(cal_center_accum[ax] / cal_center_samples);
+            } else {
+                calib.center[ax] = v;
+            }
+            // Clamp center inside min/max
+            if (calib.center[ax] < calib.min[ax]) calib.center[ax] = calib.min[ax];
+            if (calib.center[ax] > calib.max[ax]) calib.center[ax] = calib.max[ax];
+
+            // Advance to next axis or finish
+            current_cal_axis++;
+            if (current_cal_axis >= 4) {
+                cal_phase = CAL_PHASE_DONE;
+                save_calibration();
+                calib_loaded = true;
+                menu_state = MENU_NORMAL_OPERATION;
+                strcpy(status_str, "Cal done");
+                lastDisplayUpdate = 0;
+                Serial.println("Cal: completed");
+            } else {
+                // Reset for next axis
+                int na = current_cal_axis;
+                calib.min[na] = 0xFFFF;
+                calib.max[na] = 0;
+                cal_center_accum[na] = 0;
+                cal_center_samples = 0;
+                cal_phase = CAL_PHASE_MOVE;
+                cal_phase_start = now;
+                strcpy(status_str, "Next axis");
+                lastDisplayUpdate = 0;
+                Serial.print("Cal: next axis ");
+                Serial.println(AXIS_LABELS[na]);
+            }
+        }
+    }
+}
+
+// ==========================================
+// BQ25620 Helpers (TX battery)
+// ==========================================
+
+static bool bq25620_read8(uint8_t reg, uint8_t &val) {
+    Wire.beginTransmission(BQ25620_I2C_ADDR);
+    Wire.write(reg);
+    if (Wire.endTransmission(false) != 0) return false;
+    if (Wire.requestFrom(BQ25620_I2C_ADDR, (uint8_t)1) != 1) return false;
+    val = Wire.read();
+    return true;
+}
+
+static bool bq25620_write8(uint8_t reg, uint8_t val) {
+    Wire.beginTransmission(BQ25620_I2C_ADDR);
+    Wire.write(reg);
+    Wire.write(val);
+    return Wire.endTransmission() == 0;
+}
+
+static bool bq25620_begin(void) {
+    uint8_t adc_ctrl = 0;
+    if (!bq25620_read8(BQ25620_REG_ADC_CONTROL, adc_ctrl)) {
+        return false;
+    }
+    // Enable ADC_EN (bit7)
+    adc_ctrl |= BQ25620_ADC_ENABLE_BIT;
+    if (!bq25620_write8(BQ25620_REG_ADC_CONTROL, adc_ctrl)) {
+        return false;
+    }
+    // Touch function-disable register to confirm comms (keep default)
+    uint8_t dummy;
+    bq25620_read8(BQ25620_REG_ADC_FUNC_DIS0, dummy);
+    return true;
+}
+
+static bool bq25620_read_voltage(float &voltage_out, uint16_t &raw_out) {
+    // VBAT ADC is 12-bit in 2 bytes, MSB first
+    Wire.beginTransmission(BQ25620_I2C_ADDR);
+    Wire.write(BQ25620_REG_VBAT_ADC);
+    if (Wire.endTransmission(false) != 0) return false;
+    if (Wire.requestFrom(BQ25620_I2C_ADDR, (uint8_t)2) != 2) return false;
+    uint8_t msb = Wire.read();
+    uint8_t lsb = Wire.read();
+    uint16_t raw = ((uint16_t)msb << 8) | lsb;
+    raw &= 0x0FFF;  // VBAT ADC is 12-bit
+    // Sanity check: reject impossible values
+    if (raw == 0 || raw > 6000) {  // > ~12V is invalid for 1S
+        return false;
+    }
+    raw_out = raw;
+    voltage_out = raw * BQ25620_ADC_STEP_V; // volts
+    return true;
+}
+
+static uint8_t voltage_to_percent(float v) {
+    if (v <= TX_BATT_EMPTY_V) return 0;
+    if (v >= TX_BATT_FULL_V) return 100;
+    float pct = (v - TX_BATT_EMPTY_V) * 100.0f / (TX_BATT_FULL_V - TX_BATT_EMPTY_V);
+    if (pct < 0) pct = 0;
+    if (pct > 100) pct = 100;
+    return (uint8_t)(pct + 0.5f);
+}
+
+static uint8_t percent_to_bars(uint8_t pct) {
+    if (pct == 0) return 0;
+    if (pct <= 25) return 1;
+    if (pct <= 50) return 2;
+    if (pct <= 75) return 3;
+    return 4;
+}
+
+static void update_tx_battery(void) {
+    // Don't hammer I2C
+    if (millis() - last_tx_batt_read < TX_BATT_READ_INTERVAL) return;
+    last_tx_batt_read = millis();
+    
+    float v = 0.0f;
+    uint16_t raw = 0;
+    if (!bq25620_read_voltage(v, raw)) {
+        // Debug once in a while if reads fail
+        static unsigned long lastFailLog = 0;
+        if (millis() - lastFailLog > 10000) {
+            Serial.println("BQ25620 read failed");
+            lastFailLog = millis();
+        }
+        return;
+    }
+    tx_batt_raw_last = raw;
+    Serial.print("[BQ25620] raw:");
+    Serial.print(raw);
+    Serial.print(" V:");
+    Serial.println(v, 3);
+    tx_batt_voltage = v;
+    tx_batt_percent = voltage_to_percent(v);
+    tx_batt_bars = percent_to_bars(tx_batt_percent);
+    tx_batt_valid = true;
+    tx_batt_low = (v <= TX_BATT_EMPTY_V + 0.05f) || (tx_batt_percent <= 10);
+    
+    // If critically low at startup, we could halt TX here.
+    // Currently we just surface via UI; can be extended to enforce shutdown.
 }

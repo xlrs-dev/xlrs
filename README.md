@@ -81,13 +81,29 @@ The system uses Bluetooth Low Energy with a custom GATT service:
 |------|------|------------|-------------|
 | 0xFF00 | FPV Service | - | Main service UUID |
 | 0xFF01 | TX Char | Write | Channel data (encrypted) |
-| 0xFF02 | RX Char | Notify | Telemetry (future) |
+| 0xFF02 | RX Char | Notify | Battery telemetry |
 | 0xFF03 | Pair Char | Write | Pairing key exchange |
 
 **Frame Format:**
 - Encrypted 8-channel data with sequence number
 - HMAC authentication for security
 - 50Hz update rate (20ms intervals)
+
+## Battery Telemetry
+
+The RX receives battery telemetry from the flight controller via CRSF and sends it to the TX over BLE:
+
+- **Source:** Flight controller sends `CRSF_FRAMETYPE_BATTERY_SENSOR` (0x08) frames
+- **CRSF Wiring:** GP8 (TX to FC), GP9 (RX from FC for telemetry)
+- **Update rate:** Every 10 seconds (to save BLE bandwidth)
+- **Display:** TX OLED shows voltage and remaining percentage
+
+**Telemetry Data:**
+| Field | Format | Description |
+|-------|--------|-------------|
+| Voltage | V × 10 (16-bit BE) | Battery voltage |
+| Current | A × 10 (16-bit BE) | Battery current |
+| Remaining | 8-bit | Battery percentage |
 
 ## Usage
 

@@ -33,7 +33,8 @@
 CrsfSerial::CrsfSerial(HardwareSerial &port, uint32_t baud) :
     _port(port), _crc(0xd5), _baud(baud),
     _lastReceive(0), _lastChannelsPacket(0), _linkIsUp(false),
-    _passthroughBaud(0)
+    _passthroughBaud(0), _batteryVoltage(0), _batteryCurrent(0),
+    _batteryCapacity(0), _batteryRemaining(0)
 {}
 
 void CrsfSerial::begin(uint32_t baud)
@@ -149,6 +150,9 @@ void CrsfSerial::processPacketIn(uint8_t len)
         case CRSF_FRAMETYPE_LINK_STATISTICS:
             packetLinkStatistics(hdr);
             break;
+        case CRSF_FRAMETYPE_BATTERY_SENSOR:
+            packetBattery(hdr);
+            break;
         }
     } // CRSF_ADDRESS_FLIGHT_CONTROLLER
 }
@@ -228,6 +232,33 @@ void CrsfSerial::packetGps(const crsf_header_t *p)
 
     if (onPacketGps)
         onPacketGps(&_gpsSensor);
+}
+
+void CrsfSerial::packetBattery(const crsf_header_t *p)
+{
+    // Battery sensor data is 8 bytes, big-endian
+    // Format: voltage (16-bit), current (16-bit), capacity (24-bit), remaining (8-bit)
+    const uint8_t *data = p->data;
+    
+    // Voltage: V * 10, big-endian
+    uint16_t voltage_raw = (data[0] << 8) | data[1];
+    _batteryVoltage = voltage_raw / 10.0f;
+    
+    // Current: A * 10, big-endian
+    uint16_t current_raw = (data[2] << 8) | data[3];
+    _batteryCurrent = current_raw / 10.0f;
+    
+    // Capacity: mAh, 24-bit big-endian
+    _batteryCapacity = (data[4] << 16) | (data[5] << 8) | data[6];
+    
+    // Remaining: %
+    _batteryRemaining = data[7];
+    
+    // Store raw struct too
+    memcpy(&_batterySensor, data, sizeof(_batterySensor));
+
+    if (onPacketBattery)
+        onPacketBattery(_batteryVoltage, _batteryCurrent, _batteryCapacity, _batteryRemaining);
 }
 
 void CrsfSerial::write(uint8_t b)

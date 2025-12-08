@@ -11,6 +11,10 @@
 
 // Use BTstackLib for GATT server
 #include <BTstackLib.h>
+// Low-level BTstack (for notifications)
+extern "C" {
+#include <btstack.h>
+}
 
 // Low-level includes for BOOTSEL button
 #include "hardware/gpio.h"
@@ -51,6 +55,22 @@ static UUID pairCharUUID("0000FF03-0000-1000-8000-00805F9B34FB");
 bool pairingMode = false;
 unsigned long pairingModeStartTime = 0;
 uint16_t pairCharId = 0;
+uint16_t rxCharId = 0;  // RX characteristic for telemetry notifications
+static hci_con_handle_t att_conn_handle = HCI_CON_HANDLE_INVALID;  // BLE connection handle for notifications
+
+// Battery telemetry state
+float batteryVoltage = 0.0f;
+float batteryCurrent = 0.0f;
+uint32_t batteryCapacity = 0;
+uint8_t batteryRemaining = 0;
+bool batteryDataValid = false;
+unsigned long lastBatteryUpdate = 0;
+unsigned long lastBatteryTxTime = 0;
+const unsigned long BATTERY_TX_INTERVAL_MS = 10000;  // Send battery telemetry every 10 seconds
+
+// Link statistics telemetry state
+crsfLinkStatistics_t lastLinkStats = {0};
+unsigned long lastLinkStatsLog = 0;
 
 // Application state
 CrsfSerial crsf(Serial2, CRSF_BAUDRATE);
@@ -290,6 +310,7 @@ void deviceConnectedCallback(BLEStatus status, BLEDevice *device) {
     (void)device;
     if (status == BLE_STATUS_OK) {
         clientConnected = true;
+        att_conn_handle = device ? device->getHandle() : HCI_CON_HANDLE_INVALID;
         Serial.println("[BLE] Client connected!");
     }
 }
@@ -298,11 +319,103 @@ void deviceConnectedCallback(BLEStatus status, BLEDevice *device) {
 void deviceDisconnectedCallback(BLEDevice *device) {
     (void)device;
     clientConnected = false;
+    att_conn_handle = HCI_CON_HANDLE_INVALID;
     Serial.println("[BLE] Client disconnected!");
     
     // Failsafe - set all channels to center (1500)
     for (int i = 0; i < 8; i++) {
         channels[i] = 1500;
+    }
+}
+
+// ============================================================
+// Battery Telemetry
+// ============================================================
+// Callback when battery telemetry is received from flight controller via CRSF
+void onBatteryTelemetry(float voltage, float current, uint32_t capacity, uint8_t remaining) {
+    batteryVoltage = voltage;
+    batteryCurrent = current;
+    batteryCapacity = capacity;
+    batteryRemaining = remaining;
+    batteryDataValid = true;
+    lastBatteryUpdate = millis();
+    
+    // Debug log occasionally
+    static unsigned long lastLog = 0;
+    if (millis() - lastLog > 10000) {
+        Serial.print("[BATTERY] V:");
+        Serial.print(voltage, 1);
+        Serial.print(" A:");
+        Serial.print(current, 1);
+        Serial.print(" mAh:");
+        Serial.print(capacity);
+        Serial.print(" %:");
+        Serial.println(remaining);
+        lastLog = millis();
+    }
+}
+
+// Link statistics callback (optional telemetry insight)
+void onLinkStats(crsfLinkStatistics_t *ls) {
+    lastLinkStats = *ls;
+    unsigned long now = millis();
+    if (now - lastLinkStatsLog > 2000) { // log every 2s max
+        Serial.print("[CRSF] LQ:");
+        Serial.print(ls->uplink_Link_quality);
+        Serial.print("% RSSI1:");
+        Serial.print(ls->uplink_RSSI_1);
+        Serial.print(" RSSI2:");
+        Serial.print(ls->uplink_RSSI_2);
+        Serial.print(" SNR:");
+        Serial.print(ls->uplink_SNR);
+        Serial.print(" DL_RSSI:");
+        Serial.print(ls->downlink_RSSI);
+        Serial.print(" DL_LQ:");
+        Serial.print(ls->downlink_Link_quality);
+        Serial.print("%");
+        Serial.println();
+        lastLinkStatsLog = now;
+    }
+}
+
+// Send battery telemetry over BLE to TX
+// Format: [voltage_x10 (16-bit BE), current_x10 (16-bit BE), remaining (8-bit)]
+// Total: 5 bytes (keeping it small for BLE efficiency)
+void sendBatteryTelemetry() {
+    if (!clientConnected || !batteryDataValid || rxCharId == 0) {
+        return;
+    }
+    
+    // Rate limit to every 10 seconds
+    if (millis() - lastBatteryTxTime < BATTERY_TX_INTERVAL_MS) {
+        return;
+    }
+    lastBatteryTxTime = millis();
+    
+    // Pack battery data: voltage*10 (16-bit), current*10 (16-bit), remaining (8-bit)
+    uint8_t telemetryData[5];
+    uint16_t voltage_x10 = (uint16_t)(batteryVoltage * 10);
+    uint16_t current_x10 = (uint16_t)(batteryCurrent * 10);
+    
+    // Big-endian encoding
+    telemetryData[0] = (voltage_x10 >> 8) & 0xFF;
+    telemetryData[1] = voltage_x10 & 0xFF;
+    telemetryData[2] = (current_x10 >> 8) & 0xFF;
+    telemetryData[3] = current_x10 & 0xFF;
+    telemetryData[4] = batteryRemaining;
+    
+    // Send notification via low-level BTstack (server notify)
+    if (att_conn_handle == HCI_CON_HANDLE_INVALID) {
+        return;
+    }
+    int result = att_server_notify(att_conn_handle, rxCharId, telemetryData, sizeof(telemetryData));
+    
+    if (result == 0) {
+        Serial.print("[BLE TELEM] Sent battery: ");
+        Serial.print(batteryVoltage, 1);
+        Serial.print("V ");
+        Serial.print(batteryRemaining);
+        Serial.println("%");
     }
 }
 
@@ -356,11 +469,11 @@ void setup() {
     Serial.print("TX char ID: ");
     Serial.println(tx_char_id);
     
-    // Add RX characteristic (Notify) for future use
-    Serial.println("Adding RX characteristic (Notify)...");
-    uint16_t rx_char_id = BTstack.addGATTCharacteristicDynamic(&rxCharUUID, ATT_PROPERTY_NOTIFY, 0);
+    // Add RX characteristic (Notify) for battery telemetry to TX
+    Serial.println("Adding RX characteristic (Notify) for telemetry...");
+    rxCharId = BTstack.addGATTCharacteristicDynamic(&rxCharUUID, ATT_PROPERTY_NOTIFY | ATT_PROPERTY_READ, 0);
     Serial.print("RX char ID: ");
-    Serial.println(rx_char_id);
+    Serial.println(rxCharId);
     
     // Add Pairing characteristic (Write) - for receiving pairing key from TX
     Serial.println("Adding Pairing characteristic (Write)...");
@@ -422,6 +535,12 @@ void setup() {
     Serial2.setRX(CRSF_RX_PIN);
     crsf.begin(CRSF_BAUDRATE);
     
+    // Register battery telemetry callback
+    crsf.onPacketBattery = onBatteryTelemetry;
+    // Register link statistics callback for logging
+    crsf.onPacketLinkStatistics = onLinkStats;
+    Serial.println("Battery telemetry callback registered");
+    
     Serial.print("CRSF on Serial2: TX=GP");
     Serial.print(CRSF_TX_PIN);
     Serial.print(", RX=GP");
@@ -430,6 +549,7 @@ void setup() {
     Serial.println("=== RX Ready ===");
     Serial.println("Waiting for connections...");
     Serial.println("Hold BOOTSEL for 5 seconds to enter pairing mode");
+    Serial.println("Battery telemetry will be sent to TX every 10 seconds");
 }
 
 void loop() {
@@ -475,8 +595,11 @@ void loop() {
         }
     }
     
-    // Process CRSF
+    // Process CRSF (receives telemetry from FC on GP9)
     crsf.loop();
+    
+    // Send battery telemetry to TX over BLE (rate-limited internally to every 10 seconds)
+    sendBatteryTelemetry();
     
     // Send CRSF at 50Hz
     static unsigned long lastCRSF = 0;

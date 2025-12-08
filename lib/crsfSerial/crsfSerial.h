@@ -25,6 +25,15 @@ public:
     int getChannel(unsigned int ch) const { return _channels[ch - 1]; }
     const crsfLinkStatistics_t *getLinkStatistics() const { return &_linkStatistics; }
     const crsf_sensor_gps_t *getGpsSensor() const { return &_gpsSensor; }
+    const crsf_sensor_battery_t *getBatterySensor() const { return &_batterySensor; }
+    // Get battery voltage in V (decoded from big-endian)
+    float getBatteryVoltage() const { return _batteryVoltage; }
+    // Get battery current in A (decoded from big-endian)
+    float getBatteryCurrent() const { return _batteryCurrent; }
+    // Get battery capacity used in mAh (decoded from big-endian)
+    uint32_t getBatteryCapacity() const { return _batteryCapacity; }
+    // Get battery remaining in %
+    uint8_t getBatteryRemaining() const { return _batteryRemaining; }
     bool isLinkUp() const { return _linkIsUp; }
     bool getPassthroughMode() const { return _passthroughBaud != 0; }
     void setPassthroughMode(bool val, uint32_t passthroughBaud = 0);
@@ -38,6 +47,7 @@ public:
     void (*onPacketChannels)();
     void (*onPacketLinkStatistics)(crsfLinkStatistics_t *ls);
     void (*onPacketGps)(crsf_sensor_gps_t *gpsSensor);
+    void (*onPacketBattery)(float voltage, float current, uint32_t capacity, uint8_t remaining);
 
 private:
     HardwareSerial &_port;
@@ -46,6 +56,11 @@ private:
     Crc8 _crc;
     crsfLinkStatistics_t _linkStatistics;
     crsf_sensor_gps_t _gpsSensor;
+    crsf_sensor_battery_t _batterySensor;
+    float _batteryVoltage;
+    float _batteryCurrent;
+    uint32_t _batteryCapacity;
+    uint8_t _batteryRemaining;
     uint32_t _baud;
     uint32_t _lastReceive;
     uint32_t _lastChannelsPacket;
@@ -64,4 +79,5 @@ private:
     void packetChannelsPacked(const crsf_header_t *p);
     void packetLinkStatistics(const crsf_header_t *p);
     void packetGps(const crsf_header_t *p);
+    void packetBattery(const crsf_header_t *p);
 };

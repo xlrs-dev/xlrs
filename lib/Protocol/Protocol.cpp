@@ -2,7 +2,7 @@
 #include "Security.h"
 #include <string.h>
 
-void Protocol::encodeFrame(uint16_t channels[NUM_CHANNELS], uint16_t sequence, Security* security, uint8_t* frame) {
+void Protocol::encodeFrame(uint16_t channels[NUM_CHANNELS], uint16_t sequence, uint32_t timestampMs, Security* security, uint8_t* frame) {
     // Encode channel data (first 16 bytes)
     for (int i = 0; i < NUM_CHANNELS; i++) {
         // Clamp channel values to valid range
@@ -19,18 +19,24 @@ void Protocol::encodeFrame(uint16_t channels[NUM_CHANNELS], uint16_t sequence, S
     frame[CHANNEL_DATA_SIZE] = (sequence >> 8) & 0xFF;
     frame[CHANNEL_DATA_SIZE + 1] = sequence & 0xFF;
     
-    // Calculate HMAC for channel data + sequence (bytes 0-17)
+    // Encode TX timestamp in milliseconds (bytes 18-21), big-endian
+    frame[CHANNEL_DATA_SIZE + SEQUENCE_SIZE + 0] = (timestampMs >> 24) & 0xFF;
+    frame[CHANNEL_DATA_SIZE + SEQUENCE_SIZE + 1] = (timestampMs >> 16) & 0xFF;
+    frame[CHANNEL_DATA_SIZE + SEQUENCE_SIZE + 2] = (timestampMs >> 8) & 0xFF;
+    frame[CHANNEL_DATA_SIZE + SEQUENCE_SIZE + 3] = timestampMs & 0xFF;
+    
+    // Calculate HMAC for channel data + sequence + timestamp (bytes 0-21)
     if (security) {
         uint8_t hmac[HMAC_SIZE];
-        security->calculateHMAC(frame, CHANNEL_DATA_SIZE + SEQUENCE_SIZE, hmac);
-        memcpy(frame + CHANNEL_DATA_SIZE + SEQUENCE_SIZE, hmac, HMAC_SIZE);
+        security->calculateHMAC(frame, CHANNEL_DATA_SIZE + SEQUENCE_SIZE + TIMESTAMP_SIZE, hmac);
+        memcpy(frame + CHANNEL_DATA_SIZE + SEQUENCE_SIZE + TIMESTAMP_SIZE, hmac, HMAC_SIZE);
     } else {
         // No security - fill with zeros (for testing)
-        memset(frame + CHANNEL_DATA_SIZE + SEQUENCE_SIZE, 0, HMAC_SIZE);
+        memset(frame + CHANNEL_DATA_SIZE + SEQUENCE_SIZE + TIMESTAMP_SIZE, 0, HMAC_SIZE);
     }
 }
 
-bool Protocol::decodeFrame(const uint8_t* frame, uint16_t channels[NUM_CHANNELS], uint16_t* sequence, Security* security, uint16_t* lastSequence) {
+bool Protocol::decodeFrame(const uint8_t* frame, uint16_t channels[NUM_CHANNELS], uint16_t* sequence, uint32_t* timestampMs, Security* security, uint16_t* lastSequence) {
     if (!validateFrame(frame)) {
         return false;
     }
@@ -51,13 +57,22 @@ bool Protocol::decodeFrame(const uint8_t* frame, uint16_t channels[NUM_CHANNELS]
         *sequence = (frame[CHANNEL_DATA_SIZE] << 8) | frame[CHANNEL_DATA_SIZE + 1];
     }
     
+    // Decode timestamp (ms)
+    if (timestampMs) {
+        *timestampMs =
+            (static_cast<uint32_t>(frame[CHANNEL_DATA_SIZE + SEQUENCE_SIZE + 0]) << 24) |
+            (static_cast<uint32_t>(frame[CHANNEL_DATA_SIZE + SEQUENCE_SIZE + 1]) << 16) |
+            (static_cast<uint32_t>(frame[CHANNEL_DATA_SIZE + SEQUENCE_SIZE + 2]) << 8) |
+            static_cast<uint32_t>(frame[CHANNEL_DATA_SIZE + SEQUENCE_SIZE + 3]);
+    }
+    
     // Verify HMAC if security is enabled
     if (security) {
         uint8_t receivedHmac[HMAC_SIZE];
-        memcpy(receivedHmac, frame + CHANNEL_DATA_SIZE + SEQUENCE_SIZE, HMAC_SIZE);
+        memcpy(receivedHmac, frame + CHANNEL_DATA_SIZE + SEQUENCE_SIZE + TIMESTAMP_SIZE, HMAC_SIZE);
         
         // Verify HMAC
-        if (!security->verifyHMAC(frame, CHANNEL_DATA_SIZE + SEQUENCE_SIZE, receivedHmac)) {
+        if (!security->verifyHMAC(frame, CHANNEL_DATA_SIZE + SEQUENCE_SIZE + TIMESTAMP_SIZE, receivedHmac)) {
             return false;  // HMAC verification failed
         }
         

@@ -39,12 +39,14 @@ extern "C" {
 #define FPV_TX_CHAR_UUID16     0xFF01  // Write characteristic (channel data)
 #define FPV_RX_CHAR_UUID16     0xFF02  // Notify characteristic (future)
 #define FPV_PAIR_CHAR_UUID16   0xFF03  // Pairing key characteristic (write)
+#define FPV_TIME_CHAR_UUID16   0xFF04  // Time sync characteristic (write)
 
 // UUID objects for BTstackLib
 static UUID fpvServiceUUID("0000FF00-0000-1000-8000-00805F9B34FB");
 static UUID txCharUUID("0000FF01-0000-1000-8000-00805F9B34FB");
 static UUID rxCharUUID("0000FF02-0000-1000-8000-00805F9B34FB");
 static UUID pairCharUUID("0000FF03-0000-1000-8000-00805F9B34FB");
+static UUID timeCharUUID("0000FF04-0000-1000-8000-00805F9B34FB");
 
 // Pairing mode configuration
 #define PAIRING_MODE_TIMEOUT_MS 60000   // 60 seconds pairing window
@@ -56,6 +58,7 @@ bool pairingMode = false;
 unsigned long pairingModeStartTime = 0;
 uint16_t pairCharId = 0;
 uint16_t rxCharId = 0;  // RX characteristic for telemetry notifications
+uint16_t timeCharId = 0; // Time sync characteristic for RX clock alignment
 static hci_con_handle_t att_conn_handle = HCI_CON_HANDLE_INVALID;  // BLE connection handle for notifications
 
 // Battery telemetry state
@@ -82,11 +85,44 @@ uint16_t channels[8] = {1500, 1500, 1500, 1500, 1500, 1500, 1500, 1500};
 
 // Connection state
 bool clientConnected = false;
-unsigned long lastDataReceived = 0;
-const unsigned long TIMEOUT_MS = 1000;
+unsigned long lastDataReceived = 0;      // Last fresh packet applied (ms, RX clock)
+unsigned long lastFrameArrivalMs = 0;    // Last frame arrival (ms, RX clock)
+uint32_t lastRxAlignedMs = 0;            // Last TX timestamp aligned to RX clock
+uint32_t lastTxTimestampMs = 0;          // Raw TX timestamp from last frame
+uint32_t lastPacketAgeMs = 0;            // Age of most recent frame at reception
+int32_t txToRxOffsetMs = 0;              // RX clock - TX clock (ms)
+bool timeSynced = false;
+const uint32_t PACKET_STALE_THRESHOLD_MS = 150;
+const uint32_t PACKET_FAILSAFE_THRESHOLD_MS = 600;
+const uint16_t FAILSAFE_CENTER_US = CHANNEL_CENTER;
+const uint16_t FAILSAFE_RAMP_STEP_US = 10;
+unsigned long lastFailsafeLogMs = 0;
+unsigned long lastStaleLogMs = 0;
 
 // Security state
 uint16_t lastSequence = 0;
+
+// Helper to clamp signed age calculations to unsigned milliseconds
+static uint32_t clampAgeToMs(int32_t ageMs) {
+    return (ageMs < 0) ? 0u : static_cast<uint32_t>(ageMs);
+}
+
+// Gradually move roll/pitch/yaw back to center for failsafe
+static void rampChannelsToFailsafe() {
+    auto ramp = [](uint16_t& value, uint16_t target) {
+        if (value < target) {
+            uint16_t delta = target - value;
+            value += (delta < FAILSAFE_RAMP_STEP_US) ? delta : FAILSAFE_RAMP_STEP_US;
+        } else if (value > target) {
+            uint16_t delta = value - target;
+            value -= (delta < FAILSAFE_RAMP_STEP_US) ? delta : FAILSAFE_RAMP_STEP_US;
+        }
+    };
+    
+    ramp(channels[0], FAILSAFE_CENTER_US); // Roll
+    ramp(channels[1], FAILSAFE_CENTER_US); // Pitch
+    ramp(channels[2], FAILSAFE_CENTER_US); // Yaw
+}
 
 // ============================================================
 // LED Control for Pico W
@@ -270,11 +306,65 @@ int gattWriteCallback(uint16_t characteristic_id, uint8_t *buffer, uint16_t buff
         }
     }
     
+    // Handle time sync writes (TX sends its millis() as big-endian uint32)
+    if (characteristic_id == timeCharId) {
+        if (buffer_size != 4) {
+            Serial.print("Unexpected time sync size: ");
+            Serial.println(buffer_size);
+            return 1;
+        }
+        
+        uint32_t txTimestampMs =
+            (static_cast<uint32_t>(buffer[0]) << 24) |
+            (static_cast<uint32_t>(buffer[1]) << 16) |
+            (static_cast<uint32_t>(buffer[2]) << 8) |
+            static_cast<uint32_t>(buffer[3]);
+        
+        unsigned long now = millis();
+        txToRxOffsetMs = static_cast<int32_t>(now) - static_cast<int32_t>(txTimestampMs);
+        timeSynced = true;
+        lastTxTimestampMs = txTimestampMs;
+        lastRxAlignedMs = static_cast<uint32_t>(static_cast<int32_t>(txTimestampMs) + txToRxOffsetMs);
+        lastPacketAgeMs = clampAgeToMs(static_cast<int32_t>(now) - static_cast<int32_t>(lastRxAlignedMs));
+        lastFrameArrivalMs = now;
+        
+        Serial.print("Time sync received. Offset (rx-tx): ");
+        Serial.print(txToRxOffsetMs);
+        Serial.println(" ms");
+        return 0;
+    }
+    
     // Process channel data
     if (buffer_size == FRAME_SIZE) {
         uint16_t sequence = 0;
-        if (Protocol::decodeFrame(buffer, channels, &sequence, &security, &lastSequence)) {
-            lastDataReceived = millis();
+        uint32_t txTimestampMs = 0;
+        uint16_t decodedChannels[NUM_CHANNELS] = {0};
+        if (Protocol::decodeFrame(buffer, decodedChannels, &sequence, &txTimestampMs, &security, &lastSequence)) {
+            unsigned long now = millis();
+            lastFrameArrivalMs = now;
+            
+            uint32_t alignedRxTimeMs = timeSynced
+                ? static_cast<uint32_t>(static_cast<int32_t>(txTimestampMs) + txToRxOffsetMs)
+                : now;
+            uint32_t ageMs = clampAgeToMs(static_cast<int32_t>(now) - static_cast<int32_t>(alignedRxTimeMs));
+            
+            lastTxTimestampMs = txTimestampMs;
+            lastRxAlignedMs = alignedRxTimeMs;
+            lastPacketAgeMs = ageMs;
+            
+            if (ageMs <= PACKET_STALE_THRESHOLD_MS) {
+                // Fresh packet - apply channels
+                memcpy(channels, decodedChannels, sizeof(channels));
+                lastDataReceived = now;
+            } else {
+                // Stale packet - hold last channels
+                if (now - lastStaleLogMs > 1000) {
+                    Serial.print("Stale packet ignored, age=");
+                    Serial.print(ageMs);
+                    Serial.println("ms (holding last targets)");
+                    lastStaleLogMs = now;
+                }
+            }
             
             static unsigned long lastPrint = 0;
             if (millis() - lastPrint > 1000) {
@@ -321,6 +411,15 @@ void deviceDisconnectedCallback(BLEDevice *device) {
     clientConnected = false;
     att_conn_handle = HCI_CON_HANDLE_INVALID;
     Serial.println("[BLE] Client disconnected!");
+    
+    // Reset timing/timesync state
+    timeSynced = false;
+    txToRxOffsetMs = 0;
+    lastRxAlignedMs = 0;
+    lastTxTimestampMs = 0;
+    lastPacketAgeMs = 0;
+    lastDataReceived = 0;
+    lastFrameArrivalMs = 0;
     
     // Failsafe - set all channels to center (1500)
     for (int i = 0; i < 8; i++) {
@@ -481,6 +580,12 @@ void setup() {
     Serial.print("Pair char ID: ");
     Serial.println(pairCharId);
     
+    // Add Time Sync characteristic (Write) so TX can align clocks
+    Serial.println("Adding Time Sync characteristic (Write)...");
+    timeCharId = BTstack.addGATTCharacteristicDynamic(&timeCharUUID, ATT_PROPERTY_WRITE | ATT_PROPERTY_WRITE_WITHOUT_RESPONSE, 0);
+    Serial.print("Time char ID: ");
+    Serial.println(timeCharId);
+    
     // Initialize BTstack
     Serial.println("Calling BTstack.setup()...");
     BTstack.setup();
@@ -562,10 +667,12 @@ void loop() {
     // Update pairing mode state (timeout, LED blink)
     updatePairingMode();
     
+    unsigned long now = millis();
+    
     // Heartbeat
     static unsigned long lastHeartbeat = 0;
-    if (millis() - lastHeartbeat > 5000) {
-        lastHeartbeat = millis();
+    if (now - lastHeartbeat > 5000) {
+        lastHeartbeat = now;
         Serial.print("RX alive, connected: ");
         Serial.print(clientConnected ? "Yes" : "No");
         if (pairingMode) {
@@ -575,23 +682,37 @@ void loop() {
         }
         Serial.print(", last data: ");
         if (lastDataReceived > 0) {
-            Serial.print(millis() - lastDataReceived);
-            Serial.println("ms ago");
+            Serial.print(now - lastDataReceived);
+            Serial.println("ms ago (fresh)");
+        } else if (lastFrameArrivalMs > 0) {
+            Serial.print(now - lastFrameArrivalMs);
+            Serial.println("ms ago (stale)");
         } else {
             Serial.println("never");
         }
+        Serial.print("Last packet age: ");
+        Serial.print(lastPacketAgeMs);
+        Serial.println("ms");
     }
     
-    // Check for timeout
-    if (clientConnected && lastDataReceived > 0 && (millis() - lastDataReceived > TIMEOUT_MS)) {
-        static unsigned long lastTimeout = 0;
-        if (millis() - lastTimeout > 5000) {
-            Serial.println("*** TIMEOUT ***");
-            lastTimeout = millis();
-        }
-        // Failsafe - set all channels to center (1500)
-        for (int i = 0; i < 8; i++) {
-            channels[i] = 1500;
+    // Evaluate packet age for stale/failsafe handling
+    uint32_t ageSinceTx = (lastRxAlignedMs != 0)
+        ? clampAgeToMs(static_cast<int32_t>(now) - static_cast<int32_t>(lastRxAlignedMs))
+        : 0;
+    if (clientConnected && lastRxAlignedMs != 0) {
+        if (ageSinceTx > PACKET_FAILSAFE_THRESHOLD_MS) {
+            rampChannelsToFailsafe();
+            if (now - lastFailsafeLogMs > 500) {
+                Serial.print("Failsafe ramp active, age=");
+                Serial.print(ageSinceTx);
+                Serial.println("ms");
+                lastFailsafeLogMs = now;
+            }
+        } else if (ageSinceTx > PACKET_STALE_THRESHOLD_MS && now - lastStaleLogMs > 1000) {
+            Serial.print("Holding last targets, age=");
+            Serial.print(ageSinceTx);
+            Serial.println("ms");
+            lastStaleLogMs = now;
         }
     }
     

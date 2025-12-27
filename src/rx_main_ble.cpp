@@ -357,12 +357,20 @@ int gattWriteCallback(uint16_t characteristic_id, uint8_t *buffer, uint16_t buff
                 memcpy(channels, decodedChannels, sizeof(channels));
                 lastDataReceived = now;
             } else {
-                // Stale packet - hold last channels
+                // Stale packet - return to failsafe / center
+                for (int i = 0; i < 8; i++) {
+                    channels[i] = FAILSAFE_CENTER_US;
+                }
                 if (now - lastStaleLogMs > 1000) {
                     Serial.print("Stale packet ignored, age=");
                     Serial.print(ageMs);
                     Serial.println("ms (holding last targets)");
                     lastStaleLogMs = now;
+                }
+                if (Serial) {
+                    Serial.print("Stale packet ignored, age=");
+                    Serial.print(ageMs);
+                    Serial.println("ms (returning to failsafe)");
                 }
             }
             

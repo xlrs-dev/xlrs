@@ -1,7 +1,7 @@
 #pragma once
 
 #include <Arduino.h>
-#include <crc8.h>
+#include <../crc8/crc8.h>
 #include "crsf_protocol.h"
 
 enum eFailsafeAction { fsaNoPulses, fsaHold };

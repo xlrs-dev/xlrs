@@ -66,7 +66,9 @@
 #endif
 
 #ifndef SX128X_FLRC_CR
-#define SX128X_FLRC_CR RADIOLIB_SX128X_FLRC_CR_1_2
+// FLRC coding rate: denominator value (2 = 1/2, 4 = 3/4, 1 = 1)
+// Using 2 (1/2) as default - most compatible
+#define SX128X_FLRC_CR 2
 #endif
 
 #ifndef SX128X_FLRC_PREAMBLE_BITS

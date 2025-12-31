@@ -1,5 +1,6 @@
 // RX Side using SX128x (RadioLib) instead of BLE.
 #include <Arduino.h>
+#include <RadioLib.h>
 #include <string.h>
 #include <EEPROM.h>
 
@@ -8,34 +9,17 @@
 #include "crsfSerial.h"
 #include "crsf_protocol.h"
 #include "SX128xLink.h"
-
-#include "hardware/gpio.h"
-#include "hardware/sync.h"
-#include "hardware/structs/ioqspi.h"
-#include "hardware/structs/sio.h"
-#include "pico/cyw43_arch.h"
+#include "pairing.h"
+#include "PacketHandler.h"
 
 // CRSF Serial pins
 #define CRSF_TX_PIN 8
 #define CRSF_RX_PIN 9
 
-// Pairing mode configuration
-#define PAIRING_MODE_TIMEOUT_MS 60000   // 60 seconds pairing window
-#define BOOTSEL_HOLD_TIME_MS    5000    // 5 seconds to enter pairing mode
-#define PAIRING_KEY_SIZE        16
-
-// Battery telemetry
-const unsigned long BATTERY_TX_INTERVAL_MS = 10000;  // Send battery telemetry every 10 seconds
 
 // Link timeout
 const unsigned long TIMEOUT_MS = 1000;
-
-// Radio message types
-enum RadioMsgType : uint8_t {
-    MSG_CHANNELS = 0x01,
-    MSG_BATTERY  = 0x02,
-    MSG_PAIRING  = 0x03,
-};
+const unsigned long CONNECTION_TIMEOUT_MS = 2000;  // Connection lost detection
 
 // Application state
 CrsfSerial crsf(Serial2, CRSF_BAUDRATE);
@@ -45,13 +29,26 @@ SX128xLink radio;
 // Channel values received from TX
 uint16_t channels[8] = {1500, 1500, 1500, 1500, 1500, 1500, 1500, 1500};
 
-// Connection state
+// Connection state machine
+ConnectionState connectionState = STATE_DISCONNECTED;
 unsigned long lastDataReceived = 0;
+unsigned long lastSyncReceived = 0;
 uint16_t lastSequence = 0;
+uint16_t syncSequence = 0;
+
+// Device IDs
+uint8_t rxDeviceId[DEVICE_ID_SIZE];
+uint8_t pairedTxDeviceId[DEVICE_ID_SIZE];
+bool hasPairedTxId = false;
 
 // Pairing mode state
 bool pairingMode = false;
 unsigned long pairingModeStartTime = 0;
+
+// Connection quality metrics
+int16_t lastRSSI = 0;
+float lastSNR = 0.0f;
+unsigned long connectionStartTime = 0;
 
 // Battery telemetry state
 float batteryVoltage = 0.0f;
@@ -67,14 +64,10 @@ crsfLinkStatistics_t lastLinkStats = {0};
 unsigned long lastLinkStatsLog = 0;
 
 // Forward declarations
-void setLED(bool state);
-bool get_bootsel_button();
-void enterPairingMode();
-void exitPairingMode(bool success);
-void checkBootselButton();
-void updatePairingMode();
-void sendBatteryTelemetry();
-void handleRadioRx();
+void updateConnectionState();
+bool isConnectionReady();
+bool isPaired();
+void detectConnectionLoss();
 
 // ============================================================
 // Battery / link callbacks from CRSF
@@ -135,17 +128,58 @@ void setup() {
     Serial.println("=== FPV Receiver (SX128x) ===");
     Serial.println("Initializing...");
 
-    if (cyw43_arch_init()) {
-        Serial.println("Failed to init CYW43");
-    } else {
-        cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0);
-    }
-
-    // Initialize security
+    // Initialize security (loads device ID and pairing key if exists)
     if (security.begin()) {
         Serial.println("Security initialized");
+        
+        // Get this device's ID
+        if (security.getDeviceId(rxDeviceId)) {
+            Serial.print("RX Device ID: ");
+            for (int i = 0; i < DEVICE_ID_SIZE; i++) {
+                if (rxDeviceId[i] < 0x10) Serial.print("0");
+                Serial.print(rxDeviceId[i], HEX);
+            }
+            Serial.println();
+        }
+        
+        // Get binding UID
+        uint8_t bindingUID[BINDING_UID_SIZE];
+        if (security.getBindingUID(bindingUID)) {
+            Serial.print("Binding UID: ");
+            for (int i = 0; i < BINDING_UID_SIZE; i++) {
+                if (bindingUID[i] < 0x10) Serial.print("0");
+                Serial.print(bindingUID[i], HEX);
+            }
+            Serial.print(" (from phrase: ");
+            Serial.print(DEFAULT_BINDING_PHRASE);
+            Serial.println(")");
+        } else {
+            Serial.println("WARNING: No binding UID!");
+        }
+        
+        // Check if we have a paired TX device ID
+        if (security.getPairedDeviceId(pairedTxDeviceId)) {
+            hasPairedTxId = true;
+            Serial.print("Paired TX Device ID: ");
+            for (int i = 0; i < DEVICE_ID_SIZE; i++) {
+                if (pairedTxDeviceId[i] < 0x10) Serial.print("0");
+                Serial.print(pairedTxDeviceId[i], HEX);
+            }
+            Serial.println();
+        }
+        
+        // Check pairing status
+        if (isPaired()) {
+            Serial.println("Already paired - ready to connect");
+            connectionState = STATE_CONNECTING;
+        } else {
+            Serial.println("Not paired - enter pairing mode to connect");
+            Serial.println("Hold BOOTSEL for 5 seconds to enter pairing mode");
+            connectionState = STATE_DISCONNECTED;
+        }
     } else {
         Serial.println("Security initialization failed!");
+        connectionState = STATE_DISCONNECTED;
     }
 
     // Initialize radio
@@ -175,18 +209,63 @@ void setup() {
 // Loop
 // ============================================================
 void loop() {
+    // Update connection state machine
+    updateConnectionState();
+    
     // Process pairing button
-    checkBootselButton();
-    updatePairingMode();
+    Pairing::checkBootselButton(&pairingMode, &pairingModeStartTime);
+    Pairing::updatePairingMode(&pairingMode, pairingModeStartTime);
 
     // Handle radio RX
-    handleRadioRx();
+    SX128xPacket pkt;
+    if (radio.receive(pkt) && pkt.length >= 1) {
+        lastRSSI = pkt.rssi;
+        lastSNR = pkt.snr;
+        
+        uint8_t type = pkt.data[0];
+        const uint8_t* payload = pkt.data + 1;
+        size_t payload_len = pkt.length - 1;
+        
+        switch (type) {
+            case MSG_CHANNELS:
+                // Handle channel data
+                PacketHandler::handleRadioRxRx(&radio, &security, pairedTxDeviceId, hasPairedTxId,
+                                                channels, &lastSequence, &lastDataReceived,
+                                                &lastRSSI, &lastSNR, connectionState);
+                break;
+            case MSG_PAIRING:
+                // Handle pairing packet
+                if (Pairing::handlePairingPacket(payload, payload_len, &security, &radio,
+                                                  rxDeviceId, pairedTxDeviceId, &hasPairedTxId,
+                                                  &pairingMode)) {
+                    connectionState = STATE_CONNECTING;
+                }
+                break;
+            case MSG_SYNC:
+                // Handle sync packet
+                if (PacketHandler::handleSyncPacket(payload, payload_len, &security,
+                                                      pairedTxDeviceId, hasPairedTxId,
+                                                      &syncSequence, &lastSyncReceived)) {
+                    // Send sync ACK
+                    PacketHandler::sendSyncAck(&radio, &security, rxDeviceId, syncSequence);
+                }
+                break;
+            case MSG_BATTERY:
+                // Battery telemetry from TX (not used on RX side)
+                break;
+            default:
+                break;
+        }
+    }
+    
+    // Detect connection loss
+    detectConnectionLoss();
 
-    // Check for timeout
-    if (lastDataReceived > 0 && (millis() - lastDataReceived > TIMEOUT_MS)) {
+    // Check for timeout (only if connected)
+    if (connectionState == STATE_CONNECTED && lastDataReceived > 0 && (millis() - lastDataReceived > TIMEOUT_MS)) {
         static unsigned long lastTimeout = 0;
         if (millis() - lastTimeout > 5000) {
-            Serial.println("*** TIMEOUT ***");
+            Serial.println("*** DATA TIMEOUT ***");
             lastTimeout = millis();
         }
         for (int i = 0; i < 8; i++) {
@@ -198,7 +277,9 @@ void loop() {
     crsf.loop();
 
     // Send battery telemetry to TX over radio (rate-limited)
-    sendBatteryTelemetry();
+    PacketHandler::sendBatteryTelemetry(&radio, batteryVoltage, batteryCurrent,
+                                         batteryRemaining, batteryDataValid,
+                                         &lastBatteryTxTime);
 
     // Send CRSF at 50Hz
     static unsigned long lastCRSF = 0;
@@ -234,192 +315,95 @@ void loop() {
     }
 }
 
-// ============================================================
-// Radio RX handler
-// ============================================================
-void handleRadioRx() {
-    SX128xPacket pkt;
-    if (!radio.receive(pkt)) {
-        return;
-    }
-    if (pkt.length < 1) {
-        return;
-    }
 
-    uint8_t type = pkt.data[0];
-    const uint8_t* payload = pkt.data + 1;
-    size_t payload_len = pkt.length - 1;
+// ============================================================
+// Connection state management
+// ============================================================
+bool isPaired() {
+    return security.hasPairingKey() && hasPairedTxId;
+}
 
-    switch (type) {
-        case MSG_CHANNELS: {
-            if (payload_len != FRAME_SIZE) {
-                return;
+bool isConnectionReady() {
+    return isPaired() && connectionState == STATE_CONNECTED && 
+           (millis() - lastDataReceived < CONNECTION_TIMEOUT_MS);
+}
+
+void updateConnectionState() {
+    static unsigned long lastStateLog = 0;
+    
+    // State transitions
+    switch (connectionState) {
+        case STATE_DISCONNECTED:
+            if (pairingMode) {
+                connectionState = STATE_PAIRING;
+                Serial.println("[STATE] DISCONNECTED -> PAIRING");
+            } else if (isPaired()) {
+                connectionState = STATE_CONNECTING;
+                Serial.println("[STATE] DISCONNECTED -> CONNECTING");
             }
-            uint16_t sequence = 0;
-            if (Protocol::decodeFrame(payload, channels, &sequence, &security, &lastSequence)) {
-                lastDataReceived = millis();
-                static unsigned long lastPrint = 0;
-                if (millis() - lastPrint > 1000) {
-                    Serial.print("Channels: ");
-                    for (int i = 0; i < 8; i++) {
-                        Serial.print(channels[i]);
-                        Serial.print(" ");
-                    }
-                    Serial.print(" Seq: ");
-                    Serial.println(sequence);
-                    lastPrint = millis();
-                }
-                setLED(true);
+            break;
+            
+        case STATE_PAIRING:
+            if (!pairingMode && isPaired()) {
+                connectionState = STATE_CONNECTING;
+                Serial.println("[STATE] PAIRING -> CONNECTING");
+            }
+            break;
+            
+        case STATE_CONNECTING:
+            // Wait for sync handshake to complete
+            if (lastSyncReceived > 0 && (millis() - lastSyncReceived < 1000)) {
+                connectionState = STATE_CONNECTED;
+                connectionStartTime = millis();
+                Serial.println("[STATE] CONNECTING -> CONNECTED");
+            }
+            break;
+            
+        case STATE_CONNECTED:
+            // Stay connected as long as we receive data
+            break;
+            
+        case STATE_LOST:
+            // Try to reconnect
+            if (isPaired()) {
+                connectionState = STATE_CONNECTING;
+                Serial.println("[STATE] LOST -> CONNECTING (reconnecting)");
             } else {
-                Serial.println("Invalid frame (security check failed)");
+                connectionState = STATE_DISCONNECTED;
+                Serial.println("[STATE] LOST -> DISCONNECTED (no pairing)");
             }
             break;
+    }
+    
+    // Log state periodically
+    if (millis() - lastStateLog > 10000) {
+        const char* stateNames[] = {"DISCONNECTED", "PAIRING", "CONNECTING", "CONNECTED", "LOST"};
+        Serial.print("[STATE] Current: ");
+        Serial.print(stateNames[connectionState]);
+        if (connectionState == STATE_CONNECTED) {
+            Serial.print(" (RSSI: ");
+            Serial.print(lastRSSI);
+            Serial.print(", SNR: ");
+            Serial.print(lastSNR);
+            Serial.print(")");
         }
-        case MSG_PAIRING: {
-            if (!pairingMode || payload_len != PAIRING_KEY_SIZE) {
-                return;
-            }
-            if (security.setPairingKey(payload)) {
-                Serial.println("Pairing key saved");
-                exitPairingMode(true);
-            } else {
-                Serial.println("Failed to save pairing key");
-            }
-            break;
+        Serial.println();
+        lastStateLog = millis();
+    }
+}
+
+void detectConnectionLoss() {
+    if (connectionState == STATE_CONNECTED) {
+        // Check if we haven't received data or sync for too long
+        unsigned long timeSinceData = lastDataReceived > 0 ? (millis() - lastDataReceived) : CONNECTION_TIMEOUT_MS;
+        unsigned long timeSinceSync = lastSyncReceived > 0 ? (millis() - lastSyncReceived) : CONNECTION_TIMEOUT_MS;
+        
+        if (timeSinceData > CONNECTION_TIMEOUT_MS && timeSinceSync > CONNECTION_TIMEOUT_MS) {
+            connectionState = STATE_LOST;
+            Serial.println("[STATE] CONNECTED -> LOST (timeout)");
         }
-        default:
-            break;
     }
 }
 
-// ============================================================
-// Battery telemetry back to TX
-// ============================================================
-void sendBatteryTelemetry() {
-    if (!batteryDataValid) return;
-    if (!radio.isReady()) return;
-    if (millis() - lastBatteryTxTime < BATTERY_TX_INTERVAL_MS) return;
-    lastBatteryTxTime = millis();
-
-    uint8_t packet[1 + 5];
-    uint16_t voltage_x10 = (uint16_t)(batteryVoltage * 10);
-    uint16_t current_x10 = (uint16_t)(batteryCurrent * 10);
-    packet[0] = MSG_BATTERY;
-    packet[1] = (voltage_x10 >> 8) & 0xFF;
-    packet[2] = voltage_x10 & 0xFF;
-    packet[3] = (current_x10 >> 8) & 0xFF;
-    packet[4] = current_x10 & 0xFF;
-    packet[5] = batteryRemaining;
-
-    if (radio.send(packet, sizeof(packet))) {
-        Serial.print("[RADIO TELEM] Sent battery: ");
-        Serial.print(batteryVoltage, 1);
-        Serial.print("V ");
-        Serial.print(batteryRemaining);
-        Serial.println("%");
-    }
-}
-
-// ============================================================
-// LED control (Pico W)
-// ============================================================
-void setLED(bool state) {
-    cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, state ? 1 : 0);
-}
-
-// ============================================================
-// BOOTSEL Button Reading (RP2040-specific)
-// ============================================================
-bool __no_inline_not_in_flash_func(get_bootsel_button)() {
-    const uint CS_PIN_INDEX = 1;
-
-    // Must disable interrupts, as interrupt handlers may be in flash
-    uint32_t flags = save_and_disable_interrupts();
-
-    // Set chip select to Hi-Z
-    hw_write_masked(&ioqspi_hw->io[CS_PIN_INDEX].ctrl,
-                    GPIO_OVERRIDE_LOW << IO_QSPI_GPIO_QSPI_SS_CTRL_OEOVER_LSB,
-                    IO_QSPI_GPIO_QSPI_SS_CTRL_OEOVER_BITS);
-
-    // Brief delay for pin to settle
-    for (volatile int i = 0; i < 1000; ++i);
-
-    // Read the pin state (low = pressed)
-    bool button_state = !(sio_hw->gpio_hi_in & (1u << CS_PIN_INDEX));
-
-    // Restore chip select to normal operation
-    hw_write_masked(&ioqspi_hw->io[CS_PIN_INDEX].ctrl,
-                    GPIO_OVERRIDE_NORMAL << IO_QSPI_GPIO_QSPI_SS_CTRL_OEOVER_LSB,
-                    IO_QSPI_GPIO_QSPI_SS_CTRL_OEOVER_BITS);
-
-    restore_interrupts(flags);
-
-    return button_state;
-}
-
-// ============================================================
-// Pairing helpers
-// ============================================================
-void enterPairingMode() {
-    pairingMode = true;
-    pairingModeStartTime = millis();
-
-    Serial.println("*** PAIRING MODE ACTIVE ***");
-    Serial.println("Waiting for TX to send pairing key...");
-    Serial.print("Timeout in ");
-    Serial.print(PAIRING_MODE_TIMEOUT_MS / 1000);
-    Serial.println(" seconds");
-
-    setLED(true);
-}
-
-void exitPairingMode(bool success) {
-    pairingMode = false;
-
-    if (success) {
-        Serial.println("*** PAIRING SUCCESSFUL ***");
-        setLED(true);
-        delay(500);
-        setLED(false);
-    } else {
-        Serial.println("*** PAIRING MODE TIMEOUT ***");
-        setLED(false);
-    }
-}
-
-void checkBootselButton() {
-    static unsigned long lastCheck = 0;
-    if (millis() - lastCheck < 50) return;
-    lastCheck = millis();
-
-    static unsigned long buttonPressStart = 0;
-    static bool buttonWasPressed = false;
-
-    bool buttonPressed = get_bootsel_button();
-
-    if (buttonPressed && !buttonWasPressed) {
-        buttonPressStart = millis();
-        buttonWasPressed = true;
-    } else if (buttonPressed && buttonWasPressed) {
-        unsigned long holdTime = millis() - buttonPressStart;
-        if (holdTime > BOOTSEL_HOLD_TIME_MS && !pairingMode) {
-            enterPairingMode();
-        }
-    } else if (!buttonPressed && buttonWasPressed) {
-        buttonWasPressed = false;
-    }
-}
-
-void updatePairingMode() {
-    if (!pairingMode) return;
-    if (millis() - pairingModeStartTime > PAIRING_MODE_TIMEOUT_MS) {
-        exitPairingMode(false);
-        return;
-    }
-
-    // Fast blink LED in pairing mode
-    bool newLedState = (millis() / 100) % 2;
-    setLED(newLedState);
-}
 
 

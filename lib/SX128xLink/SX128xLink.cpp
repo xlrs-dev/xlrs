@@ -1,5 +1,6 @@
 // SX128x LoRa transport helper using RadioLib.
 #include "SX128xLink.h"
+#include <SPI.h>
 
 volatile bool SX128xLink::packetReceived = false;
 
@@ -17,28 +18,84 @@ bool SX128xLink::begin() {
         return true;
     }
 
-    // Configure SPI pins for RP2040 hardware SPI0 by default.
+    Serial.print("[SX128x] Initializing with pins: CS=");
+    Serial.print(SX128X_SPI_CS);
+    Serial.print(", DIO1=");
+    Serial.print(SX128X_SPI_DIO1);
+    Serial.print(", RST=");
+    Serial.print(SX128X_SPI_RST);
+    Serial.print(", BUSY=");
+    Serial.print(SX128X_SPI_BUSY);
+    Serial.print(", RXEN=");
+    Serial.print(SX128X_RXEN);
+    Serial.print(", TXEN=");
+    Serial.println(SX128X_TXEN);
+
+    // Configure SPI pins for RP2040 hardware SPI0 (non-standard SPI setup).
+    // RadioLib will not initialize SPI automatically when using extended Module constructor.
+    Serial.print("[SX128x] Configuring SPI: SCK=");
+    Serial.print(SX128X_SPI_SCK);
+    Serial.print(", MOSI=");
+    Serial.print(SX128X_SPI_MOSI);
+    Serial.print(", MISO=");
+    Serial.print(SX128X_SPI_MISO);
+    Serial.print(", CS=");
+    Serial.println(SX128X_SPI_CS);
+
     SPI.setSCK(SX128X_SPI_SCK);
     SPI.setTX(SX128X_SPI_MOSI);
     SPI.setRX(SX128X_SPI_MISO);
     SPI.setCS(SX128X_SPI_CS);
     SPI.begin();
+    Serial.println("[SX128x] SPI.begin() completed");
 
-    module = new Module(SX128X_SPI_CS, SX128X_SPI_DIO1, SX128X_SPI_RST, SX128X_SPI_BUSY);
+    // Use extended Module constructor with SPI instance and settings for non-standard SPI setup.
+    // This prevents RadioLib from automatically initializing SPI.
+    SPISettings spiSettings(2000000, MSBFIRST, SPI_MODE0);
+    Serial.println("[SX128x] Creating Module...");
+    module = new Module(SX128X_SPI_CS, SX128X_SPI_DIO1, SX128X_SPI_RST, SX128X_SPI_BUSY, SPI, spiSettings);
     if (!module) {
+        Serial.println("[SX128x] ERROR: Failed to create Module");
         return false;
     }
+    Serial.println("[SX128x] Module created");
 
+    Serial.println("[SX128x] Creating SX1280...");
     radio = new SX1280(module);
     if (!radio) {
+        Serial.println("[SX128x] ERROR: Failed to create SX1280");
         return false;
     }
+    Serial.println("[SX128x] SX1280 created");
 
     // Drive external RF switch (Ebyte TX_EN/RX_EN).
+    Serial.println("[SX128x] Setting RF switch pins...");
     radio->setRfSwitchPins(SX128X_RXEN, SX128X_TXEN);
+    Serial.println("[SX128x] RF switch pins set");
 
+    // DIO1 interrupt is only needed for async RX (startReceive/readData).
+    // On TX side we prefer to avoid DIO1 IRQ usage to keep transmit reliable.
+#if defined(RX_SIDE)
+    Serial.println("[SX128x] Setting DIO1 interrupt (RX_SIDE)...");
     radio->setDio1Action(SX128xLink::dio1ISR);
+    Serial.println("[SX128x] DIO1 interrupt set");
+#endif
 
+    Serial.print("[SX128x] Calling beginFLRC: freq=");
+    Serial.print(SX128X_FREQ_MHZ);
+    Serial.print("MHz, bitrate=");
+    Serial.print(SX128X_FLRC_BR_KBPS);
+    Serial.print("kbps, coding_rate=1/");
+    Serial.print(SX128X_FLRC_CR);
+    Serial.print(" (value=");
+    Serial.print(SX128X_FLRC_CR);
+    Serial.print("), power=");
+    Serial.print(SX128X_OUTPUT_POWER_DBM);
+    Serial.print("dBm, preamble=");
+    Serial.print(SX128X_FLRC_PREAMBLE_BITS);
+    Serial.print("bits, shaping=");
+    Serial.println(SX128X_FLRC_SHAPING);
+    
     int16_t state = radio->beginFLRC(
         SX128X_FREQ_MHZ,
         SX128X_FLRC_BR_KBPS,
@@ -47,13 +104,30 @@ bool SX128xLink::begin() {
         SX128X_FLRC_PREAMBLE_BITS,
         SX128X_FLRC_SHAPING
     );
+    
     if (state != RADIOLIB_ERR_NONE) {
+        Serial.print("[SX128x] ERROR: beginFLRC failed with code ");
+        Serial.print(state);
+        Serial.print(" (expected ");
+        Serial.print(RADIOLIB_ERR_NONE);
+        Serial.println(")");
+        Serial.println("[SX128x] Common errors: -2=CHIP_NOT_FOUND, -10=INVALID_CODING_RATE, -12=INVALID_FREQUENCY, -13=INVALID_BIT_RATE");
+        Serial.print("[SX128x] Attempted coding rate value: ");
+        Serial.println(SX128X_FLRC_CR);
+        Serial.println("[SX128x] Valid FLRC coding rates: 2 (1/2), 4 (3/4), 1 (1)");
         return false;
     }
+    Serial.println("[SX128x] beginFLRC successful");
 
-    // Continuous RX after init.
+    // Continuous RX after init (RX side only).
+#if defined(RX_SIDE)
+    Serial.println("[SX128x] Starting receive (RX_SIDE)...");
     startReceive();
+    Serial.println("[SX128x] Receive started");
+#endif
+    
     ready = true;
+    Serial.println("[SX128x] Initialization complete!");
     return true;
 }
 
@@ -67,18 +141,46 @@ void SX128xLink::startReceive() {
 
 bool SX128xLink::send(const uint8_t* data, size_t len) {
     if (!ready || !radio || !data || len == 0) {
+        Serial.print("[SX128x] send() check failed: ready=");
+        Serial.print(ready);
+        Serial.print(", radio=");
+        Serial.print(radio ? "OK" : "NULL");
+        Serial.print(", data=");
+        Serial.print(data ? "OK" : "NULL");
+        Serial.print(", len=");
+        Serial.println(len);
         return false;
     }
 
     uint8_t buffer[64];
     if (len > sizeof(buffer)) {
+        Serial.print("[SX128x] Packet too long: ");
+        Serial.print(len);
+        Serial.print(" > ");
+        Serial.println(sizeof(buffer));
         return false;
     }
     memcpy(buffer, data, len);
 
+    Serial.print("[SX128x] Calling transmit() with len=");
+    Serial.println(len);
     int16_t state = radio->transmit(buffer, len);
-    // Return to RX immediately after TX.
+    
+    if (state != RADIOLIB_ERR_NONE) {
+        Serial.print("[SX128x] transmit() failed with code ");
+        Serial.print(state);
+        Serial.print(" (expected ");
+        Serial.print(RADIOLIB_ERR_NONE);
+        Serial.println(")");
+        Serial.println("[SX128x] Common TX errors: -5=TX_TIMEOUT, -20=WRONG_MODEM");
+    } else {
+        Serial.println("[SX128x] transmit() successful");
+    }
+    
+    // Return to RX immediately after TX (RX side only). TX side stays in standby for max TX reliability.
+#if defined(RX_SIDE)
     startReceive();
+#endif
     return state == RADIOLIB_ERR_NONE;
 }
 

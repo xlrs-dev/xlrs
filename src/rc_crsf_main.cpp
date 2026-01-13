@@ -355,10 +355,10 @@ void readInputs() {
         if (vmax <= vmin + 10) return 1500; // avoid div0
         return (uint16_t)constrain(map(val, vmin, vmax, 2000, 1000), 1000, 2000);
     };
-    channels[0] = mapCalInverted(stick1_x, calib.min[0], calib.max[0]);  // Aileron (invert)
-    channels[1] = mapCal(stick1_y, calib.min[1], calib.max[1]);          // Elevator
-    channels[2] = mapCal(stick2_x, calib.min[2], calib.max[2]);          // Rudder
-    channels[3] = mapCal(stick2_y, calib.min[3], calib.max[3]);          // Throttle
+    channels[0] = mapCalInverted(stick1_y, calib.min[0], calib.max[0]);  // Aileron (invert)
+    channels[1] = mapCal(stick1_x, calib.min[1], calib.max[1]);          // Elevator
+    channels[2] = mapCal(stick2_x, calib.min[2], calib.max[2]);          // Throttle 
+    channels[3] = mapCalInverted(stick2_y, calib.min[3], calib.max[3]);  // Rudder (invert)
 
     // Apply EdgeTX-style dual-rate/expo
     auto applyCurve = [](uint16_t us, float rate, float expo) -> uint16_t {

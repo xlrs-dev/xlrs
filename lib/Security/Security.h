@@ -14,7 +14,7 @@
 #define BINDING_UID_SIZE 8  // 8-byte UID derived from binding phrase
 
 // EEPROM magic to invalidate old stored state when changed
-#define SECURITY_MAGIC_VALUE 0x54554352UL  // "TECR"
+#define SECURITY_MAGIC_VALUE 0x58554352UL  // "TECR"
 #define SECURITY_MAGIC_ADDR 120            // 4 bytes
 
 // Compile-time default binding phrase (can be overridden)

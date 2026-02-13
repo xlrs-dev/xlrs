@@ -5,7 +5,9 @@
 #include <EEPROM.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SH110X.h>
+#if !defined(INTERNAL_ADC)
 #include <Adafruit_ADS1X15.h>
+#endif
 #include <math.h>
 
 #include "UARTProtocol.h"
@@ -38,6 +40,17 @@
 #define ELEVATOR_CHANNEL 1  // Stick1 Y
 #define RUDDER_CHANNEL   2  // Stick2 X
 #define THROTTLE_CHANNEL 3  // Stick2 Y
+
+#if defined(INTERNAL_ADC)
+// RP2350 internal ADC pins (ADC0-3) for sticks
+#define INTERNAL_ADC_AILERON_PIN  26   // ADC0 -> Stick1 X
+#define INTERNAL_ADC_ELEVATOR_PIN 27   // ADC1 -> Stick1 Y
+#define INTERNAL_ADC_RUDDER_PIN   28   // ADC2 -> Stick2 X
+#define INTERNAL_ADC_THROTTLE_PIN 29   // ADC3 -> Stick2 Y
+#define INTERNAL_ADC_BITS  12
+#define INTERNAL_ADC_MAX   ((1 << INTERNAL_ADC_BITS) - 1)  // 4095
+#define INTERNAL_ADC_SCALE_16BIT  (32767)  // scale 12-bit to 16-bit range for same calibration
+#endif
 
 // Toggle switches (dual-pin reading)
 // Logic: IN1 high = 1000, IN2 high = 2000, both low = 1500
@@ -91,7 +104,9 @@ static const unsigned long PONG_TIMEOUT_MS = 2000;  // TX considered disconnecte
 
 // Application state
 Adafruit_SH1106G display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+#if !defined(INTERNAL_ADC)
 Adafruit_ADS1115 ads;  // ADS1115 ADC on I2C bus
+#endif
 UARTProtocol uartProto(&Serial2);
 
 // Telemetry data from TX
@@ -152,7 +167,11 @@ static bool tx_charge_status_valid = false;
 
 // Forward declarations
 static void load_calibration(void);
+#if !defined(INTERNAL_ADC)
 static bool init_ads1115(void);
+#else
+static bool init_internal_adc(void);
+#endif
 static void readInputs();
 static void updateDisplay();
 static void sendChannels();
@@ -215,8 +234,12 @@ void setup() {
         Serial.println("Check wiring: SDA=GP4, SCL=GP5, VCC=3.3V, GND=GND");
     }
 
-    // Initialize ADS1115
+    // Initialize ADC (internal RP2350 or I2C ADS1115)
+#if defined(INTERNAL_ADC)
+    ads_ok = init_internal_adc();
+#else
     ads_ok = init_ads1115();
+#endif
 
     // Initialize BQ2562X driver
     if (bq2562x_init() == 0) {
@@ -310,17 +333,29 @@ void loop() {
 // Input handling
 // ============================================================
 void readInputs() {
-    // Read analog sticks from ADS1115 (16-bit ADC: 0-32767)
+    // Read analog sticks: internal ADC (12-bit scaled to 16-bit) or ADS1115 (16-bit: 0-32767)
     int16_t stick1_x = 16384;  // Center value (32767/2)
     int16_t stick1_y = 16384;
     int16_t stick2_x = 16384;
     int16_t stick2_y = 16384;
 
     if (ads_ok) {
+#if defined(INTERNAL_ADC)
+        // RP2350 internal ADC on GPIO26,27,28,29 (12-bit 0-4095), scale to 16-bit for same calibration
+        uint32_t a0 = analogRead(INTERNAL_ADC_AILERON_PIN);
+        uint32_t a1 = analogRead(INTERNAL_ADC_ELEVATOR_PIN);
+        uint32_t a2 = analogRead(INTERNAL_ADC_RUDDER_PIN);
+        uint32_t a3 = analogRead(INTERNAL_ADC_THROTTLE_PIN);
+        stick1_x = (int16_t)((a0 * INTERNAL_ADC_SCALE_16BIT) / INTERNAL_ADC_MAX);
+        stick1_y = (int16_t)((a1 * INTERNAL_ADC_SCALE_16BIT) / INTERNAL_ADC_MAX);
+        stick2_x = (int16_t)((a2 * INTERNAL_ADC_SCALE_16BIT) / INTERNAL_ADC_MAX);
+        stick2_y = (int16_t)((a3 * INTERNAL_ADC_SCALE_16BIT) / INTERNAL_ADC_MAX);
+#else
         stick1_x = ads.readADC_SingleEnded(AILERON_CHANNEL);   // Aileron
         stick1_y = ads.readADC_SingleEnded(ELEVATOR_CHANNEL);  // Elevator
         stick2_x = ads.readADC_SingleEnded(RUDDER_CHANNEL);    // Rudder
         stick2_y = ads.readADC_SingleEnded(THROTTLE_CHANNEL);  // Throttle
+#endif
     }
 
     raw_adc[0] = stick1_x;
@@ -763,6 +798,7 @@ static bool init_display(void) {
     return true;
 }
 
+#if !defined(INTERNAL_ADC)
 static bool init_ads1115(void) {
     Serial.print("Attempting to initialize ADS1115 at address 0x");
     Serial.println(ADS1115_ADDRESS, HEX);
@@ -807,6 +843,21 @@ static bool init_ads1115(void) {
 
     return true;
 }
+#else
+static bool init_internal_adc(void) {
+    Serial.println("Using RP2350 internal ADC on GPIO26,27,28,29 (ADC0-3)");
+    // No explicit init needed; analogRead() initializes ADC on first use.
+    // Prime the ADC with a read to avoid first-sample skew
+    (void)analogRead(INTERNAL_ADC_AILERON_PIN);
+    (void)analogRead(INTERNAL_ADC_ELEVATOR_PIN);
+    (void)analogRead(INTERNAL_ADC_RUDDER_PIN);
+    (void)analogRead(INTERNAL_ADC_THROTTLE_PIN);
+    int16_t test = (int16_t)((analogRead(INTERNAL_ADC_AILERON_PIN) * INTERNAL_ADC_SCALE_16BIT) / INTERNAL_ADC_MAX);
+    Serial.print("Internal ADC test read GP26 (Aileron): ");
+    Serial.println(test);
+    return true;
+}
+#endif
 
 static uint8_t voltage_to_percent(float v) {
     if (v <= TX_BATT_EMPTY_V) return 0;

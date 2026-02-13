@@ -3,6 +3,7 @@
 #include <RadioLib.h>
 #include <string.h>
 #include <EEPROM.h>
+#include <FastLED.h>
 
 #include "Protocol.h"
 #include "Security.h"
@@ -19,6 +20,10 @@
 #ifndef CRSF_RX_PIN
 #define CRSF_RX_PIN 9
 #endif
+
+// WS2812 LED pin
+#define WS2812_PIN 13
+#define NUM_LEDS 1
 
 static_assert(sizeof(crsf_channels_t) == CRSF_FRAME_RC_CHANNELS_PAYLOAD_SIZE,
               "crsf_channels_t must be 22 bytes (packed CRSF RC channels payload)");
@@ -71,6 +76,11 @@ unsigned long lastBatteryTxTime = 0;
 crsfLinkStatistics_t lastLinkStats = {0};
 unsigned long lastLinkStatsLog = 0;
 
+// WS2812 LED state
+CRGB leds[NUM_LEDS];
+unsigned long lastLedUpdate = 0;
+static const unsigned long LED_UPDATE_INTERVAL_MS = 50;  // 20Hz update rate
+
 // Auto pairing timeout (seconds), set via build flag; clamped 0..120
 #ifndef AUTO_PAIR_TIMEOUT_SEC
 #define AUTO_PAIR_TIMEOUT_SEC 0
@@ -82,6 +92,8 @@ void updateConnectionState();
 bool isConnectionReady();
 bool isPaired();
 void detectConnectionLoss();
+void hsvToRgb(float h, float s, float v, uint8_t* r, uint8_t* g, uint8_t* b);
+void updateLED();
 
 // ============================================================
 // Battery / link callbacks from CRSF
@@ -210,6 +222,14 @@ void setup() {
     Serial.print(CRSF_TX_PIN);
     Serial.print(", RX=GP");
     Serial.println(CRSF_RX_PIN);
+
+    // Initialize WS2812 LED
+    FastLED.addLeds<WS2812, WS2812_PIN, GRB>(leds, NUM_LEDS);
+    FastLED.setBrightness(255);  // Full brightness
+    leds[0] = CRGB::Black;  // Start with LED off
+    FastLED.show();
+    Serial.print("WS2812 LED initialized on GPIO");
+    Serial.println(WS2812_PIN);
 
     Serial.println("=== RX Ready ===");
     Serial.println("Hold BOOTSEL for 5 seconds to enter pairing mode");
@@ -416,6 +436,9 @@ void loop() {
         }
     }
 
+    // Update LED color based on channels 7 & 8
+    updateLED();
+
     // Flush logs periodically to ensure output before potential crash
     static unsigned long lastFlush = 0;
     if (millis() - lastFlush > 500) {
@@ -513,6 +536,113 @@ void detectConnectionLoss() {
             connectionState = STATE_LOST;
             Serial.println("[STATE] CONNECTED -> LOST (timeout)");
         }
+    }
+}
+
+// ============================================================
+// WS2812 LED Control
+// ============================================================
+// Convert HSV to RGB
+// h: 0-360 (hue)
+// s: 0-100 (saturation %)
+// v: 0-100 (value/brightness %)
+void hsvToRgb(float h, float s, float v, uint8_t* r, uint8_t* g, uint8_t* b) {
+    // Normalize inputs
+    h = fmod(h, 360.0f);
+    if (h < 0) h += 360.0f;
+    s = constrain(s, 0.0f, 100.0f) / 100.0f;
+    v = constrain(v, 0.0f, 100.0f) / 100.0f;
+    
+    float c = v * s;
+    float x = c * (1.0f - fabs(fmod(h / 60.0f, 2.0f) - 1.0f));
+    float m = v - c;
+    
+    float r1, g1, b1;
+    
+    if (h < 60) {
+        r1 = c; g1 = x; b1 = 0;
+    } else if (h < 120) {
+        r1 = x; g1 = c; b1 = 0;
+    } else if (h < 180) {
+        r1 = 0; g1 = c; b1 = x;
+    } else if (h < 240) {
+        r1 = 0; g1 = x; b1 = c;
+    } else if (h < 300) {
+        r1 = x; g1 = 0; b1 = c;
+    } else {
+        r1 = c; g1 = 0; b1 = x;
+    }
+    
+    *r = (uint8_t)((r1 + m) * 255.0f);
+    *g = (uint8_t)((g1 + m) * 255.0f);
+    *b = (uint8_t)((b1 + m) * 255.0f);
+}
+
+// Update LED color based on channels 7 & 8
+// Channel 7 (channels[6]): 1000-2000 → Hue 0-360°
+// Channel 8 (channels[7]): 1000-1500 → Saturation 0-100%, 1500-2000 → Value 0-100%
+void updateLED() {
+    // Rate limit updates
+    if (millis() - lastLedUpdate < LED_UPDATE_INTERVAL_MS) {
+        return;
+    }
+    lastLedUpdate = millis();
+    
+    // Only update LED if connected and receiving data
+    if (connectionState != STATE_CONNECTED && connectionState != STATE_CONNECTING) {
+        // Disconnected: show dim red
+        leds[0] = CRGB(20, 0, 0);
+        FastLED.show();
+        return;
+    }
+    
+    // Map channel 7 (channels[6]) to Hue: 1000-2000 → 0-360°
+    float hue = (float)map(channels[6], 1000, 2000, 0, 360);
+    
+    // Map channel 8 (channels[7]) to Saturation and Value
+    // 1000-1500 → Saturation 0-100%
+    // 1500-2000 → Value 0-100%
+    float saturation, value;
+    
+    if (channels[7] <= 1500) {
+        // Lower half: control saturation
+        saturation = (float)map(channels[7], 1000, 1500, 0, 100);
+        value = 100.0f;  // Full brightness
+    } else {
+        // Upper half: control value/brightness
+        saturation = 100.0f;  // Full saturation
+        value = (float)map(channels[7], 1500, 2000, 0, 100);
+    }
+    
+    // Convert HSV to RGB
+    uint8_t r, g, b;
+    hsvToRgb(hue, saturation, value, &r, &g, &b);
+    
+    // Update LED
+    leds[0] = CRGB(r, g, b);
+    FastLED.show();
+    
+    // Debug log (rate limited)
+    static unsigned long lastLedLog = 0;
+    if (millis() - lastLedLog > 2000) {
+        Serial.print("[LED] Ch7=");
+        Serial.print(channels[6]);
+        Serial.print(" Ch8=");
+        Serial.print(channels[7]);
+        Serial.print(" → HSV(");
+        Serial.print(hue, 1);
+        Serial.print(",");
+        Serial.print(saturation, 1);
+        Serial.print(",");
+        Serial.print(value, 1);
+        Serial.print(") → RGB(");
+        Serial.print(r);
+        Serial.print(",");
+        Serial.print(g);
+        Serial.print(",");
+        Serial.print(b);
+        Serial.println(")");
+        lastLedLog = millis();
     }
 }
 

@@ -68,6 +68,7 @@ extern "C" {
 #define FPV_TX_CHAR_UUID16     0xFF01
 #define FPV_RX_CHAR_UUID16     0xFF02  // Telemetry characteristic (notify)
 #define FPV_PAIR_CHAR_UUID16   0xFF03  // Pairing key characteristic
+#define FPV_TIME_CHAR_UUID16   0xFF04  // Time sync characteristic
 
 // Pairing key size
 #define PAIRING_KEY_SIZE 16
@@ -131,14 +132,18 @@ static gatt_client_service_t fpv_service;
 static gatt_client_characteristic_t tx_characteristic;
 static gatt_client_characteristic_t rx_characteristic;
 static gatt_client_characteristic_t pair_characteristic;
+static gatt_client_characteristic_t time_characteristic;
 static bool service_found = false;
 static bool characteristic_found = false;
 static bool rx_characteristic_found = false;
 static bool pair_characteristic_found = false;
+static bool time_characteristic_found = false;
 static uint16_t tx_char_value_handle = 0;
 static uint16_t rx_char_value_handle = 0;
 static uint16_t pair_char_value_handle = 0;
+static uint16_t time_char_value_handle = 0;
 static bool notifications_enabled = false;
+static bool time_sync_sent_once = false;
 
 // Battery telemetry received from RX
 static float battery_voltage = 0.0f;
@@ -227,9 +232,16 @@ bool raw_buttons[2] = {false, false}; // Raw button states (ENTER, BACK)
 // Timing
 unsigned long lastDataSent = 0;
 const unsigned long DATA_INTERVAL = 100;  // 20Hz target for lower latency
-const uint16_t DESIRED_ATT_MTU = 64;     // Enough for 22B frame + headers
+const uint16_t DESIRED_ATT_MTU = 64;     // Enough for 26B frame + headers
 unsigned long lastDisplayUpdate = 0;
 const unsigned long DISPLAY_INTERVAL = 100;
+unsigned long last_time_sync_sent = 0;
+const unsigned long TIME_SYNC_INTERVAL = 5000; // ms
+// Connection parameter targets (7.5ms-15ms)
+static const uint16_t CONN_INTERVAL_MIN = 6;   // 6 * 1.25ms = 7.5ms
+static const uint16_t CONN_INTERVAL_MAX = 12;  // 12 * 1.25ms = 15ms
+static const uint16_t CONN_LATENCY = 0;
+static const uint16_t CONN_TIMEOUT = 200;      // 200 * 10ms = 2000ms
 
 // Status string
 char status_str[32] = "Idle";
@@ -246,7 +258,9 @@ static void connect_to_bonded_device(void);
 static void discover_services(void);
 static void discover_characteristics(void);
 static void send_channel_data(void);
+static void send_time_sync(void);
 static void load_bonded_device(void);
+static void request_connection_params(void);
 static void save_bonded_device(void);
 static void start_pairing(void);
 static void send_pairing_key(void);
@@ -474,6 +488,16 @@ static void discover_characteristics(void) {
     ble_state = STATE_DISCOVERING_CHARACTERISTICS;
     strcpy(status_str, "Finding chars");
     
+    // Clear previous characteristic discovery state
+    characteristic_found = false;
+    rx_characteristic_found = false;
+    pair_characteristic_found = false;
+    time_characteristic_found = false;
+    tx_char_value_handle = 0;
+    rx_char_value_handle = 0;
+    pair_char_value_handle = 0;
+    time_char_value_handle = 0;
+    
     characteristic_found = false;
     rx_characteristic_found = false;
     
@@ -523,9 +547,9 @@ static void send_channel_data(void) {
     sequenceNumber++;
     if (sequenceNumber == 0) sequenceNumber = 1;
     
-    // Encode frame
+    // Encode frame with TX-side timestamp for RX age checks
     uint8_t frame[FRAME_SIZE];
-    Protocol::encodeFrame(channels, sequenceNumber, &security, frame);
+    Protocol::encodeFrame(channels, sequenceNumber, millis(), &security, frame);
     
     // Send via GATT write without response
     uint8_t status = gatt_client_write_value_of_characteristic_without_response(
@@ -545,6 +569,62 @@ static void send_channel_data(void) {
         Serial.print(", status: ");
         Serial.println(status);
         lastDebug = millis();
+    }
+}
+
+// Send a simple one-way time sync to RX so it can age packets accurately
+static void send_time_sync(void) {
+    if (!connected || !time_characteristic_found || time_char_value_handle == 0) {
+        return;
+    }
+    
+    // Rate-limit to avoid flooding the control channel
+    if (time_sync_sent_once && (millis() - last_time_sync_sent) < TIME_SYNC_INTERVAL) {
+        return;
+    }
+    
+    uint32_t now = millis();
+    uint8_t payload[4] = {
+        static_cast<uint8_t>((now >> 24) & 0xFF),
+        static_cast<uint8_t>((now >> 16) & 0xFF),
+        static_cast<uint8_t>((now >> 8) & 0xFF),
+        static_cast<uint8_t>(now & 0xFF)
+    };
+    
+    uint8_t status = gatt_client_write_value_of_characteristic_without_response(
+        connection_handle,
+        time_char_value_handle,
+        sizeof(payload),
+        payload
+    );
+    
+    if (status == ERROR_CODE_SUCCESS) {
+        last_time_sync_sent = millis();
+        time_sync_sent_once = true;
+        Serial.println("Time sync sent to RX");
+    } else {
+        Serial.print("Time sync write failed, status: ");
+        Serial.println(status);
+    }
+}
+
+// Ask peripheral to move to tighter connection interval
+static void request_connection_params(void) {
+    if (!connected || connection_handle == HCI_CON_HANDLE_INVALID) return;
+    
+    uint8_t status = gap_update_connection_parameters(
+        connection_handle,
+        CONN_INTERVAL_MIN,
+        CONN_INTERVAL_MAX,
+        CONN_LATENCY,
+        CONN_TIMEOUT
+    );
+    
+    if (status == ERROR_CODE_SUCCESS) {
+        Serial.println("Requested conn interval 7.5-15ms");
+    } else {
+        Serial.print("Conn param request failed, status: ");
+        Serial.println(status);
     }
 }
 
@@ -628,6 +708,11 @@ static void gatt_client_callback(uint8_t packet_type, uint16_t channel, uint8_t 
                     
                     // Force display update on next loop iteration
                     lastDisplayUpdate = 0;
+                    
+                    // Kick off an initial time sync so RX can age packets
+                    time_sync_sent_once = false;
+                    last_time_sync_sent = 0;
+                    send_time_sync();
                     Serial.println("Ready state set, display will update in loop()");
                 } else {
                     Serial.println("TX characteristic not found!");
@@ -700,6 +785,14 @@ static void gatt_client_callback(uint8_t packet_type, uint16_t channel, uint8_t 
                 pair_characteristic_found = true;
                 pair_characteristic = characteristic;
                 pair_char_value_handle = characteristic.value_handle;
+            }
+            
+            // Check if this is the Time Sync characteristic
+            if (characteristic.uuid16 == FPV_TIME_CHAR_UUID16) {
+                Serial.println("*** Time Sync Characteristic found! ***");
+                time_characteristic_found = true;
+                time_characteristic = characteristic;
+                time_char_value_handle = characteristic.value_handle;
             }
             break;
         }
@@ -893,6 +986,9 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
             gatt_client_send_mtu_negotiation(gatt_client_callback, connection_handle);
                         // Start service discovery
                         discover_services();
+                        
+                        // Request fast connection parameters (7.5-15ms)
+                        request_connection_params();
                     } else {
                         Serial.print("[BLE] Connection failed: ");
                         Serial.println(status);
@@ -911,12 +1007,16 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
             characteristic_found = false;
             rx_characteristic_found = false;
             pair_characteristic_found = false;
+            time_characteristic_found = false;
             service_found = false;
             tx_char_value_handle = 0;
             rx_char_value_handle = 0;
             pair_char_value_handle = 0;
+            time_char_value_handle = 0;
             pairing_in_progress = false;
             notifications_enabled = false;
+            time_sync_sent_once = false;
+            last_time_sync_sent = 0;
             battery_data_valid = false;
             ble_state = STATE_IDLE;
             strcpy(status_str, "Disconnected");
@@ -1612,6 +1712,7 @@ void loop() {
     
     // Send data if ready
     if (ble_state == STATE_READY && menu_state == MENU_NORMAL_OPERATION) {
+        send_time_sync();
         send_channel_data();
     }
     

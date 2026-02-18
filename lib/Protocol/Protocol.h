@@ -9,6 +9,7 @@ class Security;
 #define NUM_CHANNELS 8
 #define CHANNEL_DATA_SIZE (NUM_CHANNELS * 2)  // 16 bytes (2 bytes per channel)
 #define SEQUENCE_SIZE 2  // 2 bytes for sequence number
+#define TIMESTAMP_SIZE 4 // 4 bytes for TX timestamp (ms)
 #define HMAC_SIZE 4  // 4 bytes for HMAC
 #define DEVICE_ID_SIZE 8  // 8 bytes for device ID
 #define FRAME_SIZE (DEVICE_ID_SIZE + CHANNEL_DATA_SIZE + SEQUENCE_SIZE + HMAC_SIZE)  // 30 bytes total (8 + 16 + 2 + 4)

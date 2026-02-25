@@ -39,7 +39,9 @@ enum RadioMsgType : uint8_t {
     MSG_PAIRING_ACK = 0x04,
     MSG_SYNC     = 0x05,
     MSG_SYNC_ACK = 0x06,
-    MSG_CONNECTION_STATUS = 0x07
+    MSG_CONNECTION_STATUS = 0x07,
+    MSG_BINDING_PHRASE_SET = 0x08,
+    MSG_BINDING_PHRASE_ACK = 0x09
 };
 
 class Protocol {

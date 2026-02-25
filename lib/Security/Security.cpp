@@ -376,6 +376,15 @@ bool Security::generateBindingUID(const char* bindingPhrase) {
     return true;
 }
 
+bool Security::setBindingPhrase(const char* bindingPhrase) {
+    if (!bindingPhrase) return false;
+    size_t len = strlen(bindingPhrase);
+    if (len == 0 || len > 32) return false;
+    if (!generateBindingUID(bindingPhrase)) return false;
+    clearPairingState();
+    return true;
+}
+
 bool Security::getBindingUID(uint8_t* uid) {
     if (!uid || !_bindingUIDLoaded) return false;
     memcpy(uid, _bindingUID, BINDING_UID_SIZE);
@@ -389,4 +398,19 @@ bool Security::hasBindingUID() {
 bool Security::verifyBindingUID(const uint8_t* uid) {
     if (!uid || !_bindingUIDLoaded) return false;
     return memcmp(_bindingUID, uid, BINDING_UID_SIZE) == 0;
+}
+
+void Security::clearPairingState() {
+    memset(_pairingKey, 0, PAIRING_KEY_SIZE);
+    memset(_pairedDeviceId, 0, DEVICE_ID_SIZE);
+    _keyLoaded = false;
+    _pairedDeviceIdLoaded = false;
+
+    for (int i = 0; i < PAIRING_KEY_SIZE; i++) {
+        EEPROM.write(PAIRING_KEY_ADDR + i, 0);
+    }
+    for (int i = 0; i < DEVICE_ID_SIZE; i++) {
+        EEPROM.write(PAIRED_DEVICE_ID_ADDR + i, 0);
+    }
+    EEPROM.commit();
 }

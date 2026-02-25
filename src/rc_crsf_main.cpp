@@ -12,6 +12,8 @@
 
 #include "UARTProtocol.h"
 #include "bq2562x.h"
+#include "RCConfig.h"
+#include "RCConfigProtocol.h"
 
 // OLED Configuration
 #define SCREEN_WIDTH 128
@@ -138,7 +140,7 @@ uint16_t channels[8] = {1500, 1500, 1500, 1500, 1500, 1500, 1500, 1500};
 int16_t raw_adc[4] = {0};
 bool raw_toggles[4] = {false};
 
-// Calibration data for sticks
+// Calibration data for sticks (legacy; kept in sync with g_rc_config until readInputs uses config)
 typedef struct {
     uint16_t min[4];
     uint16_t max[4];
@@ -151,6 +153,18 @@ static calib_data_t calib = {
     {13199, 13199, 13199, 13199}
 };
 static bool calib_loaded = false;
+
+// Runtime config (USB WebUI): loaded from EEPROM or defaults; used by readInputs when wired
+static rc_config_data_t g_rc_config;
+static rc_config_data_t g_rc_config_draft;
+static RCConfigProtocol g_rc_proto;
+static unsigned long lastStateStreamMs = 0;
+static const unsigned long STATE_STREAM_INTERVAL_MS = 50;
+
+// Calibration via WebUI: sampling state
+static bool cal_sampling = false;
+static int16_t cal_axis_min[4];
+static int16_t cal_axis_max[4];
 
 // TX local battery (BQ2562X)
 static float tx_batt_voltage = 0.0f;
@@ -196,6 +210,20 @@ static void onPongReceived();
 // Device check functions
 static bool check_tx_connection(void);
 static void ping_tx_device(void);
+
+// USB config protocol callbacks
+static const rc_config_data_t* rc_proto_get_config(void);
+static void rc_proto_set_draft(const rc_config_data_t* draft);
+static void rc_proto_apply(void);
+static bool rc_proto_save(void);
+static void rc_proto_cal_start(void);
+static void rc_proto_cal_sample(void);
+static void rc_proto_cal_finish(void);
+static void rc_proto_get_state(int16_t* adc4, uint16_t* ch8, uint8_t* toggles4);
+static bool rc_proto_set_binding_phrase_rx(const char* phrase, uint8_t len);
+static bool rc_proto_set_binding_phrase_tx(const char* phrase, uint8_t len);
+static void rc_proto_get_link_status(uint8_t* txConnected, uint8_t* txPaired, uint8_t* txState);
+static bool rc_proto_enter_pairing_mode(void);
 
 // ============================================================
 // Setup
@@ -274,6 +302,35 @@ void setup() {
     // Load stick calibration (if present)
     load_calibration();
 
+    // Load runtime config for WebUI; migrate legacy calib if no config yet
+    if (!rc_config_load(&g_rc_config)) {
+        rc_config_set_defaults(&g_rc_config);
+        if (calib_loaded) {
+            for (int i = 0; i < 4; i++) {
+                g_rc_config.calib_min[i] = calib.min[i];
+                g_rc_config.calib_max[i] = calib.max[i];
+                g_rc_config.calib_center[i] = calib.center[i];
+            }
+            rc_config_save(&g_rc_config);
+        }
+    }
+    memcpy(&g_rc_config_draft, &g_rc_config, sizeof(g_rc_config));
+
+    g_rc_proto.setStream(&Serial);
+    g_rc_proto.setDeviceInfo("RC-CRSF", "1.1");
+    g_rc_proto.setConfigGetter(rc_proto_get_config);
+    g_rc_proto.setConfigDraftSetter(rc_proto_set_draft);
+    g_rc_proto.setApplyCallback(rc_proto_apply);
+    g_rc_proto.setSaveCallback(rc_proto_save);
+    g_rc_proto.setCalibrationStart(rc_proto_cal_start);
+    g_rc_proto.setCalibrationSample(rc_proto_cal_sample);
+    g_rc_proto.setCalibrationFinish(rc_proto_cal_finish);
+    g_rc_proto.setStateGetter(rc_proto_get_state);
+    g_rc_proto.setBindingPhraseRx(rc_proto_set_binding_phrase_rx);
+    g_rc_proto.setBindingPhraseTx(rc_proto_set_binding_phrase_tx);
+    g_rc_proto.setLinkStatusGetter(rc_proto_get_link_status);
+    g_rc_proto.setEnterPairingMode(rc_proto_enter_pairing_mode);
+
     // Initialize UART protocol (outputting to TX side)
     Serial.println("Initializing UART protocol...");
     Serial2.setTX(CRSF_TX_PIN);
@@ -322,6 +379,13 @@ void loop() {
     readInputs();
     sendChannels();
     receiveUARTMessages();
+    g_rc_proto.poll();
+    if (g_rc_proto.isStreamingState() && (millis() - lastStateStreamMs >= STATE_STREAM_INTERVAL_MS)) {
+        lastStateStreamMs = millis();
+        uint8_t toggles4[4];
+        for (int i = 0; i < 4; i++) toggles4[i] = raw_toggles[i] ? 1 : 0;
+        g_rc_proto.sendStateFrame(raw_adc, channels, toggles4);
+    }
     ping_tx_device();  // Periodic device check
     check_tx_connection();  // Update connection status
     handleButtons();
@@ -330,42 +394,34 @@ void loop() {
 }
 
 // ============================================================
-// Input handling
+// Input handling (runtime config: g_rc_config)
 // ============================================================
 void readInputs() {
-    // Read analog sticks: internal ADC (12-bit scaled to 16-bit) or ADS1115 (16-bit: 0-32767)
-    int16_t stick1_x = 16384;  // Center value (32767/2)
-    int16_t stick1_y = 16384;
-    int16_t stick2_x = 16384;
-    int16_t stick2_y = 16384;
+    const rc_config_data_t* cfg = &g_rc_config;
+    int16_t axis_adc[4] = {16384, 16384, 16384, 16384};
 
     if (ads_ok) {
 #if defined(INTERNAL_ADC)
-        // RP2350 internal ADC on GPIO26,27,28,29 (12-bit 0-4095), scale to 16-bit for same calibration
         uint32_t a0 = analogRead(INTERNAL_ADC_AILERON_PIN);
         uint32_t a1 = analogRead(INTERNAL_ADC_ELEVATOR_PIN);
         uint32_t a2 = analogRead(INTERNAL_ADC_RUDDER_PIN);
         uint32_t a3 = analogRead(INTERNAL_ADC_THROTTLE_PIN);
-        stick1_x = (int16_t)((a0 * INTERNAL_ADC_SCALE_16BIT) / INTERNAL_ADC_MAX);
-        stick1_y = (int16_t)((a1 * INTERNAL_ADC_SCALE_16BIT) / INTERNAL_ADC_MAX);
-        stick2_x = (int16_t)((a2 * INTERNAL_ADC_SCALE_16BIT) / INTERNAL_ADC_MAX);
-        stick2_y = (int16_t)((a3 * INTERNAL_ADC_SCALE_16BIT) / INTERNAL_ADC_MAX);
+        axis_adc[0] = (int16_t)((a0 * INTERNAL_ADC_SCALE_16BIT) / INTERNAL_ADC_MAX);
+        axis_adc[1] = (int16_t)((a1 * INTERNAL_ADC_SCALE_16BIT) / INTERNAL_ADC_MAX);
+        axis_adc[2] = (int16_t)((a2 * INTERNAL_ADC_SCALE_16BIT) / INTERNAL_ADC_MAX);
+        axis_adc[3] = (int16_t)((a3 * INTERNAL_ADC_SCALE_16BIT) / INTERNAL_ADC_MAX);
 #else
-        stick1_x = ads.readADC_SingleEnded(AILERON_CHANNEL);   // Aileron
-        stick1_y = ads.readADC_SingleEnded(ELEVATOR_CHANNEL);  // Elevator
-        stick2_x = ads.readADC_SingleEnded(RUDDER_CHANNEL);    // Rudder
-        stick2_y = ads.readADC_SingleEnded(THROTTLE_CHANNEL);  // Throttle
+        axis_adc[0] = ads.readADC_SingleEnded(AILERON_CHANNEL);
+        axis_adc[1] = ads.readADC_SingleEnded(ELEVATOR_CHANNEL);
+        axis_adc[2] = ads.readADC_SingleEnded(RUDDER_CHANNEL);
+        axis_adc[3] = ads.readADC_SingleEnded(THROTTLE_CHANNEL);
 #endif
     }
 
-    raw_adc[0] = stick1_x;
-    raw_adc[1] = stick1_y;
-    raw_adc[2] = stick2_x;
-    raw_adc[3] = stick2_y;
+    for (int i = 0; i < 4; i++) raw_adc[i] = axis_adc[i];
 
-    // Apply deadzone on ADC (5%) before mapping
     auto applyDeadzone = [](int16_t val, uint16_t vmin, uint16_t vmax, float frac) -> int16_t {
-        if (vmax <= vmin + 10) return val;
+        if (vmax <= vmin + 10 || frac <= 0.0f) return val;
         float center = (vmin + vmax) * 0.5f;
         float halfRange = (vmax - vmin) * 0.5f;
         float dz = halfRange * frac;
@@ -375,41 +431,34 @@ void readInputs() {
         float adjusted = sign * ((fabsf(delta) - dz) / (halfRange - dz)) * halfRange;
         return (int16_t)(center + adjusted);
     };
-    const float DEADZONE = 0.05f; // 5%
-    stick1_x = applyDeadzone(stick1_x, calib.min[0], calib.max[0], DEADZONE);
-    stick1_y = applyDeadzone(stick1_y, calib.min[1], calib.max[1], DEADZONE);
-    stick2_x = applyDeadzone(stick2_x, calib.min[2], calib.max[2], DEADZONE);
-    // Leave throttle without deadzone to preserve full resolution
-
-    // Map to channel values (1000-2000)
-    auto mapCal = [](int16_t val, uint16_t vmin, uint16_t vmax) -> uint16_t {
-        if (vmax <= vmin + 10) return 1500; // avoid div0
-        return (uint16_t)constrain(map(val, vmin, vmax, 1000, 2000), 1000, 2000);
+    auto mapToUs = [](int16_t val, uint16_t vmin, uint16_t vmax, bool inv) -> uint16_t {
+        if (vmax <= vmin + 10) return RC_CHANNEL_MID;
+        int low = inv ? 2000 : 1000;
+        int high = inv ? 1000 : 2000;
+        return (uint16_t)constrain(map(val, vmin, vmax, low, high), RC_CHANNEL_MIN, RC_CHANNEL_MAX);
     };
-    auto mapCalInverted = [](int16_t val, uint16_t vmin, uint16_t vmax) -> uint16_t {
-        if (vmax <= vmin + 10) return 1500; // avoid div0
-        return (uint16_t)constrain(map(val, vmin, vmax, 2000, 1000), 1000, 2000);
-    };
-    channels[0] = mapCalInverted(stick1_y, calib.min[0], calib.max[0]);  // Aileron (invert)
-    channels[1] = mapCal(stick1_x, calib.min[1], calib.max[1]);          // Elevator
-    channels[2] = mapCal(stick2_x, calib.min[2], calib.max[2]);          // Throttle 
-    channels[3] = mapCalInverted(stick2_y, calib.min[3], calib.max[3]);  // Rudder (invert)
-
-    // Apply EdgeTX-style dual-rate/expo
     auto applyCurve = [](uint16_t us, float rate, float expo) -> uint16_t {
-        float x = (int(us) - 1500) / 500.0f;                  // -1..1
-        float x_expo = (1.0f - expo) * x + expo * x * x * x;  // soften center
-        float scaled = x_expo * rate;                         // cap max throw
-        int out = int(1500 + scaled * 500);
-        return (uint16_t)constrain(out, 1000, 2000);
+        float x = (int(us) - 1500) / 500.0f;
+        float x_expo = (1.0f - expo) * x + expo * x * x * x;
+        float scaled = x_expo * rate;
+        return (uint16_t)constrain((int)(1500 + scaled * 500), RC_CHANNEL_MIN, RC_CHANNEL_MAX);
     };
-    const float RATE = 0.7f;
-    const float EXPO = 0.3f;
-    // channels[0] = applyCurve(channels[0], RATE, EXPO);
-    // channels[1] = applyCurve(channels[1], RATE, EXPO);
-    // channels[3] = applyCurve(channels[3], RATE, EXPO);
-    // channels[0] = (uint16_t)constrain(channels[0], 1300, 1700);
-    // channels[1] = (uint16_t)constrain(channels[1], 1300, 1700);
+
+    uint16_t axis_us[4];
+    for (int i = 0; i < 4; i++) {
+        int16_t dz = applyDeadzone(axis_adc[i], cfg->calib_min[i], cfg->calib_max[i], cfg->deadzone[i]);
+        axis_us[i] = mapToUs(dz, cfg->calib_min[i], cfg->calib_max[i], cfg->invert[i] != 0);
+        axis_us[i] = applyCurve(axis_us[i], cfg->rate[i], cfg->expo[i]);
+    }
+
+    for (int c = 0; c < 4; c++) channels[c] = RC_CHANNEL_MID;
+    for (int a = 0; a < 4; a++) {
+        uint8_t fc = cfg->channel_function[a];
+        if (fc < 4) channels[fc] = axis_us[a];
+    }
+    for (int c = 0; c < 4; c++) {
+        channels[c] = (uint16_t)constrain(channels[c], cfg->cutoff_min[c], cfg->cutoff_max[c]);
+    }
 
     // Read toggle switches (dual-pin reading)
     // Logic: IN1 high = 1000, IN2 high = 2000, both low = 1500
@@ -430,7 +479,10 @@ void readInputs() {
     channels[5] = readToggle(TOGGLE_SWITCH2_IN1_PIN, TOGGLE_SWITCH2_IN2_PIN);
     channels[6] = readToggle(TOGGLE_SWITCH3_IN1_PIN, TOGGLE_SWITCH3_IN2_PIN);
     channels[7] = readToggle(TOGGLE_SWITCH4_IN1_PIN, TOGGLE_SWITCH4_IN2_PIN);
-    
+    for (int c = 4; c < 8; c++) {
+        channels[c] = (uint16_t)constrain(channels[c], cfg->cutoff_min[c], cfg->cutoff_max[c]);
+    }
+
     // Store raw toggle states for logging (using IN1 state as primary indicator)
     raw_toggles[0] = digitalRead(TOGGLE_SWITCH1_IN1_PIN) == HIGH;
     raw_toggles[1] = digitalRead(TOGGLE_SWITCH2_IN1_PIN) == HIGH;
@@ -689,6 +741,99 @@ bool check_tx_connection(void) {
     }
     
     return tx_connected;
+}
+
+// ============================================================
+// USB config protocol callbacks
+// ============================================================
+static const rc_config_data_t* rc_proto_get_config(void) {
+    return &g_rc_config;
+}
+static void rc_proto_set_draft(const rc_config_data_t* draft) {
+    if (draft) memcpy(&g_rc_config_draft, draft, sizeof(g_rc_config_draft));
+}
+static void rc_proto_apply(void) {
+    memcpy(&g_rc_config, &g_rc_config_draft, sizeof(g_rc_config));
+    for (int i = 0; i < 4; i++) {
+        calib.min[i] = g_rc_config.calib_min[i];
+        calib.max[i] = g_rc_config.calib_max[i];
+        calib.center[i] = g_rc_config.calib_center[i];
+    }
+}
+static bool rc_proto_save(void) {
+    return rc_config_save(&g_rc_config);
+}
+static void rc_proto_cal_start(void) {
+    cal_sampling = true;
+    for (int i = 0; i < 4; i++) {
+        cal_axis_min[i] = raw_adc[i];
+        cal_axis_max[i] = raw_adc[i];
+    }
+}
+static void rc_proto_cal_sample(void) {
+    if (!cal_sampling) return;
+    for (int i = 0; i < 4; i++) {
+        if (raw_adc[i] < cal_axis_min[i]) cal_axis_min[i] = raw_adc[i];
+        if (raw_adc[i] > cal_axis_max[i]) cal_axis_max[i] = raw_adc[i];
+    }
+}
+static void rc_proto_cal_finish(void) {
+    if (!cal_sampling) return;
+    cal_sampling = false;
+    for (int i = 0; i < 4; i++) {
+        g_rc_config.calib_min[i] = (uint16_t)cal_axis_min[i];
+        g_rc_config.calib_max[i] = (uint16_t)cal_axis_max[i];
+        g_rc_config.calib_center[i] = (uint16_t)((cal_axis_min[i] + cal_axis_max[i]) / 2);
+        calib.min[i] = g_rc_config.calib_min[i];
+        calib.max[i] = g_rc_config.calib_max[i];
+        calib.center[i] = g_rc_config.calib_center[i];
+    }
+    rc_config_save(&g_rc_config);
+}
+
+static void rc_proto_get_state(int16_t* adc4, uint16_t* ch8, uint8_t* toggles4) {
+    if (adc4) for (int i = 0; i < 4; i++) adc4[i] = raw_adc[i];
+    if (ch8) for (int i = 0; i < 8; i++) ch8[i] = channels[i];
+    if (toggles4) for (int i = 0; i < 4; i++) toggles4[i] = raw_toggles[i] ? 1 : 0;
+}
+
+static bool rc_proto_set_binding_phrase_rx(const char* phrase, uint8_t len) {
+    if (!tx_connected || !phrase || len == 0 || len > 32) return false;
+    bool sent = uartProto.sendCommandWithPayload(UART_MSG_CMD_SET_BIND_RX, (const uint8_t*)phrase, len);
+    if (sent) {
+        Serial.println("[RC] Forwarded RX binding phrase update command to TX");
+    } else {
+        Serial.println("[RC] Failed to forward RX binding phrase command to TX");
+    }
+    return sent;
+}
+
+static bool rc_proto_set_binding_phrase_tx(const char* phrase, uint8_t len) {
+    if (!tx_connected || !phrase || len == 0 || len > 32) return false;
+    bool sent = uartProto.sendCommandWithPayload(UART_MSG_CMD_SET_BIND_TX, (const uint8_t*)phrase, len);
+    if (sent) {
+        Serial.println("[RC] Forwarded TX binding phrase update command to TX");
+    } else {
+        Serial.println("[RC] Failed to forward TX binding phrase command to TX");
+    }
+    return sent;
+}
+
+static void rc_proto_get_link_status(uint8_t* txConnected, uint8_t* txPaired, uint8_t* txState) {
+    if (txConnected) *txConnected = tx_connected ? 1 : 0;
+    if (txPaired) *txPaired = statusValid ? status.pairingState : 0;
+    if (txState) *txState = statusValid ? status.connectionState : 0xFF;
+}
+
+static bool rc_proto_enter_pairing_mode(void) {
+    if (!tx_connected) return false;
+    bool sent = uartProto.sendCommand(UART_MSG_CMD_PAIR);
+    if (sent) {
+        Serial.println("[RC] Forwarded PAIR command to TX");
+    } else {
+        Serial.println("[RC] Failed to forward PAIR command to TX");
+    }
+    return sent;
 }
 
 // ============================================================

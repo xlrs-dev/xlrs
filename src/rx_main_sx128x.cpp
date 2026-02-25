@@ -12,6 +12,7 @@
 #include "SX128xLink.h"
 #include "pairing.h"
 #include "PacketHandler.h"
+#include "RCConfigProtocol.h"
 
 // CRSF Serial pins (override via build flags if your wiring differs)
 #ifndef CRSF_TX_PIN
@@ -94,6 +95,12 @@ bool isPaired();
 void detectConnectionLoss();
 void hsvToRgb(float h, float s, float v, uint8_t* r, uint8_t* g, uint8_t* b);
 void updateLED();
+static bool apply_binding_phrase_and_pair(const char* phrase);
+static bool rx_proto_set_binding_phrase(const char* phrase, uint8_t len);
+static bool rx_proto_set_binding_phrase_unsupported(const char* phrase, uint8_t len);
+static bool rx_proto_enter_pairing_mode(void);
+
+static RCConfigProtocol g_rx_proto;
 
 // ============================================================
 // Battery / link callbacks from CRSF
@@ -233,6 +240,11 @@ void setup() {
 
     Serial.println("=== RX Ready ===");
     Serial.println("Hold BOOTSEL for 5 seconds to enter pairing mode");
+    g_rx_proto.setStream(&Serial);
+    g_rx_proto.setDeviceInfo("RX-SX128x", "1.1");
+    g_rx_proto.setBindingPhraseRx(rx_proto_set_binding_phrase);
+    g_rx_proto.setBindingPhraseTx(rx_proto_set_binding_phrase_unsupported);
+    g_rx_proto.setEnterPairingMode(rx_proto_enter_pairing_mode);
     Serial.flush();
 }
 
@@ -240,6 +252,8 @@ void setup() {
 // Loop
 // ============================================================
 void loop() {
+    g_rx_proto.poll();
+
     // Update connection state machine
     updateConnectionState();
     
@@ -357,6 +371,26 @@ void loop() {
             case MSG_BATTERY:
                 // Battery telemetry from TX (not used on RX side)
                 break;
+            case MSG_BINDING_PHRASE_SET:
+                if (payload_len >= 2) {
+                    uint8_t phraseLen = payload[0];
+                    if (phraseLen > 0 && phraseLen <= 32 && payload_len >= (size_t)(1 + phraseLen)) {
+                        char phrase[33];
+                        memcpy(phrase, payload + 1, phraseLen);
+                        phrase[phraseLen] = '\0';
+                        if (apply_binding_phrase_and_pair(phrase)) {
+                            Serial.println("[RX] Binding phrase updated; pairing state reset");
+                            uint8_t ackPacket[1] = {MSG_BINDING_PHRASE_ACK};
+                            radio.send(ackPacket, sizeof(ackPacket));
+                        } else {
+                            Serial.println("[RX] Failed to set binding phrase");
+                        }
+                    }
+                }
+                break;
+            case MSG_BINDING_PHRASE_ACK:
+                // ACK is consumed on TX side.
+                break;
             default:
                 break;
         }
@@ -445,6 +479,32 @@ void loop() {
         Serial.flush();
         lastFlush = millis();
     }
+}
+
+static bool apply_binding_phrase_and_pair(const char* phrase) {
+    if (!phrase || !security.setBindingPhrase(phrase)) return false;
+    hasPairedTxId = false;
+    connectionState = STATE_PAIRING;
+    Pairing::enterPairingMode(&pairingMode, &pairingModeStartTime);
+    unpairedStartTime = millis();
+    return true;
+}
+
+static bool rx_proto_set_binding_phrase(const char* phrase, uint8_t len) {
+    if (!phrase || len == 0 || len > 32) return false;
+    return apply_binding_phrase_and_pair(phrase);
+}
+
+static bool rx_proto_set_binding_phrase_unsupported(const char* phrase, uint8_t len) {
+    (void)phrase;
+    (void)len;
+    return false;
+}
+
+static bool rx_proto_enter_pairing_mode(void) {
+    connectionState = STATE_PAIRING;
+    Pairing::enterPairingMode(&pairingMode, &pairingModeStartTime);
+    return true;
 }
 
 

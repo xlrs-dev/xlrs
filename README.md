@@ -2,8 +2,6 @@
 
 A 2.4GHz radio-based remote control system for FPV drones using Raspberry Pi Pico (RP2040) boards with SX1280 radio modules. The system uses a split architecture where an RC board reads analog sticks and switches, communicates with the TX module via UART, and the TX module transmits to the RX module over radio. The receiver (RX) outputs CRSF protocol signals compatible with Betaflight/ELRS flight controllers.
 
-> **Note:** This implementation replaces the previous BLE-based system. The SX1280 radio provides better range, lower latency, and more reliable communication compared to BLE. The legacy BLE implementations (`tx-ble`, `rx-ble`) are still available but deprecated.
-
 ## Architecture Overview
 
 The system consists of three main components:

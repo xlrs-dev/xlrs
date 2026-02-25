@@ -86,10 +86,13 @@ static void receiveUARTMessages();
 static void sendTelemetryToRC();
 static void sendStatusToRC();
 static void handleUARTCommands(UARTMsgType cmd);
+static void handleUARTBindingPhraseCommand(UARTMsgType cmd, const uint8_t* payload, uint8_t length);
+static bool forwardBindingPhraseToRx(const uint8_t* payload, uint8_t length);
 
 // UART Protocol callbacks
 static void onChannelsReceived(const ChannelData* data);
 static void onCommandReceived(UARTMsgType cmd);
+static void onCommandPayloadReceived(UARTMsgType cmd, const uint8_t* payload, uint8_t length);
 
 // ============================================================
 // Setup
@@ -178,6 +181,7 @@ void setup() {
     uartProto.begin(UART_PROTOCOL_BAUDRATE);
     uartProto.setOnChannels(onChannelsReceived);
     uartProto.setOnCommand(onCommandReceived);
+    uartProto.setOnCommandPayload(onCommandPayloadReceived);
     Serial.print("UART Protocol on Serial2: TX=GP");
     Serial.print(UART_PROTOCOL_TX);
     Serial.print(", RX=GP");
@@ -317,6 +321,9 @@ void loop() {
                     }
                 }
                 break;
+            case MSG_BINDING_PHRASE_ACK:
+                Serial.println("[TX] RX acknowledged binding phrase update");
+                break;
         }
     }
     
@@ -350,6 +357,10 @@ void onChannelsReceived(const ChannelData* data) {
 
 void onCommandReceived(UARTMsgType cmd) {
     handleUARTCommands(cmd);
+}
+
+void onCommandPayloadReceived(UARTMsgType cmd, const uint8_t* payload, uint8_t length) {
+    handleUARTBindingPhraseCommand(cmd, payload, length);
 }
 
 // ============================================================
@@ -390,6 +401,53 @@ void handleUARTCommands(UARTMsgType cmd) {
         default:
             break;
     }
+}
+
+void handleUARTBindingPhraseCommand(UARTMsgType cmd, const uint8_t* payload, uint8_t length) {
+    if (!payload || length == 0 || length > 32) {
+        uartProto.sendError(2);  // Invalid payload
+        return;
+    }
+
+    char phrase[33];
+    memcpy(phrase, payload, length);
+    phrase[length] = '\0';
+
+    if (cmd == UART_MSG_CMD_SET_BIND_TX) {
+        Serial.println("[UART] SET_BIND_TX command received");
+        if (!security.setBindingPhrase(phrase)) {
+            uartProto.sendError(2);
+            return;
+        }
+        hasPairedRxId = false;
+        pairingMode = true;
+        connectionState = STATE_PAIRING;
+        Serial.println("[TX] Binding phrase updated; pairing state reset");
+        uartProto.sendAck(UART_MSG_CMD_SET_BIND_TX);
+        return;
+    }
+
+    if (cmd == UART_MSG_CMD_SET_BIND_RX) {
+        Serial.println("[UART] SET_BIND_RX command received");
+        if (!forwardBindingPhraseToRx(payload, length)) {
+            uartProto.sendError(4);  // Forwarding error
+            return;
+        }
+        uartProto.sendAck(UART_MSG_CMD_SET_BIND_RX);
+        return;
+    }
+
+    uartProto.sendError(1);  // Unknown command
+}
+
+static bool forwardBindingPhraseToRx(const uint8_t* payload, uint8_t length) {
+    if (!payload || length == 0 || length > 32) return false;
+
+    uint8_t packet[1 + 1 + 32];
+    packet[0] = MSG_BINDING_PHRASE_SET;
+    packet[1] = length;
+    memcpy(packet + 2, payload, length);
+    return radio.send(packet, (size_t)(2 + length));
 }
 
 // ============================================================

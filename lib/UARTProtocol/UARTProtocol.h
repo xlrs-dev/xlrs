@@ -12,6 +12,8 @@ enum UARTMsgType : uint8_t {
     UART_MSG_CMD_STATUS_REQ = 0x13,
     UART_MSG_PING = 0x14,      // Device availability check
     UART_MSG_PONG = 0x15,      // Device availability response
+    UART_MSG_CMD_SET_BIND_TX = 0x16,
+    UART_MSG_CMD_SET_BIND_RX = 0x17,
     UART_MSG_TELEMETRY = 0x20,
     UART_MSG_STATUS = 0x21,
     UART_MSG_ACK = 0x22,
@@ -49,6 +51,7 @@ typedef void (*OnChannelsCallback)(const ChannelData* data);
 typedef void (*OnTelemetryCallback)(const TelemetryData* data);
 typedef void (*OnStatusCallback)(const StatusData* data);
 typedef void (*OnCommandCallback)(UARTMsgType cmd);
+typedef void (*OnCommandPayloadCallback)(UARTMsgType cmd, const uint8_t* payload, uint8_t length);
 typedef void (*OnAckCallback)(UARTMsgType ackedCmd);
 typedef void (*OnErrorCallback)(uint8_t errorCode);
 typedef void (*OnPongCallback)();  // PONG received (device is alive)
@@ -65,6 +68,7 @@ public:
     bool sendTelemetry(const TelemetryData* data);
     bool sendStatus(const StatusData* data);
     bool sendCommand(UARTMsgType cmd);
+    bool sendCommandWithPayload(UARTMsgType cmd, const uint8_t* payload, uint8_t payloadLength);
     bool sendAck(UARTMsgType ackedCmd);
     bool sendError(uint8_t errorCode);
     bool sendPing();  // Device availability check
@@ -78,6 +82,7 @@ public:
     void setOnTelemetry(OnTelemetryCallback cb) { onTelemetry = cb; }
     void setOnStatus(OnStatusCallback cb) { onStatus = cb; }
     void setOnCommand(OnCommandCallback cb) { onCommand = cb; }
+    void setOnCommandPayload(OnCommandPayloadCallback cb) { onCommandPayload = cb; }
     void setOnAck(OnAckCallback cb) { onAck = cb; }
     void setOnError(OnErrorCallback cb) { onError = cb; }
     void setOnPong(OnPongCallback cb) { onPong = cb; }
@@ -119,6 +124,7 @@ private:
     OnTelemetryCallback onTelemetry;
     OnStatusCallback onStatus;
     OnCommandCallback onCommand;
+    OnCommandPayloadCallback onCommandPayload;
     OnAckCallback onAck;
     OnErrorCallback onError;
     OnPongCallback onPong;

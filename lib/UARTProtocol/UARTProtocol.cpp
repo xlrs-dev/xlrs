@@ -16,6 +16,7 @@ UARTProtocol::UARTProtocol(HardwareSerial* serial)
     , onTelemetry(nullptr)
     , onStatus(nullptr)
     , onCommand(nullptr)
+    , onCommandPayload(nullptr)
     , onAck(nullptr)
     , onError(nullptr)
     , onPong(nullptr)
@@ -142,6 +143,13 @@ void UARTProtocol::processMessage(UARTMsgType type, const uint8_t* payload, uint
                 onCommand(type);
             }
             break;
+
+        case UART_MSG_CMD_SET_BIND_TX:
+        case UART_MSG_CMD_SET_BIND_RX:
+            if (onCommandPayload) {
+                onCommandPayload(type, payload, length);
+            }
+            break;
             
         case UART_MSG_PING:
             // Respond to ping with pong
@@ -194,6 +202,11 @@ bool UARTProtocol::sendStatus(const StatusData* data) {
 bool UARTProtocol::sendCommand(UARTMsgType cmd) {
     // Commands have no payload
     return sendFrame(cmd, nullptr, 0);
+}
+
+bool UARTProtocol::sendCommandWithPayload(UARTMsgType cmd, const uint8_t* payload, uint8_t payloadLength) {
+    if (!payload || payloadLength == 0) return false;
+    return sendFrame(cmd, payload, payloadLength);
 }
 
 bool UARTProtocol::sendAck(UARTMsgType ackedCmd) {

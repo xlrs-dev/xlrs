@@ -62,6 +62,7 @@ public:
     
     // Binding phrase UID management
     bool generateBindingUID(const char* bindingPhrase);
+    bool setBindingPhrase(const char* bindingPhrase);
     bool getBindingUID(uint8_t* uid);
     bool hasBindingUID();
     bool verifyBindingUID(const uint8_t* uid);
@@ -82,6 +83,7 @@ private:
     // Simple HMAC-SHA256 implementation (lightweight)
     void sha256(const uint8_t* data, size_t len, uint8_t* hash);
     void hmac_sha256(const uint8_t* key, size_t keyLen, const uint8_t* data, size_t dataLen, uint8_t* hmac);
+    void clearPairingState();
 };
 
 #endif // SECURITY_H

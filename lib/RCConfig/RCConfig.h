@@ -6,7 +6,7 @@
 #include <stdbool.h>
 
 // Schema version for protocol and EEPROM
-#define RC_CONFIG_SCHEMA_VERSION 1
+#define RC_CONFIG_SCHEMA_VERSION 2
 
 // EEPROM layout: avoid Security (120-168) and legacy cal block (150-175)
 #define RC_CONFIG_EEPROM_BASE   200
@@ -39,6 +39,7 @@ typedef struct {
     float expo[RC_NUM_AXES];           // 0.0..0.5 (expo curve)
     uint16_t cutoff_min[RC_NUM_CHANNELS];
     uint16_t cutoff_max[RC_NUM_CHANNELS];
+    uint8_t high_pass_filter;  // 0 = off, 1 = on (ADC high-pass filter for stick drift)
 } rc_config_data_t;
 
 // Stored layout: magic(4) + version(2) + payload + crc32(4). Payload = rc_config_data_t.

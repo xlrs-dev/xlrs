@@ -166,6 +166,15 @@ static bool cal_sampling = false;
 static int16_t cal_axis_min[4];
 static int16_t cal_axis_max[4];
 
+// High-pass filter state (1st-order, per-axis) for ADC drift reduction
+static float hpf_prev_in[4] = {0};
+static float hpf_prev_out[4] = {0};
+static bool hpf_initialized = false;
+#define RC_ADC_CENTER 16384
+#define HPF_TAU_S     0.05f
+#define HPF_DT_S      0.02f
+#define HPF_ALPHA     (HPF_TAU_S / (HPF_TAU_S + HPF_DT_S))
+
 // TX local battery (BQ2562X)
 static float tx_batt_voltage = 0.0f;
 static uint8_t tx_batt_percent = 0;
@@ -416,6 +425,28 @@ void readInputs() {
         axis_adc[2] = ads.readADC_SingleEnded(RUDDER_CHANNEL);
         axis_adc[3] = ads.readADC_SingleEnded(THROTTLE_CHANNEL);
 #endif
+    }
+
+    // Optional high-pass filter on ADC (reduces DC drift; center-referenced)
+    if (cfg->high_pass_filter) {
+        if (!hpf_initialized) {
+            for (int i = 0; i < 4; i++) {
+                float c = (float)(axis_adc[i] - RC_ADC_CENTER);
+                hpf_prev_in[i] = c;
+                hpf_prev_out[i] = c;
+            }
+            hpf_initialized = true;
+        }
+        for (int i = 0; i < 4; i++) {
+            float centered = (float)(axis_adc[i] - RC_ADC_CENTER);
+            float out = HPF_ALPHA * (hpf_prev_out[i] + centered - hpf_prev_in[i]);
+            hpf_prev_in[i] = centered;
+            hpf_prev_out[i] = out;
+            int32_t v = RC_ADC_CENTER + (int32_t)out;
+            axis_adc[i] = (int16_t)constrain(v, 0, 32767);
+        }
+    } else {
+        hpf_initialized = false;
     }
 
     for (int i = 0; i < 4; i++) raw_adc[i] = axis_adc[i];

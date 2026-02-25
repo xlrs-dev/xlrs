@@ -121,7 +121,7 @@ export class FrameParser {
 }
 
 const CONFIG_PAYLOAD_SIZE =
-  4 + 4 + 4 * 2 * 3 + 4 * 4 * 3 + 8 * 2 * 2;
+  4 + 4 + 4 * 2 * 3 + 4 * 4 * 3 + 8 * 2 * 2 + 1;
 
 function configToBytes(cfg: RcConfig): Uint8Array {
   const buf = new ArrayBuffer(CONFIG_PAYLOAD_SIZE);
@@ -161,6 +161,7 @@ function configToBytes(cfg: RcConfig): Uint8Array {
     dv.setUint16(off, cfg.cutoff_max[i] ?? 2000, true);
     off += 2;
   }
+  dv.setUint8(off, cfg.high_pass_filter ? 1 : 0);
   return new Uint8Array(buf);
 }
 
@@ -178,6 +179,7 @@ function bytesToConfig(bytes: Uint8Array): RcConfig | null {
     expo: [],
     cutoff_min: [],
     cutoff_max: [],
+    high_pass_filter: false,
   };
   let off = 0;
   for (let i = 0; i < NUM_AXES; i++) cfg.channel_function[i] = dv.getUint8(off++);
@@ -214,6 +216,7 @@ function bytesToConfig(bytes: Uint8Array): RcConfig | null {
     cfg.cutoff_max[i] = dv.getUint16(off, true);
     off += 2;
   }
+  cfg.high_pass_filter = dv.getUint8(off) !== 0;
   return cfg;
 }
 

@@ -10,6 +10,7 @@ export interface RcConfig {
   expo: number[];
   cutoff_min: number[];
   cutoff_max: number[];
+  high_pass_filter: boolean;
 }
 
 export const NUM_AXES = 4;
@@ -29,5 +30,6 @@ export function defaultRcConfig(): RcConfig {
     expo: [0.3, 0.3, 0.3, 0.3],
     cutoff_min: Array(NUM_CHANNELS).fill(1000),
     cutoff_max: Array(NUM_CHANNELS).fill(2000),
+    high_pass_filter: false,
   };
 }

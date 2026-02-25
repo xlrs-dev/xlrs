@@ -37,6 +37,7 @@ void rc_config_set_defaults(rc_config_data_t* config) {
         config->cutoff_min[i] = RC_CHANNEL_MIN;
         config->cutoff_max[i] = RC_CHANNEL_MAX;
     }
+    config->high_pass_filter = 0;
 }
 
 bool rc_config_validate(rc_config_data_t* config) {
@@ -66,6 +67,7 @@ bool rc_config_validate(rc_config_data_t* config) {
             config->cutoff_max[i] = RC_CHANNEL_MAX;
         }
     }
+    if (config->high_pass_filter > 1) config->high_pass_filter = 0;
     return true;
 }
 

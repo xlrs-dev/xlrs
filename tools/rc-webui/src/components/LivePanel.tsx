@@ -6,7 +6,7 @@ const ADC_MAX = 32767;
 const STREAM_RETRY_MS = 2000;
 
 export function LivePanel() {
-  const { serial, liveState, setLiveState } = useSerialContext();
+  const { serial, liveState, setLiveState, configDraft, setConfigDraft } = useSerialContext();
   const lastReceivedRef = useRef<number>(0);
   const retryRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -50,11 +50,29 @@ export function LivePanel() {
   const ch = s?.ch ?? Array(NUM_CHANNELS).fill(1500);
   const toggles = s?.toggles ?? [false, false, false, false];
 
+  const toggleHighPass = () => {
+    setConfigDraft((c) => ({ ...c, high_pass_filter: !c.high_pass_filter }));
+  };
+
   return (
     <div className="panel-content">
       <p className="text-[var(--color-text-muted)] text-sm mb-4">
         Live data over USB. Requires Chrome or Edge (Web Serial).
       </p>
+      <div className="flex flex-wrap items-center gap-4 mb-4">
+        <label className="flex items-center gap-2 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={configDraft.high_pass_filter ?? false}
+            onChange={toggleHighPass}
+            className="rounded border-[var(--color-border)]"
+          />
+          <span className="text-sm text-[var(--color-text)]">High-pass filter (ADC)</span>
+        </label>
+        <span className="text-xs text-[var(--color-text-muted)]">
+          Reduces stick drift. Apply in Save / Apply tab to use on device.
+        </span>
+      </div>
       <div className="viz-row">
         <div className="stick-viz">
           <h3 className="text-base font-semibold text-[var(--color-text)] mb-2">Sticks (ADC)</h3>

@@ -18,10 +18,10 @@ function SliderField({
   onValueChange: (v: number) => void;
 }) {
   return (
-    <div className="flex flex-wrap items-center gap-2 flex-1 min-w-[120px]">
-      <span className="text-[0.85rem] text-[var(--color-text-muted)] w-12 shrink-0">{label}</span>
+    <div className="curves-slider-field">
+      <span className="curves-slider-label">{label}</span>
       <Slider.Root
-        className="flex-1 min-w-[80px] touch-none select-none"
+        className="curves-slider-root"
         value={[value]}
         onValueChange={(vals) => onValueChange(vals[0] ?? value)}
         min={min}
@@ -29,12 +29,12 @@ function SliderField({
         step={step}
         aria-label={label}
       >
-        <Slider.Track className="relative h-2 rounded-full bg-[var(--color-input-bg)] grow">
-          <Slider.Range className="absolute h-full rounded-full bg-[var(--color-primary)]" />
+        <Slider.Track className="curves-slider-track">
+          <Slider.Range className="curves-slider-range" />
         </Slider.Track>
-        <Slider.Thumb className="block w-4 h-4 rounded-full bg-[var(--color-primary)] border-2 border-[var(--color-surface)] shadow-sm focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)] focus:ring-offset-2" />
+        <Slider.Thumb className="curves-slider-thumb" />
       </Slider.Root>
-      <span className="text-[0.85rem] w-10 tabular-nums">{value.toFixed(2)}</span>
+      <span className="curves-slider-value">{value.toFixed(2)}</span>
     </div>
   );
 }
@@ -92,9 +92,9 @@ export function CurvesPanel() {
         {AXIS_LABELS.map((_, i) => (
           <div
             key={i}
-            className="flex flex-wrap items-center gap-3 py-2 border-b border-[var(--color-border)] last:border-0"
+            className="curves-axis-row"
           >
-            <span className="min-w-[60px] font-medium text-sm">{AXIS_LABELS[i]}</span>
+            <span className="curves-axis-name">{AXIS_LABELS[i]}</span>
             <SliderField
               label="DZ"
               value={configDraft.deadzone[i]!}

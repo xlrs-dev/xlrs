@@ -20,6 +20,21 @@
 #define SCREEN_HEIGHT 64
 #define OLED_RESET -1
 #define I2C_ADDRESS 0x3C
+// Display layout (text size 1: ~6x8 per char, 8px row height). Strict: nothing past 127px to avoid wrap.
+#define ROW_H 8
+#define COL_0 0
+#define COL_RIGHT 64
+#define COL_LINK COL_RIGHT
+#define LINK_INDICATOR_X 118
+#define LINK_INDICATOR_Y 0
+#define LINK_INDICATOR_W 8
+#define LINK_INDICATOR_H 8
+#define BATT_BAR_X 88
+#define BATT_BAR_W 4
+#define BATT_BAR_H 5
+#define BATT_BAR_GAP 1
+#define TX_BATT_LOW_PCT 10
+#define MAX_CHARS_PER_ROW 21
 
 // ADS1115 Configuration
 #define ADS1115_ADDRESS 0x48  // Default I2C address (can be 0x48-0x4B)
@@ -179,6 +194,7 @@ static bool hpf_initialized = false;
 static float tx_batt_voltage = 0.0f;
 static uint8_t tx_batt_percent = 0;
 static uint8_t tx_batt_bars = 0;
+static bool tx_batt_low = false;
 static bool tx_batt_valid = false;
 static unsigned long last_tx_batt_read = 0;
 static const unsigned long TX_BATT_READ_INTERVAL = 5000; // ms
@@ -208,6 +224,9 @@ static const char* get_vbus_status_string(enum bq2562x_vbus_status status);
 static void play_boot_jingle(void);
 static void scan_i2c_bus(void);
 static bool init_display(void);
+static void drawBatteryBar(int x, int y, uint8_t percent, bool low_blink);
+static void drawLinkIndicator(int x, int y, bool connected);
+static void resync_display_viewport(void);
 
 // UART Protocol callbacks
 static void onTelemetryReceived(const TelemetryData* data);
@@ -374,11 +393,10 @@ void setup() {
     // Play boot jingle
     play_boot_jingle();
     
-    // Increase I2C speed after initialization if devices are working
-    if (display_ok || ads_ok) {
-        Wire.setClock(400000);  // 400kHz fast mode
-        Serial.println("I2C bus speed increased to 400kHz");
-    }
+    // Keep I2C at 100kHz for display stability.
+    // Some OLED modules show page-wrap artifacts at 400kHz on longer/noisy wires.
+    Wire.setClock(100000);
+    Serial.println("I2C bus speed kept at 100kHz for stable OLED updates");
 }
 
 // ============================================================
@@ -648,74 +666,125 @@ void handleButtons() {
 // ============================================================
 // Display
 // ============================================================
+static void drawBatteryBar(int x, int y, uint8_t percent, bool low_blink) {
+    // 4 bars, each BATT_BAR_W wide with BATT_BAR_GAP between
+    uint8_t bars = (percent * 4 + 99) / 100;
+    if (bars > 4) bars = 4;
+    bool blink = low_blink && ((millis() / 500) % 2 == 0);
+    for (uint8_t i = 0; i < 4; i++) {
+        bool filled = (i < bars);
+        if (low_blink && i == bars - 1 && bars > 0) filled = !blink;
+        int bx = x + i * (BATT_BAR_W + BATT_BAR_GAP);
+        display.fillRect(bx, y, BATT_BAR_W, BATT_BAR_H, filled ? SH110X_WHITE : SH110X_BLACK);
+        display.drawRect(bx, y, BATT_BAR_W, BATT_BAR_H, SH110X_WHITE);
+    }
+}
+
+static void drawLinkIndicator(int x, int y, bool connected) {
+    display.fillRect(x, y, LINK_INDICATOR_W, LINK_INDICATOR_H, connected ? SH110X_WHITE : SH110X_BLACK);
+    display.drawRect(x, y, LINK_INDICATOR_W, LINK_INDICATOR_H, SH110X_WHITE);
+}
+
+static void resync_display_viewport(void) {
+    // Re-assert viewport/scroll registers in case I2C noise corrupts OLED state.
+    // Symptom this fixes: bottom page appears at top (vertical wrap/look shifted).
+    display.oled_command(0x2E); // Deactivate scroll
+    display.oled_command(0x40); // Start line = 0
+    display.oled_command(0xD3); // Set display offset
+    display.oled_command(0x00); // Offset = 0
+}
+
 void updateDisplay() {
     if (millis() - lastDisplayUpdate < DISPLAY_INTERVAL) return;
     lastDisplayUpdate = millis();
 
-    // Only update display if it was successfully initialized
     if (!display_ok) return;
 
+    resync_display_viewport();
+
     display.clearDisplay();
-    display.setCursor(0, 0);
-    
-    // Line 1: RC-CRSF, TX battery voltage & percent
-    display.print("RC-CRSF ");
+    display.setTextSize(1);
+    display.setTextColor(SH110X_WHITE);
+    display.setTextWrap(false);
+
+    const char* linkStateNames[] = {"DISC", "PAIR", "CONN", "OK", "LOST"};
+    int y = 0;
+
+    // Row 0: Title + link indicator (top-right)
+    display.setCursor(COL_0, y);
+    display.print("RC-CRSF");
+    drawLinkIndicator(LINK_INDICATOR_X, LINK_INDICATOR_Y, tx_connected);
+    y += ROW_H;
+
+    // Row 1: TX Batt  4.20V  100% [||||]
+    display.setCursor(COL_0, y);
+    display.print("TX ");
     if (tx_batt_valid) {
         display.print(tx_batt_voltage, 2);
         display.print("V ");
         display.print(tx_batt_percent);
         display.print("%");
+        drawBatteryBar(BATT_BAR_X, y, tx_batt_percent, tx_batt_low);
     } else {
-        display.print("---V --%");
+        display.print("--V --%");
     }
-    display.println();
-    
-    // Line 2: Charging status and VBUS status
+    y += ROW_H;
+
+    // Row 2: RX Batt  4.2V  100%  Chg:xx V:xx
+    display.setCursor(COL_0, y);
+    display.print("RX ");
+    if (telemetryValid) {
+        display.print(telemetry.rxBattMv / 1000.0f, 1);
+        display.print("V ");
+        display.print(telemetry.rxBattPct);
+        display.print("%");
+    } else {
+        display.print("--  --%");
+    }
     if (tx_charge_status_valid) {
+        display.setCursor(COL_LINK, y);
         display.print(get_charge_status_string(tx_charge_status));
         display.print(" ");
-        display.print(get_vbus_status_string(tx_vbus_status));
-    } else {
-        display.print("Status:---");
+        const char* vbus = get_vbus_status_string(tx_vbus_status);
+        for (int i = 0; i < 3 && vbus[i]; i++) display.print(vbus[i]);
     }
-    display.println();
-    
-    // Line 3: TX connection and RSSI/SNR
+    y += ROW_H;
+
+    // Row 3: Link: OK   RSSI:-50 LQ:98
+    display.setCursor(COL_0, y);
+    display.print("Link:");
     if (tx_connected) {
-        display.print("TX:");
-        if (statusValid) {
-            const char* stateNames[] = {"DISC", "PAIR", "CONN", "OK", "LOST"};
-            if (status.connectionState < 5) {
-                display.print(stateNames[status.connectionState]);
-            }
+        if (statusValid && status.connectionState < 5) {
+            display.print(linkStateNames[status.connectionState]);
         } else {
             display.print("OK");
         }
     } else {
-        display.print("TX:---");
+        display.print("---");
     }
-    display.print(" ");
+    display.setCursor(COL_LINK, y);
     if (telemetryValid) {
-        display.print("RSSI:");
+        display.print("R:");
         display.print(telemetry.rssi);
-    }
-    display.println();
-
-    // Line 4: RX Battery or Channels
-    if (telemetryValid) {
-        display.print("RX:");
-        display.print(telemetry.rxBattMv / 1000.0f, 1);
-        display.print("V ");
-        display.print(telemetry.rxBattPct);
-        display.print("% SNR:");
-        display.print(telemetry.snr, 1);
+        display.print(" L:");
+        display.print(telemetry.linkQuality);
     } else {
-        display.print("Ch0/1:");
-        display.print(channels[0]);
-        display.print("/");
-        display.print(channels[1]);
+        display.print("R:-- L:--");
     }
-    display.println();
+    y += ROW_H;
+
+    // Row 4-5: A   E   R   T  and values
+    display.setCursor(COL_0, y);
+    display.print("A    E    R    T");
+    y += ROW_H;
+    display.setCursor(COL_0, y);
+    display.print(channels[AILERON_CHANNEL]);
+    display.print(" ");
+    display.print(channels[ELEVATOR_CHANNEL]);
+    display.print(" ");
+    display.print(channels[RUDDER_CHANNEL]);
+    display.print(" ");
+    display.print(channels[THROTTLE_CHANNEL]);
 
     display.display();
 }
@@ -967,6 +1036,7 @@ static bool init_display(void) {
     display.clearDisplay();
     display.setTextSize(1);
     display.setTextColor(SH110X_WHITE);
+    display.setTextWrap(false);
     display.setCursor(0, 0);
     display.println("RC-CRSF init...");
     display.display();
@@ -1103,6 +1173,7 @@ static void update_tx_battery(void) {
         tx_batt_voltage = voltage_mv / 1000.0f;  // Convert mV to volts
         tx_batt_percent = voltage_to_percent(tx_batt_voltage);
         tx_batt_bars = percent_to_bars(tx_batt_percent);
+        tx_batt_low = (tx_batt_percent <= TX_BATT_LOW_PCT);
         tx_batt_valid = true;
         tx_batt_raw_last = voltage_mv;
         

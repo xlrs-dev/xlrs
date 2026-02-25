@@ -7,7 +7,6 @@ import type { RcConfig } from '../types/rc';
 import { NUM_AXES, NUM_CHANNELS } from '../types/rc';
 
 const SYNC = 0xa5;
-const RESP_BIT = 0x80;
 const MAX_PAYLOAD = 128;
 
 export const CMD = {

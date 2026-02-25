@@ -17,7 +17,15 @@ import {
 } from '../lib/protocol';
 import type { RcConfig } from '../types/rc';
 
+/** Web Serial API – not in default TypeScript libs; declare for type safety. */
 declare global {
+  interface SerialPort {
+    open(options: { baudRate: number }): Promise<void>;
+    close(): Promise<void>;
+    getInfo(): { usbVendorId?: number; usbProductId?: number };
+    readonly readable: ReadableStream<Uint8Array> | null;
+    readonly writable: WritableStream<Uint8Array> | null;
+  }
   interface Navigator {
     serial?: {
       requestPort: () => Promise<SerialPort>;

@@ -1,6 +1,7 @@
 import { createContext, useContext, useMemo, useState, useCallback } from 'react';
 import { useSerial } from '../hooks/useSerial';
-import type { RcConfig, StateFrame } from '../types/rc';
+import type { RcConfig } from '../types/rc';
+import type { StateFrame } from '../lib/protocol';
 import { defaultRcConfig } from '../types/rc';
 
 interface SerialContextValue {

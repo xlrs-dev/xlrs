@@ -75,6 +75,10 @@ export function AutoPairPanel() {
   }, [rcSerial.connected, refreshLinkStatus]);
 
   const preflightReady = rcOk && txOk && rxOk;
+  const currentStepIndex =
+    steps.findIndex((s) => s.state === 'running') >= 0
+      ? steps.findIndex((s) => s.state === 'running') + 1
+      : steps.filter((s) => s.state === 'done').length + 1;
 
   const setStep = (id: string, state: StepState, detail?: string) => {
     setSteps((prev) =>
@@ -211,13 +215,13 @@ export function AutoPairPanel() {
 
   return (
     <div className="panel-content">
-      <p>
-        One-click pairing flow: verify RC→TX link, generate a new phrase, apply to RX+TX, then
-        wait for pairing and report result.
+      <p className="text-[var(--color-text-muted)] text-sm mb-4">
+        One-click pairing: verify RC→TX link, generate a new phrase, apply to RX+TX, then wait for
+        pairing and report result.
       </p>
 
       <div className="preflight-card">
-        <h4>Preflight checks</h4>
+        <h4 className="text-[var(--color-text)] font-semibold">Preflight checks</h4>
         <p className="hint">All three must be green before running auto pair.</p>
         <ul className="preflight-list" aria-label="Preflight status">
           <li className={rcOk ? 'ok' : 'fail'}>
@@ -256,24 +260,29 @@ export function AutoPairPanel() {
             )}
           </li>
         </ul>
-        <button type="button" className="btn preflight-refresh" onClick={refreshLinkStatus}>
+        <button type="button" className="btn-secondary preflight-refresh mt-2" onClick={refreshLinkStatus}>
           Refresh TX status
         </button>
       </div>
 
-      <div className="connection-card auto-pair-card">
-        <h4>RX USB connection</h4>
-        <div className="serial-row">
+      <div className="card auto-pair-card mt-4">
+        <h4 className="text-[var(--color-text)] font-semibold">RX USB connection</h4>
+        <div className="flex flex-wrap items-center gap-3 mt-2">
           {rxSerial.connected ? (
             <>
-              <span className="status">Connected: {rxSerial.portName ?? 'RX serial'}</span>
-              <button type="button" className="btn" onClick={rxSerial.disconnect}>
+              <span className="text-sm">Connected: {rxSerial.portName ?? 'RX serial'}</span>
+              <button type="button" className="btn-secondary" onClick={rxSerial.disconnect}>
                 Disconnect RX
               </button>
             </>
           ) : (
             <>
-              <select className="port-select" value="" onChange={handleRxPortChange}>
+              <select
+                className="input-select"
+                value=""
+                onChange={handleRxPortChange}
+                aria-label="Select RX USB device"
+              >
                 <option value="">Select RX device…</option>
                 {rxSerial.availablePorts.map((port, i) => (
                   <option key={i} value={i}>
@@ -282,28 +291,36 @@ export function AutoPairPanel() {
                 ))}
                 <option value="new">Add new device…</option>
               </select>
-              <button type="button" className="btn" onClick={rxSerial.connectNew}>
+              <button type="button" className="btn-secondary" onClick={rxSerial.connectNew}>
                 Add RX device
               </button>
             </>
           )}
-          <button type="button" className="btn" onClick={rxSerial.refreshPorts}>
+          <button type="button" className="btn-secondary" onClick={rxSerial.refreshPorts}>
             Refresh ports
           </button>
         </div>
       </div>
 
-      <div className="btn-row">
+      <div className="btn-row mt-6">
         <button
           type="button"
-          className="btn primary"
+          className="btn-primary"
           onClick={runAutoPair}
           disabled={busy || !preflightReady}
           title={!preflightReady ? 'Complete all preflight checks first' : undefined}
         >
-          {busy ? 'Running auto pair...' : preflightReady ? 'Auto pair now' : 'Complete preflight first'}
+          {busy
+            ? `Running… Step ${currentStepIndex} of ${steps.length}`
+            : preflightReady
+              ? 'Auto pair now'
+              : 'Complete preflight first'}
         </button>
       </div>
+
+      <p className="text-sm text-[var(--color-text-muted)] mt-2">
+        {busy ? `Step ${currentStepIndex} of ${steps.length}` : 'Steps run in order when you click Auto pair now.'}
+      </p>
 
       <div className="step-list">
         {steps.map((s) => (
@@ -317,8 +334,20 @@ export function AutoPairPanel() {
         ))}
       </div>
 
-      {generatedPhrase && <p className="status">Last generated phrase: {generatedPhrase}</p>}
-      {status && <p className="status">{status}</p>}
+      {generatedPhrase && (
+        <p className="mt-4 text-sm text-[var(--color-text-muted)]">
+          Last generated phrase: <span className="font-mono">{generatedPhrase}</span>
+        </p>
+      )}
+      {status && (
+        <p
+          className={`mt-2 text-sm ${
+            status.toLowerCase().startsWith('success') ? 'text-[var(--color-success)]' : 'text-[var(--color-text)]'
+          }`}
+        >
+          {status}
+        </p>
+      )}
     </div>
   );
 }

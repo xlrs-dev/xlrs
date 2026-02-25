@@ -1,5 +1,43 @@
 import { useSerialContext } from '../context/SerialContext';
-import { NUM_AXES, NUM_CHANNELS, AXIS_LABELS } from '../types/rc';
+import { NUM_CHANNELS, AXIS_LABELS } from '../types/rc';
+import * as Slider from '@radix-ui/react-slider';
+
+function SliderField({
+  label,
+  value,
+  min,
+  max,
+  step,
+  onValueChange,
+}: {
+  label: string;
+  value: number;
+  min: number;
+  max: number;
+  step: number;
+  onValueChange: (v: number) => void;
+}) {
+  return (
+    <div className="flex flex-wrap items-center gap-2 flex-1 min-w-[120px]">
+      <span className="text-[0.85rem] text-[var(--color-text-muted)] w-12 shrink-0">{label}</span>
+      <Slider.Root
+        className="flex-1 min-w-[80px] touch-none select-none"
+        value={[value]}
+        onValueChange={(vals) => onValueChange(vals[0] ?? value)}
+        min={min}
+        max={max}
+        step={step}
+        aria-label={label}
+      >
+        <Slider.Track className="relative h-2 rounded-full bg-[var(--color-input-bg)] grow">
+          <Slider.Range className="absolute h-full rounded-full bg-[var(--color-primary)]" />
+        </Slider.Track>
+        <Slider.Thumb className="block w-4 h-4 rounded-full bg-[var(--color-primary)] border-2 border-[var(--color-surface)] shadow-sm focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)] focus:ring-offset-2" />
+      </Slider.Root>
+      <span className="text-[0.85rem] w-10 tabular-nums">{value.toFixed(2)}</span>
+    </div>
+  );
+}
 
 export function CurvesPanel() {
   const { configDraft, setConfigDraft, serial } = useSerialContext();
@@ -46,29 +84,79 @@ export function CurvesPanel() {
 
   return (
     <div className="panel-content">
-      <p>Per-axis deadzone (0–0.2), rate (0.5–1), expo (0–0.5). Cutoffs: channel min/max µs.</p>
+      <p className="text-[var(--color-text-muted)] text-sm mb-4">
+        Per-axis deadzone (0–0.2), rate (0.5–1), expo (0–0.5). Cutoffs: channel min/max µs.
+      </p>
       <div className="curves-grid">
-        <h4>Axes</h4>
+        <h4 className="text-[var(--color-text)] font-semibold mt-4 mb-1">Per-axis</h4>
         {AXIS_LABELS.map((_, i) => (
-          <div key={i} className="curve-row">
-            <span>{AXIS_LABELS[i]}</span>
-            <label>DZ <input type="number" min={0} max={0.5} step={0.01} value={configDraft.deadzone[i]} onChange={(e) => setDeadzone(i, Number(e.target.value))} /></label>
-            <label>Rate <input type="number" min={0.3} max={1} step={0.05} value={configDraft.rate[i]} onChange={(e) => setRate(i, Number(e.target.value))} /></label>
-            <label>Expo <input type="number" min={0} max={1} step={0.05} value={configDraft.expo[i]} onChange={(e) => setExpo(i, Number(e.target.value))} /></label>
+          <div
+            key={i}
+            className="flex flex-wrap items-center gap-3 py-2 border-b border-[var(--color-border)] last:border-0"
+          >
+            <span className="min-w-[60px] font-medium text-sm">{AXIS_LABELS[i]}</span>
+            <SliderField
+              label="DZ"
+              value={configDraft.deadzone[i]!}
+              min={0}
+              max={0.5}
+              step={0.01}
+              onValueChange={(v) => setDeadzone(i, v)}
+            />
+            <SliderField
+              label="Rate"
+              value={configDraft.rate[i]!}
+              min={0.3}
+              max={1}
+              step={0.05}
+              onValueChange={(v) => setRate(i, v)}
+            />
+            <SliderField
+              label="Expo"
+              value={configDraft.expo[i]!}
+              min={0}
+              max={1}
+              step={0.05}
+              onValueChange={(v) => setExpo(i, v)}
+            />
           </div>
         ))}
-        <h4>Channel cutoffs (µs)</h4>
-        {Array.from({ length: NUM_CHANNELS }, (_, i) => (
-          <div key={i} className="curve-row">
-            <span>Ch{i}</span>
-            <label>Min <input type="number" min={1000} max={2000} value={configDraft.cutoff_min[i]} onChange={(e) => setCutoffMin(i, Number(e.target.value))} /></label>
-            <label>Max <input type="number" min={1000} max={2000} value={configDraft.cutoff_max[i]} onChange={(e) => setCutoffMax(i, Number(e.target.value))} /></label>
-          </div>
-        ))}
+        <h4 className="text-[var(--color-text)] font-semibold mt-6 mb-1">Channel cutoffs (µs)</h4>
+        <div className="flex flex-col gap-2">
+          {Array.from({ length: NUM_CHANNELS }, (_, i) => (
+            <div key={i} className="curve-row flex flex-wrap items-center gap-3">
+              <span className="min-w-[48px] font-medium text-sm">Ch{i}</span>
+              <label className="inline-flex items-center gap-2 text-sm">
+                Min
+                <input
+                  type="number"
+                  min={1000}
+                  max={2000}
+                  value={configDraft.cutoff_min[i]}
+                  onChange={(e) => setCutoffMin(i, Number(e.target.value))}
+                  className="w-20 py-1.5 px-2 rounded border border-[var(--color-input-border)] bg-[var(--color-input-bg)] text-inherit"
+                />
+              </label>
+              <label className="inline-flex items-center gap-2 text-sm">
+                Max
+                <input
+                  type="number"
+                  min={1000}
+                  max={2000}
+                  value={configDraft.cutoff_max[i]}
+                  onChange={(e) => setCutoffMax(i, Number(e.target.value))}
+                  className="w-20 py-1.5 px-2 rounded border border-[var(--color-input-border)] bg-[var(--color-input-bg)] text-inherit"
+                />
+              </label>
+            </div>
+          ))}
+        </div>
       </div>
-      <button type="button" className="btn primary" onClick={pushDraft}>
-        Apply to device
-      </button>
+      <div className="mt-4">
+        <button type="button" className="btn-primary" onClick={pushDraft}>
+          Apply to device
+        </button>
+      </div>
     </div>
   );
 }

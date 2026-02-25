@@ -2,33 +2,41 @@ import { useState, useRef } from 'react';
 import { useSerialContext } from '../context/SerialContext';
 import { defaultRcConfig } from '../types/rc';
 
+type StatusType = 'idle' | 'success' | 'error';
+
 export function ConfigPanel() {
   const { serial, configDraft, setConfigDraft, loadConfigFromDevice } = useSerialContext();
   const [status, setStatus] = useState('');
+  const [statusType, setStatusType] = useState<StatusType>('idle');
   const [bindingPhrase, setBindingPhrase] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  const showStatus = (msg: string, type: StatusType) => {
+    setStatus(msg);
+    setStatusType(type);
+  };
+
   const handleApply = async () => {
-    setStatus('Applying…');
+    showStatus('Applying…', 'idle');
     const ok = await serial.setConfigDraft(configDraft);
     if (ok) {
       const applied = await serial.applyConfig();
-      setStatus(applied ? 'Applied to device.' : 'Apply failed.');
+      showStatus(applied ? 'Applied to device.' : 'Apply failed.', applied ? 'success' : 'error');
     } else {
-      setStatus('Set draft failed.');
+      showStatus('Set draft failed.', 'error');
     }
   };
 
   const handleSave = async () => {
-    setStatus('Saving to EEPROM…');
+    showStatus('Saving to EEPROM…', 'idle');
     const ok = await serial.saveConfig();
-    setStatus(ok ? 'Saved to EEPROM.' : 'Save failed.');
+    showStatus(ok ? 'Saved to EEPROM.' : 'Save failed.', ok ? 'success' : 'error');
   };
 
   const handleLoad = async () => {
-    setStatus('Loading…');
+    showStatus('Loading…', 'idle');
     await loadConfigFromDevice();
-    setStatus('Config loaded from device.');
+    showStatus('Config loaded from device.', 'success');
   };
 
   const handleExport = () => {
@@ -38,7 +46,7 @@ export function ConfigPanel() {
     a.download = 'rc-config.json';
     a.click();
     URL.revokeObjectURL(a.href);
-    setStatus('Exported.');
+    showStatus('Exported.', 'success');
   };
 
   const handleImport = () => {
@@ -53,9 +61,9 @@ export function ConfigPanel() {
       try {
         const cfg = JSON.parse(r.result as string);
         setConfigDraft({ ...defaultRcConfig(), ...cfg });
-        setStatus('Imported. Apply to device to use.');
+        showStatus('Imported. Apply to device to use.', 'success');
       } catch {
-        setStatus('Invalid JSON.');
+        showStatus('Invalid JSON.', 'error');
       }
     };
     r.readAsText(file);
@@ -73,23 +81,29 @@ export function ConfigPanel() {
   const handleSetRxBindingPhrase = async () => {
     const err = validateBindingPhrase();
     if (err) {
-      setStatus(err);
+      showStatus(err, 'error');
       return;
     }
-    setStatus('Sending RX binding phrase update...');
+    showStatus('Sending RX binding phrase update...', 'idle');
     const ok = await serial.setRxBindingPhrase(bindingPhrase);
-    setStatus(ok ? 'RX binding phrase update sent.' : 'RX binding phrase update failed.');
+    showStatus(
+      ok ? 'RX binding phrase update sent.' : 'RX binding phrase update failed.',
+      ok ? 'success' : 'error'
+    );
   };
 
   const handleSetTxBindingPhrase = async () => {
     const err = validateBindingPhrase();
     if (err) {
-      setStatus(err);
+      showStatus(err, 'error');
       return;
     }
-    setStatus('Sending TX binding phrase update...');
+    showStatus('Sending TX binding phrase update...', 'idle');
     const ok = await serial.setTxBindingPhrase(bindingPhrase);
-    setStatus(ok ? 'TX binding phrase updated.' : 'TX binding phrase update failed.');
+    showStatus(
+      ok ? 'TX binding phrase updated.' : 'TX binding phrase update failed.',
+      ok ? 'success' : 'error'
+    );
   };
 
   if (!serial.connected) {
@@ -98,24 +112,38 @@ export function ConfigPanel() {
 
   return (
     <div className="panel-content">
-      <p>Apply = write draft to runtime. Save = write runtime to EEPROM (persists).</p>
-      <div className="btn-row">
-        <button type="button" className="btn" onClick={handleLoad}>
-          Load from device
-        </button>
-        <button type="button" className="btn" onClick={handleApply}>
-          Apply to device
-        </button>
-        <button type="button" className="btn primary" onClick={handleSave}>
-          Save to EEPROM
-        </button>
-        <button type="button" className="btn" onClick={handleExport}>
-          Export JSON
-        </button>
-        <button type="button" className="btn" onClick={handleImport}>
-          Import JSON
-        </button>
+      <p className="text-[var(--color-text-muted)] text-sm mb-4">
+        Apply = write draft to runtime. Save = write runtime to EEPROM (persists).
+      </p>
+
+      <div className="flex flex-wrap gap-6">
+        <div>
+          <h4 className="text-sm font-semibold text-[var(--color-text)] mb-2">Device</h4>
+          <div className="btn-row flex flex-wrap gap-2">
+            <button type="button" className="btn-secondary" onClick={handleLoad}>
+              Load from device
+            </button>
+            <button type="button" className="btn-secondary" onClick={handleApply}>
+              Apply to device
+            </button>
+            <button type="button" className="btn-primary" onClick={handleSave}>
+              Save to EEPROM
+            </button>
+          </div>
+        </div>
+        <div>
+          <h4 className="text-sm font-semibold text-[var(--color-text)] mb-2">File</h4>
+          <div className="btn-row flex flex-wrap gap-2">
+            <button type="button" className="btn-secondary" onClick={handleExport}>
+              Export JSON
+            </button>
+            <button type="button" className="btn-secondary" onClick={handleImport}>
+              Import JSON
+            </button>
+          </div>
+        </div>
       </div>
+
       <input
         ref={fileInputRef}
         type="file"
@@ -123,9 +151,10 @@ export function ConfigPanel() {
         hidden
         onChange={onFileChange}
       />
-      <div className="binding-phrase-card">
+
+      <div className="binding-phrase-card mt-6">
         <h4>Binding phrase</h4>
-        <p className="hint">
+        <p className="hint text-sm mt-1">
           Set RX first, then TX, then run pairing again. Max 32 bytes.
         </p>
         <div className="binding-phrase-row">
@@ -136,15 +165,30 @@ export function ConfigPanel() {
             onChange={(e) => setBindingPhrase(e.target.value)}
             placeholder="Enter new binding phrase"
           />
-          <button type="button" className="btn" onClick={handleSetRxBindingPhrase}>
+          <button type="button" className="btn-secondary" onClick={handleSetRxBindingPhrase}>
             Set RX phrase
           </button>
-          <button type="button" className="btn" onClick={handleSetTxBindingPhrase}>
+          <button type="button" className="btn-secondary" onClick={handleSetTxBindingPhrase}>
             Set TX phrase
           </button>
         </div>
       </div>
-      <p className="status">{status}</p>
+
+      {status && (
+        <p
+          role="status"
+          aria-live="polite"
+          className={`mt-4 text-sm ${
+            statusType === 'success'
+              ? 'text-[var(--color-success)]'
+              : statusType === 'error'
+                ? 'text-[var(--color-error)]'
+                : 'text-[var(--color-text-muted)]'
+          }`}
+        >
+          {status}
+        </p>
+      )}
     </div>
   );
 }

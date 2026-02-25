@@ -7,6 +7,7 @@ import { CurvesPanel } from './components/CurvesPanel';
 import { ConfigPanel } from './components/ConfigPanel';
 import { AutoPairPanel } from './components/AutoPairPanel';
 import { getPortLabel } from './hooks/useSerial';
+import * as Tabs from '@radix-ui/react-tabs';
 import './App.css';
 
 const TABS = [
@@ -21,8 +22,6 @@ const TABS = [
 function AppContent() {
   const [tab, setTab] = useState<string>('live');
   const { serial } = useSerialContext();
-  const current = TABS.find((t) => t.id === tab) ?? TABS[0];
-  const Panel = current.Panel;
 
   useEffect(() => {
     if (navigator.serial) serial.refreshPorts();
@@ -44,32 +43,50 @@ function AppContent() {
   };
 
   return (
-    <div className="app">
-      <header className="header">
-        <h1>RC Config</h1>
-        <div className="connection-card">
-          <div className="serial-row">
+    <div className="app max-w-[920px] mx-auto px-5 py-6 w-full">
+      <header className="mb-6">
+        <h1 className="font-heading text-xl font-semibold tracking-tight m-0 mb-3 text-[var(--color-text)]">
+          RC Config
+        </h1>
+        <div
+          className="rounded-[var(--radius-card)] border border-[var(--color-border)] bg-[var(--color-card)]"
+          style={{ padding: '1rem 1.25rem' }}
+        >
+          <div className="flex flex-col sm:flex-row sm:flex-wrap items-stretch sm:items-center gap-3">
             {serial.connected ? (
               <>
-                <div className="connection-status">
-                  <span className="status-dot connected" aria-hidden />
-                  <span className="status">
+                <div className="flex items-center gap-2">
+                  <span
+                    className="w-2 h-2 rounded-full bg-[var(--color-success)] shrink-0"
+                    style={{ boxShadow: '0 0 0 2px var(--color-success-glow)' }}
+                    aria-hidden
+                  />
+                  <span className="text-[0.95rem] text-[var(--color-text)]">
                     {serial.portName ?? 'Connected'}
                     {serial.deviceInfo && (
-                      <span className="device-info"> — {serial.deviceInfo.name} {serial.deviceInfo.version}</span>
+                      <span className="text-[var(--color-text-muted)] font-normal">
+                        {' '}
+                        — {serial.deviceInfo.name} {serial.deviceInfo.version}
+                      </span>
                     )}
                   </span>
                 </div>
-                <button type="button" className="btn" onClick={serial.disconnect}>
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  onClick={serial.disconnect}
+                >
                   Disconnect
                 </button>
               </>
             ) : (
               <>
-                <label htmlFor="port-select" className="sr-only">Device</label>
+                <label htmlFor="port-select" className="sr-only">
+                  Device
+                </label>
                 <select
                   id="port-select"
-                  className="port-select"
+                  className="input-select w-full sm:min-w-[180px] sm:w-auto"
                   value=""
                   onChange={handlePortChange}
                   aria-label="Select USB serial device"
@@ -82,42 +99,52 @@ function AppContent() {
                   ))}
                   <option value="new">Add new device…</option>
                 </select>
-                <button type="button" className="btn primary" onClick={serial.connectNew}>
+                <button type="button" className="btn-primary" onClick={serial.connectNew}>
                   Add new device
                 </button>
-                <span className="status muted">Not connected</span>
+                <span className="text-[0.95rem] text-[var(--color-text-muted)]">Not connected</span>
               </>
             )}
           </div>
-          <p className="connection-hint">
+          <p className="mt-3 text-[0.85rem] text-[var(--color-text-muted)] leading-snug">
             {serial.connected
               ? 'Connected over USB serial. Use the tabs below to calibrate, map axes, and save config.'
               : 'Choose a device you’ve used before, or “Add new device” to pick from the system list. Requires Chrome or Edge.'}
           </p>
-          {serial.error && <p className="error">{serial.error}</p>}
+          {serial.error && (
+            <p className="mt-3 text-[0.9rem] text-[var(--color-error)] w-full">{serial.error}</p>
+          )}
         </div>
       </header>
 
-      <main className="main">
-        <nav className="tabs" role="tablist" aria-label="Configuration sections">
+      <Tabs.Root className="w-full" value={tab} onValueChange={(value) => setTab(value)}>
+        <Tabs.List
+          className="flex gap-0.5 mb-5 pb-0 border-b border-[var(--color-border)] overflow-x-auto flex-nowrap"
+          role="tablist"
+          aria-label="Configuration sections"
+        >
           {TABS.map((t) => (
-            <button
+            <Tabs.Trigger
               key={t.id}
-              type="button"
-              role="tab"
-              aria-selected={tab === t.id}
-              className={`tab ${tab === t.id ? 'active' : ''}`}
-              onClick={() => setTab(t.id)}
+              value={t.id}
+              className="tabs-trigger"
             >
               {t.label}
-            </button>
+            </Tabs.Trigger>
           ))}
-        </nav>
+        </Tabs.List>
 
-        <section className="panel" role="tabpanel">
-          <Panel />
-        </section>
-      </main>
+        {TABS.map((t) => (
+          <Tabs.Content
+            key={t.id}
+            value={t.id}
+            className="min-h-[220px] py-1 focus:outline-none"
+            role="tabpanel"
+          >
+            <t.Panel />
+          </Tabs.Content>
+        ))}
+      </Tabs.Root>
     </div>
   );
 }

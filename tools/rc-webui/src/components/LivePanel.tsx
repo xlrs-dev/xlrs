@@ -3,7 +3,7 @@ import { useSerialContext } from '../context/SerialContext';
 import { NUM_CHANNELS } from '../types/rc';
 
 const ADC_MAX = 32767;
-const STREAM_RETRY_MS = 2000; // Re-send stream start if no data received
+const STREAM_RETRY_MS = 2000;
 
 export function LivePanel() {
   const { serial, liveState, setLiveState } = useSerialContext();
@@ -39,7 +39,9 @@ export function LivePanel() {
 
   if (!serial.connected) {
     return (
-      <p className="hint">Connect USB first, then open this tab to see live sticks and channels.</p>
+      <p className="hint">
+        Connect USB first, then open this tab to see live sticks and channels.
+      </p>
     );
   }
 
@@ -50,11 +52,14 @@ export function LivePanel() {
 
   return (
     <div className="panel-content">
+      <p className="text-[var(--color-text-muted)] text-sm mb-4">
+        Live data over USB. Requires Chrome or Edge (Web Serial).
+      </p>
       <div className="viz-row">
         <div className="stick-viz">
-          <h3>Sticks (ADC)</h3>
+          <h3 className="text-base font-semibold text-[var(--color-text)] mb-2">Sticks (ADC)</h3>
           <div className="stick-grid">
-            {adc.map((v, i) => (
+            {adc.map((v: number, i: number) => (
               <div key={i} className="stick-cell">
                 <span>Axis {i}</span>
                 <div className="bar-wrap">
@@ -71,9 +76,9 @@ export function LivePanel() {
           </div>
         </div>
         <div className="ch-viz">
-          <h3>Channels (µs)</h3>
+          <h3 className="text-base font-semibold text-[var(--color-text)] mb-2">Channels (µs)</h3>
           <div className="ch-grid">
-            {ch.map((v, i) => (
+            {ch.map((v: number, i: number) => (
               <div key={i} className="ch-cell">
                 <span>Ch{i}</span>
                 <div className="bar-wrap">
@@ -89,16 +94,15 @@ export function LivePanel() {
         </div>
       </div>
       <div className="toggles-row">
-        <h3>Switches</h3>
+        <h3 className="text-base font-semibold text-[var(--color-text)] mt-4 mb-2">Switches</h3>
         <div className="toggles">
-          {toggles.map((on, i) => (
+          {toggles.map((on: boolean, i: number) => (
             <span key={i} className={`toggle-badge ${on ? 'on' : 'off'}`}>
               SW{i + 1} {on ? 'ON' : 'OFF'}
             </span>
           ))}
         </div>
       </div>
-      <p className="hint">Live data over USB. Requires Chrome/Edge (Web Serial).</p>
     </div>
   );
 }

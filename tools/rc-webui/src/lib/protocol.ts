@@ -25,6 +25,8 @@ export const CMD = {
   SET_BINDING_PHRASE_TX: 0x41,
   GET_LINK_STATUS: 0x42,
   ENTER_PAIRING_MODE: 0x43,
+  RE_DETECT_TX: 0x44,
+  GET_ELRS_BINDING_PHRASE: 0x45,
 } as const;
 
 export const STATUS = {
@@ -277,10 +279,17 @@ export interface StateFrame {
   toggles: boolean[];
 }
 
+export type TxType = 0 | 1 | 2; // 0=unknown, 1=custom, 2=elrs
+
+export type ElrsRole = 'tx' | 'rx';
+
 export interface LinkStatus {
   txConnected: boolean;
   txPaired: boolean;
   txState: number;
+  txType?: TxType;
+  elrsRole?: ElrsRole;
+  elrsDeviceName?: string;
 }
 
 export function parseStateFrame(payload: Uint8Array): StateFrame | null {
@@ -297,11 +306,23 @@ export function parseStateFrame(payload: Uint8Array): StateFrame | null {
 
 export function parseLinkStatus(payload: Uint8Array | null): LinkStatus | null {
   if (!payload || payload.length < 3) return null;
-  return {
+  const txType: TxType = payload.length >= 4 ? (payload[3] as TxType) : 0;
+  const out: LinkStatus = {
     txConnected: payload[0] !== 0,
     txPaired: payload[1] !== 0,
     txState: payload[2] ?? 0xff,
+    txType,
   };
+  if (payload.length >= 6 && txType === 2) {
+    const roleByte = payload[4];
+    if (roleByte === 1) out.elrsRole = 'tx';
+    else if (roleByte === 2) out.elrsRole = 'rx';
+    const nameLen = payload[5];
+    if (nameLen > 0 && payload.length >= 6 + nameLen) {
+      out.elrsDeviceName = new TextDecoder().decode(payload.subarray(6, 6 + Math.min(nameLen, 20)));
+    }
+  }
+  return out;
 }
 
 export { CONFIG_PAYLOAD_SIZE };

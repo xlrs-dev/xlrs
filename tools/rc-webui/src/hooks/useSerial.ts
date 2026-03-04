@@ -72,6 +72,8 @@ export interface UseSerialResult {
   setTxBindingPhrase: (phrase: string) => Promise<boolean>;
   getLinkStatus: () => Promise<LinkStatus | null>;
   enterPairingMode: () => Promise<boolean>;
+  reDetectTx: () => Promise<boolean>;
+  getElrsBindingPhrase: () => Promise<string | null>;
   streamStart: (onState: (s: StateFrame) => void) => void;
   streamStop: () => void;
 }
@@ -330,6 +332,17 @@ export function useSerial(): UseSerialResult {
     return resp.status === 0;
   }, [request]);
 
+  const reDetectTx = useCallback(async (): Promise<boolean> => {
+    const resp = await request(CMD.RE_DETECT_TX);
+    return resp.status === 0;
+  }, [request]);
+
+  const getElrsBindingPhrase = useCallback(async (): Promise<string | null> => {
+    const resp = await request(CMD.GET_ELRS_BINDING_PHRASE);
+    if (resp.status !== 0 || !resp.data) return null;
+    return new TextDecoder().decode(resp.data);
+  }, [request]);
+
   const streamStart = useCallback(
     (onState: (s: StateFrame) => void) => {
       stateCallbackRef.current = onState;
@@ -375,6 +388,8 @@ export function useSerial(): UseSerialResult {
     setTxBindingPhrase,
     getLinkStatus,
     enterPairingMode,
+    reDetectTx,
+    getElrsBindingPhrase,
     streamStart,
     streamStop,
   };

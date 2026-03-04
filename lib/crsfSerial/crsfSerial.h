@@ -48,6 +48,10 @@ public:
     void (*onPacketLinkStatistics)(crsfLinkStatistics_t *ls);
     void (*onPacketGps)(crsf_sensor_gps_t *gpsSensor);
     void (*onPacketBattery)(float voltage, float current, uint32_t capacity, uint8_t remaining);
+    // DEVICE_INFO (0x29) from 0xEE (TX) or 0xEC (RX): serial[4], null-term name, sourceAddr (0xEE=TX, 0xEC=RX)
+    void (*onDeviceInfo)(const uint8_t *serial4, const char *name, uint8_t sourceAddr);
+    // PARAMETER_SETTINGS_ENTRY (0x2B) from 0xEE: fieldId, type (0x0A=STRING, 0x0D=COMMAND), label, value
+    void (*onParameterEntry)(uint8_t fieldId, uint8_t paramType, uint8_t chunksRemaining, const char *label, const uint8_t *value, uint8_t valueLen);
 
 private:
     HardwareSerial &_port;
@@ -80,4 +84,6 @@ private:
     void packetLinkStatistics(const crsf_header_t *p);
     void packetGps(const crsf_header_t *p);
     void packetBattery(const crsf_header_t *p);
+    void packetDeviceInfo(const crsf_header_t *p);
+    void packetParameterEntry(const crsf_header_t *p);
 };

@@ -52,7 +52,8 @@ export function AutoPairPanel() {
   const rxLooksLikeTarget =
     rxDeviceName.toUpperCase().includes('RX') || rxDeviceName.toUpperCase().includes('SX128X');
   const rxOk = rxSerial.connected && rxLooksLikeTarget;
-  const txOk = linkStatus?.txConnected ?? false;
+  const elrsWrongMode = linkStatus?.txType === 2 && linkStatus?.elrsRole === 'rx';
+  const txOk = (linkStatus?.txConnected ?? false) && !elrsWrongMode;
 
   const refreshLinkStatus = useCallback(async () => {
     if (!rcSerial.connected) {
@@ -211,7 +212,19 @@ export function AutoPairPanel() {
   const txStateLabel =
     linkStatus?.txState !== undefined && linkStatus.txState !== 0xff
       ? ['Disconnected', 'Pairing', 'Connecting', 'Connected', 'Lost'][linkStatus.txState] ?? `State ${linkStatus.txState}`
-      : '—';
+      : '';
+  const txTypeLabel =
+    linkStatus?.txType === 1 ? 'Custom' : linkStatus?.txType === 2 ? 'ELRS' : linkStatus?.txType === 0 ? 'Unknown' : '';
+  const txTypeDetail = txTypeLabel
+    ? linkStatus?.txType === 2 && linkStatus?.elrsDeviceName
+      ? `TX: ELRS (${linkStatus.elrsDeviceName})`
+      : `TX: ${txTypeLabel}`
+    : '';
+
+  const handleReDetectTx = useCallback(async () => {
+    await rcSerial.reDetectTx();
+    await refreshLinkStatus();
+  }, [rcSerial.reDetectTx, refreshLinkStatus]);
 
   return (
     <div className="panel-content">
@@ -235,10 +248,17 @@ export function AutoPairPanel() {
             <span>TX reachable via RC</span>
             {txOk && (
               <span className="preflight-detail">
-                {linkStatus?.txPaired ? 'Paired' : 'Reachable'} — {txStateLabel}
+                {txTypeDetail && `${txTypeDetail} — `}
+                {linkStatus?.txPaired ? 'Paired' : 'Reachable'}
+                {txStateLabel ? ` — ${txStateLabel}` : ''}
               </span>
             )}
-            {!txOk && (
+            {elrsWrongMode && (
+              <span className="preflight-detail text-[var(--color-error)]">
+                ELRS RX (wrong mode) — need transmitter module
+              </span>
+            )}
+            {!txOk && !elrsWrongMode && (
               <span className="preflight-detail">
                 {rcOk ? 'Power TX and connect to RC' : 'RC must be connected first'}
               </span>
@@ -260,9 +280,14 @@ export function AutoPairPanel() {
             )}
           </li>
         </ul>
-        <button type="button" className="btn-secondary preflight-refresh mt-2" onClick={refreshLinkStatus}>
-          Refresh TX status
-        </button>
+        <div className="flex flex-wrap gap-2 mt-2">
+          <button type="button" className="btn-secondary preflight-refresh" onClick={refreshLinkStatus}>
+            Refresh TX status
+          </button>
+          <button type="button" className="btn-secondary" onClick={handleReDetectTx}>
+            Re-detect TX
+          </button>
+        </div>
       </div>
 
       <div className="card auto-pair-card mt-4">
@@ -307,8 +332,14 @@ export function AutoPairPanel() {
           type="button"
           className="btn-primary"
           onClick={runAutoPair}
-          disabled={busy || !preflightReady}
-          title={!preflightReady ? 'Complete all preflight checks first' : undefined}
+          disabled={busy || !preflightReady || elrsWrongMode}
+          title={
+            elrsWrongMode
+              ? 'Connected device is an ELRS receiver; use an ELRS transmitter module.'
+              : !preflightReady
+                ? 'Complete all preflight checks first'
+                : undefined
+          }
         >
           {busy
             ? `Running… Step ${currentStepIndex} of ${steps.length}`

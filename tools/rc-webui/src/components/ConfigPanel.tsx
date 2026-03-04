@@ -9,6 +9,7 @@ export function ConfigPanel() {
   const [status, setStatus] = useState('');
   const [statusType, setStatusType] = useState<StatusType>('idle');
   const [bindingPhrase, setBindingPhrase] = useState('');
+  const [elrsPhraseView, setElrsPhraseView] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const showStatus = (msg: string, type: StatusType) => {
@@ -106,6 +107,27 @@ export function ConfigPanel() {
     );
   };
 
+  const handleViewElrsPhrase = async () => {
+    setElrsPhraseView(null);
+    const link = await serial.getLinkStatus();
+    if (link?.txType !== 2) {
+      showStatus('TX is not ELRS. View phrase only works when RC is connected to an ELRS module.', 'error');
+      return;
+    }
+    if (link?.elrsRole === 'rx') {
+      showStatus('Connected device is an ELRS receiver (wrong mode). Use an ELRS transmitter module.', 'error');
+      return;
+    }
+    showStatus('Reading phrase from ELRS…', 'idle');
+    const phrase = await serial.getElrsBindingPhrase();
+    if (phrase !== null) {
+      setElrsPhraseView(phrase);
+      showStatus('Phrase read from ELRS.', 'success');
+    } else {
+      showStatus('Could not read phrase from ELRS (timeout or not supported).', 'error');
+    }
+  };
+
   if (!serial.connected) {
     return <p className="hint">Connect USB first.</p>;
   }
@@ -171,6 +193,19 @@ export function ConfigPanel() {
           <button type="button" className="btn-secondary" onClick={handleSetTxBindingPhrase}>
             Set TX phrase
           </button>
+        </div>
+        <p className="hint text-sm mt-2">
+          When TX is ELRS, phrase is set on the ELRS module via CRSF.
+        </p>
+        <div className="binding-phrase-row mt-2">
+          <button type="button" className="btn-secondary" onClick={handleViewElrsPhrase}>
+            View phrase (from ELRS)
+          </button>
+          {elrsPhraseView !== null && (
+            <span className="font-mono text-sm ml-2" title="Current phrase on ELRS TX">
+              {elrsPhraseView || '(empty)'}
+            </span>
+          )}
         </div>
       </div>
 

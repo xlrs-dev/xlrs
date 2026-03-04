@@ -22,7 +22,10 @@ RCConfigProtocol::RCConfigProtocol()
     , setBindPhraseRx(nullptr)
     , setBindPhraseTx(nullptr)
     , getLinkStatus(nullptr)
+    , getLinkStatusEx(nullptr)
     , enterPairingMode(nullptr)
+    , reDetectTx(nullptr)
+    , getElrsBindingPhrase(nullptr)
     , streamingState(false)
 {
     memset(deviceName, 0, sizeof(deviceName));
@@ -196,13 +199,51 @@ void RCConfigProtocol::processRxByte(uint8_t byte) {
             break;
         }
         case RC_CMD_GET_LINK_STATUS: {
-            if (!getLinkStatus) {
+            uint8_t resp[4 + 2 + 20];  // txConnected, txPaired, txState, txType, elrsRole, nameLen, name
+            uint8_t respLen;
+            if (getLinkStatusEx) {
+                getLinkStatusEx(resp, sizeof(resp));
+                respLen = 4;
+                if (resp[3] == 2) {
+                    respLen = 6;  // + elrsRole (1) + nameLen (1)
+                    if (resp[5] > 0) {
+                        uint8_t n = resp[5];
+                        if (n > 20) n = 20;
+                        respLen = (uint8_t)(6 + n);
+                    }
+                }
+            } else if (getLinkStatus) {
+                getLinkStatus(&resp[0], &resp[1], &resp[2]);
+                resp[3] = 0;
+                respLen = 4;
+            } else {
                 sendResponse(cmd, seq, RC_STATUS_ERR_INVALID_CMD, nullptr, 0);
                 break;
             }
-            uint8_t resp[3] = {0, 0, 0xFF};
-            getLinkStatus(&resp[0], &resp[1], &resp[2]);
-            sendResponse(cmd, seq, RC_STATUS_OK, resp, sizeof(resp));
+            sendResponse(cmd, seq, RC_STATUS_OK, resp, respLen);
+            break;
+        }
+        case RC_CMD_RE_DETECT_TX: {
+            if (reDetectTx) {
+                reDetectTx();
+                sendResponse(cmd, seq, RC_STATUS_OK, nullptr, 0);
+            } else {
+                sendResponse(cmd, seq, RC_STATUS_ERR_INVALID_CMD, nullptr, 0);
+            }
+            break;
+        }
+        case RC_CMD_GET_ELRS_BINDING_PHRASE: {
+            if (!getElrsBindingPhrase) {
+                sendResponse(cmd, seq, RC_STATUS_ERR_INVALID_CMD, nullptr, 0);
+                break;
+            }
+            char phrase[MAX_BINDING_PHRASE_LEN + 1];
+            if (getElrsBindingPhrase(phrase, MAX_BINDING_PHRASE_LEN)) {
+                uint8_t plen = (uint8_t)strlen(phrase);
+                sendResponse(cmd, seq, RC_STATUS_OK, (const uint8_t*)phrase, plen);
+            } else {
+                sendResponse(cmd, seq, RC_STATUS_ERR_FORWARD, nullptr, 0);
+            }
             break;
         }
         case RC_CMD_ENTER_PAIRING_MODE: {

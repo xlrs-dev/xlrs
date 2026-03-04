@@ -137,6 +137,21 @@ void CrsfSerial::checkLinkDown()
 void CrsfSerial::processPacketIn(uint8_t len)
 {
     const crsf_header_t *hdr = (crsf_header_t *)_rxBuf;
+    if ((hdr->device_addr == CRSF_ADDRESS_CRSF_TRANSMITTER || hdr->device_addr == CRSF_ADDRESS_CRSF_RECEIVER) && hdr->type == CRSF_FRAMETYPE_DEVICE_INFO)
+    {
+        packetDeviceInfo(hdr);
+        return;
+    }
+    if (hdr->device_addr == CRSF_ADDRESS_CRSF_TRANSMITTER)
+    {
+        if (hdr->type == CRSF_FRAMETYPE_PARAMETER_SETTINGS_ENTRY)
+            packetParameterEntry(hdr);
+        else if (hdr->type == CRSF_FRAMETYPE_LINK_STATISTICS)
+            packetLinkStatistics(hdr);
+        else if (hdr->type == CRSF_FRAMETYPE_BATTERY_SENSOR)
+            packetBattery(hdr);
+        return;
+    }
     if (hdr->device_addr == CRSF_ADDRESS_FLIGHT_CONTROLLER)
     {
         switch (hdr->type)
@@ -232,6 +247,37 @@ void CrsfSerial::packetGps(const crsf_header_t *p)
 
     if (onPacketGps)
         onPacketGps(&_gpsSensor);
+}
+
+// DEVICE_INFO payload: 1 version, 1 param_count, 2 sw, 2 hw, 4 serial, null-term name
+void CrsfSerial::packetDeviceInfo(const crsf_header_t *p)
+{
+    uint8_t payloadLen = p->frame_size >= 2 ? (uint8_t)(p->frame_size - 2) : 0;
+    if (payloadLen < 10 || !p->data) return;
+    const uint8_t *serial4 = &p->data[6];
+    const char *name = (const char *)&p->data[10];
+    if (name - (const char *)p->data >= (int)payloadLen) return;
+    if (onDeviceInfo)
+        onDeviceInfo(serial4, name, p->device_addr);  // source: 0xEE=TX, 0xEC=RX
+}
+
+// PARAMETER_SETTINGS_ENTRY: [fieldId, chunksRemaining, parent, type/hidden, label\0, value...]
+void CrsfSerial::packetParameterEntry(const crsf_header_t *p)
+{
+    uint8_t payloadLen = p->frame_size >= 2 ? (uint8_t)(p->frame_size - 2) : 0;
+    if (payloadLen < 5 || !p->data) return;
+    uint8_t fieldId = p->data[0];
+    uint8_t chunksRemaining = p->data[1];
+    uint8_t paramType = p->data[3] & 0x7F;
+    const char *label = (const char *)&p->data[4];
+    size_t labelMax = payloadLen - 4;
+    size_t labelLen = 0;
+    while (labelLen < labelMax && label[labelLen] != '\0') labelLen++;
+    if (labelLen >= labelMax) return;
+    const uint8_t *value = (const uint8_t *)&label[labelLen + 1];
+    uint8_t valueLen = payloadLen - 4 - (uint8_t)labelLen - 1;
+    if (onParameterEntry)
+        onParameterEntry(fieldId, paramType, chunksRemaining, label, value, valueLen);
 }
 
 void CrsfSerial::packetBattery(const crsf_header_t *p)

@@ -26,6 +26,8 @@ enum RCProtoCmd : uint8_t {
     RC_CMD_SET_BINDING_PHRASE_TX = 0x41,
     RC_CMD_GET_LINK_STATUS   = 0x42,
     RC_CMD_ENTER_PAIRING_MODE = 0x43,
+    RC_CMD_RE_DETECT_TX      = 0x44,
+    RC_CMD_GET_ELRS_BINDING_PHRASE = 0x45,
 };
 
 enum RCProtoStatus : uint8_t {
@@ -58,7 +60,10 @@ public:
     void setBindingPhraseRx(bool (*fn)(const char* phrase, uint8_t len)) { setBindPhraseRx = fn; }
     void setBindingPhraseTx(bool (*fn)(const char* phrase, uint8_t len)) { setBindPhraseTx = fn; }
     void setLinkStatusGetter(void (*fn)(uint8_t* txConnected, uint8_t* txPaired, uint8_t* txState)) { getLinkStatus = fn; }
+    void setLinkStatusGetterEx(void (*fn)(uint8_t* buf, uint8_t bufLen)) { getLinkStatusEx = fn; }
     void setEnterPairingMode(bool (*fn)()) { enterPairingMode = fn; }
+    void setReDetectTx(void (*fn)()) { reDetectTx = fn; }
+    void setGetElrsBindingPhrase(bool (*fn)(char* phrase, uint8_t maxLen)) { getElrsBindingPhrase = fn; }
     void setDeviceInfo(const char* name, const char* version);
 
     bool isStreamingState() const { return streamingState; }
@@ -87,7 +92,10 @@ private:
     bool (*setBindPhraseRx)(const char* phrase, uint8_t len);
     bool (*setBindPhraseTx)(const char* phrase, uint8_t len);
     void (*getLinkStatus)(uint8_t* txConnected, uint8_t* txPaired, uint8_t* txState);
+    void (*getLinkStatusEx)(uint8_t* buf, uint8_t bufLen);
     bool (*enterPairingMode)();
+    void (*reDetectTx)();
+    bool (*getElrsBindingPhrase)(char* phrase, uint8_t maxLen);
     char deviceName[RC_PROTO_DEVICE_NAME_MAX];
     char deviceVersion[RC_PROTO_DEVICE_VER_MAX];
 

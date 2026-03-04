@@ -11,6 +11,7 @@
 #include <math.h>
 
 #include "UARTProtocol.h"
+#include "crsfSerial.h"
 #include "bq2562x.h"
 #include "RCConfig.h"
 #include "RCConfigProtocol.h"
@@ -125,6 +126,29 @@ Adafruit_SH1106G display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 Adafruit_ADS1115 ads;  // ADS1115 ADC on I2C bus
 #endif
 UARTProtocol uartProto(&Serial2);
+CrsfSerial crsfSerial(Serial2, CRSF_BAUDRATE);
+
+// TX type: detected at boot or overridden in menu
+enum TxType : uint8_t { TX_TYPE_UNKNOWN = 0, TX_TYPE_CUSTOM = 1, TX_TYPE_ELRS = 2 };
+enum TxModeOverride : uint8_t { TX_MODE_AUTO = 0, TX_MODE_CUSTOM = 1, TX_MODE_ELRS = 2 };
+static TxType tx_type = TX_TYPE_UNKNOWN;
+static TxModeOverride tx_mode_override = TX_MODE_AUTO;
+static char elrs_device_name[24] = {0};
+static bool detecting_tx = false;
+static bool elrs_device_info_received = false;
+// ELRS role: 0=unknown, 1=TX (correct), 2=RX (wrong mode - do not use for channels)
+enum ElrsRole : uint8_t { ELRS_ROLE_UNKNOWN = 0, ELRS_ROLE_TX = 1, ELRS_ROLE_RX = 2 };
+static ElrsRole elrs_role = ELRS_ROLE_UNKNOWN;
+
+// ELRS CRSF parameter discovery (binding phrase + bind command)
+#define ELRS_PARAM_FIELD_NONE 0xFF
+#define ELRS_PHRASE_MAX 32
+static uint8_t elrs_phrase_field_id = ELRS_PARAM_FIELD_NONE;
+static uint8_t elrs_bind_cmd_field_id = ELRS_PARAM_FIELD_NONE;
+static char elrs_binding_phrase[ELRS_PHRASE_MAX + 1] = {0};
+static uint8_t elrs_param_chunk_next = 0;
+static bool elrs_param_read_in_progress = false;
+static const unsigned int ELRS_PARAM_MAX_CHUNKS = 48;
 
 // Telemetry data from TX
 static TelemetryData telemetry = {0};
@@ -142,6 +166,15 @@ static unsigned long lastEnterPress = 0;
 static unsigned long lastBackPress = 0;
 static unsigned long lastPowerPress = 0;
 static const unsigned long BUTTON_DEBOUNCE_MS = 200;
+static const unsigned long LONG_PRESS_MS = 600;
+
+// Menu state: 0 = main screen, 1 = top-level menu, 2+ = submenu
+enum MenuScreen : uint8_t { MENU_MAIN = 0, MENU_TOP = 1, MENU_TX_MODE = 2, MENU_BINDING = 3 };
+static MenuScreen menu_screen = MENU_MAIN;
+static uint8_t menu_cursor = 0;  // index in current menu
+static const uint8_t MENU_BINDING_ITEMS = 4; // View phrase, Set phrase, Initiate pairing, Back
+static unsigned long back_press_start = 0;
+static bool back_long_press_handled = false;
 
 // Device status flags
 bool ads_ok = false;
@@ -238,6 +271,13 @@ static void onPongReceived();
 // Device check functions
 static bool check_tx_connection(void);
 static void ping_tx_device(void);
+static void run_tx_detection(void);
+static void onCrsfDeviceInfo(const uint8_t *serial4, const char *name);
+static void onCrsfParameterEntry(uint8_t fieldId, uint8_t paramType, uint8_t chunksRemaining, const char *label, const uint8_t *value, uint8_t valueLen);
+static TxType get_effective_tx_type(void);
+static void elrs_request_param_chunk(uint8_t chunkIndex);
+static bool elrs_write_param_string(uint8_t fieldId, const char *str);
+static bool elrs_write_param_byte(uint8_t fieldId, uint8_t val);
 
 // USB config protocol callbacks
 static const rc_config_data_t* rc_proto_get_config(void);
@@ -251,6 +291,9 @@ static void rc_proto_get_state(int16_t* adc4, uint16_t* ch8, uint8_t* toggles4);
 static bool rc_proto_set_binding_phrase_rx(const char* phrase, uint8_t len);
 static bool rc_proto_set_binding_phrase_tx(const char* phrase, uint8_t len);
 static void rc_proto_get_link_status(uint8_t* txConnected, uint8_t* txPaired, uint8_t* txState);
+static void rc_proto_get_link_status_ex(uint8_t* buf, uint8_t bufLen);
+static void rc_proto_re_detect_tx(void);
+static bool rc_proto_get_elrs_binding_phrase(char* phrase, uint8_t maxLen);
 static bool rc_proto_enter_pairing_mode(void);
 
 // ============================================================
@@ -357,6 +400,9 @@ void setup() {
     g_rc_proto.setBindingPhraseRx(rc_proto_set_binding_phrase_rx);
     g_rc_proto.setBindingPhraseTx(rc_proto_set_binding_phrase_tx);
     g_rc_proto.setLinkStatusGetter(rc_proto_get_link_status);
+    g_rc_proto.setLinkStatusGetterEx(rc_proto_get_link_status_ex);
+    g_rc_proto.setReDetectTx(rc_proto_re_detect_tx);
+    g_rc_proto.setGetElrsBindingPhrase(rc_proto_get_elrs_binding_phrase);
     g_rc_proto.setEnterPairingMode(rc_proto_enter_pairing_mode);
 
     // Initialize UART protocol (outputting to TX side)
@@ -369,19 +415,17 @@ void setup() {
     uartProto.setOnAck(onAckReceived);
     uartProto.setOnError(onErrorReceived);
     uartProto.setOnPong(onPongReceived);
+    crsfSerial.onParameterEntry = onCrsfParameterEntry;
     Serial.print("UART Protocol on Serial2: TX=GP");
     Serial.print(CRSF_TX_PIN);
     Serial.print(", RX=GP");
     Serial.println(CRSF_RX_PIN);
     
-    // Check TX connection - send initial ping after a short delay
-    Serial.println("Checking TX board connection...");
-    delay(100);  // Give UART time to stabilize
-    lastPingSent = 0;  // Reset to allow immediate ping
-    uartProto.sendPing();  // Send initial ping immediately
+    // TX type detection at boot (Custom PING/PONG vs ELRS DEVICE_PING/DEVICE_INFO)
+    delay(100);  // UART stabilize
+    run_tx_detection();
     lastPingSent = millis();
-    Serial.println("[TX] Initial ping sent");
-    check_tx_connection();  // Check initial status
+    check_tx_connection();
 
     if (display_ok) {
         display.clearDisplay();
@@ -546,19 +590,50 @@ void sendChannels() {
     if (millis() - lastChannelSend < CHANNEL_INTERVAL) return;
     lastChannelSend = millis();
 
-    uartProto.sendChannels(channels);
+    TxType eff = get_effective_tx_type();
+    if (eff == TX_TYPE_ELRS && elrs_role == ELRS_ROLE_TX) {
+        // CRSF RC_CHANNELS_PACKED (0x16) to 0xEE: 16 x 11-bit (only when ELRS TX, not RX)
+        crsf_channels_t packed = {0};
+        auto usTo11 = [](uint16_t us) -> unsigned {
+            return (unsigned)constrain(map(us, 1000, 2000, CRSF_CHANNEL_VALUE_1000, CRSF_CHANNEL_VALUE_2000), CRSF_CHANNEL_VALUE_MIN, CRSF_CHANNEL_VALUE_MAX);
+        };
+        packed.ch0  = usTo11(channels[0]);
+        packed.ch1  = usTo11(channels[1]);
+        packed.ch2  = usTo11(channels[2]);
+        packed.ch3  = usTo11(channels[3]);
+        packed.ch4  = usTo11(channels[4]);
+        packed.ch5  = usTo11(channels[5]);
+        packed.ch6  = usTo11(channels[6]);
+        packed.ch7  = usTo11(channels[7]);
+        packed.ch8  = packed.ch9 = packed.ch10 = packed.ch11 = CRSF_CHANNEL_VALUE_MID;
+        packed.ch12 = packed.ch13 = packed.ch14 = packed.ch15 = CRSF_CHANNEL_VALUE_MID;
+        crsfSerial.queuePacket(CRSF_ADDRESS_CRSF_TRANSMITTER, CRSF_FRAMETYPE_RC_CHANNELS_PACKED, &packed, CRSF_FRAME_RC_CHANNELS_PAYLOAD_SIZE);
+    } else {
+        uartProto.sendChannels(channels);
+    }
 }
 
 // ============================================================
 // UART Protocol - Message Reception
 // ============================================================
 void receiveUARTMessages() {
-    uartProto.loop();
-    
-    // Check telemetry timeout
-    if (telemetryValid && (millis() - lastTelemetryUpdate) > TELEMETRY_TIMEOUT_MS) {
-        telemetryValid = false;
+    TxType eff = get_effective_tx_type();
+    if (eff == TX_TYPE_ELRS) {
+        crsfSerial.loop();
+        // Optionally drive telemetry from CRSF link/battery when ELRS
+        if (crsfSerial.isLinkUp()) {
+            telemetryValid = true;
+            lastTelemetryUpdate = millis();
+            telemetry.rssi = crsfSerial.getLinkStatistics()->uplink_RSSI_1;
+            telemetry.linkQuality = crsfSerial.getLinkStatistics()->uplink_Link_quality;
+            telemetry.rxBattMv = (uint16_t)(crsfSerial.getBatteryVoltage() * 1000);
+            telemetry.rxBattPct = crsfSerial.getBatteryRemaining();
+        }
+    } else {
+        uartProto.loop();
     }
+    if (telemetryValid && (millis() - lastTelemetryUpdate) > TELEMETRY_TIMEOUT_MS)
+        telemetryValid = false;
 }
 
 // ============================================================
@@ -598,31 +673,112 @@ void onPongReceived() {
 }
 
 // ============================================================
-// Button Handling for Commands
+// Button Handling for Commands and Menu
 // ============================================================
 void handleButtons() {
     bool enterPressed = digitalRead(ENTER_BUTTON_PIN) == HIGH;
     bool backPressed = digitalRead(BACK_BUTTON_PIN) == HIGH;
     bool powerPressed = digitalRead(POWER_BUTTON_PIN) == LOW;  // Active LOW button
     
-    // ENTER button - PAIR command
+    // BACK: long-press = menu / back, short-press = STATUS_REQ when on main
+    if (backPressed) {
+        if (back_press_start == 0) back_press_start = millis();
+        if (!back_long_press_handled && (millis() - back_press_start) >= LONG_PRESS_MS) {
+            back_long_press_handled = true;
+            if (menu_screen == MENU_MAIN) {
+                menu_screen = MENU_TOP;
+                menu_cursor = 0;
+                Serial.println("[RC] Menu open");
+            } else if (menu_screen == MENU_TOP) {
+                menu_screen = MENU_MAIN;
+                Serial.println("[RC] Menu close");
+            } else if (menu_screen == MENU_BINDING) {
+                menu_screen = MENU_TOP;
+                menu_cursor = 0;
+            } else {
+                menu_screen = MENU_TOP;
+                menu_cursor = 0;
+            }
+        }
+    } else {
+        if (back_press_start > 0 && !back_long_press_handled && (millis() - back_press_start) >= BUTTON_DEBOUNCE_MS) {
+            if (menu_screen == MENU_MAIN) {
+                uartProto.sendCommand(UART_MSG_CMD_STATUS_REQ);
+                Serial.println("[RC] Sending STATUS_REQ command");
+            } else if (menu_screen == MENU_TOP) {
+                uint8_t n = (get_effective_tx_type() == TX_TYPE_ELRS && elrs_role == ELRS_ROLE_TX) ? 4 : 3;
+                menu_cursor = (menu_cursor + 1) % n;
+            } else if (menu_screen == MENU_TX_MODE) {
+                menu_cursor = (menu_cursor + 1) % 4;
+            } else if (menu_screen == MENU_BINDING) {
+                menu_cursor = (menu_cursor + 1) % MENU_BINDING_ITEMS;
+            }
+        }
+        back_press_start = 0;
+        back_long_press_handled = false;
+        backButtonPressed = false;
+    }
+    if (backPressed) backButtonPressed = true;
+
+    // ENTER: in menu = select, on main = PAIR
     if (enterPressed && !enterButtonPressed && (millis() - lastEnterPress) > BUTTON_DEBOUNCE_MS) {
         enterButtonPressed = true;
         lastEnterPress = millis();
-        uartProto.sendCommand(UART_MSG_CMD_PAIR);
-        Serial.println("[RC] Sending PAIR command");
+        if (menu_screen == MENU_MAIN) {
+            uartProto.sendCommand(UART_MSG_CMD_PAIR);
+            Serial.println("[RC] Sending PAIR command");
+        } else if (menu_screen == MENU_TOP) {
+            if (menu_cursor == 0) { menu_screen = MENU_TX_MODE; menu_cursor = (uint8_t)tx_mode_override; }
+            else if (menu_cursor == 1) { run_tx_detection(); check_tx_connection(); menu_screen = MENU_MAIN; }
+            else if (menu_cursor == 2 && get_effective_tx_type() == TX_TYPE_ELRS && elrs_role == ELRS_ROLE_TX) { menu_screen = MENU_BINDING; menu_cursor = 0; }
+            else menu_screen = MENU_MAIN;  // Back (cursor 2 when not ELRS, or cursor 3 when ELRS)
+        } else if (menu_screen == MENU_BINDING) {
+            if (menu_cursor == 0) {
+                elrs_param_chunk_next = 0;
+                elrs_param_read_in_progress = true;
+                elrs_request_param_chunk(0);
+            } else if (menu_cursor == 1) {
+                if (elrs_phrase_field_id == ELRS_PARAM_FIELD_NONE) {
+                    elrs_param_chunk_next = 0;
+                    elrs_param_read_in_progress = true;
+                    elrs_request_param_chunk(0);
+                    unsigned long deadline = millis() + 800;
+                    while (millis() < deadline) {
+                        receiveUARTMessages();
+                        if (elrs_phrase_field_id != ELRS_PARAM_FIELD_NONE) break;
+                        delay(2);
+                    }
+                    elrs_param_read_in_progress = false;
+                }
+                if (elrs_phrase_field_id != ELRS_PARAM_FIELD_NONE) {
+                    static const char gen[] = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+                    char buf[ELRS_PHRASE_MAX + 1];
+                    buf[0] = 'Q'; buf[1] = 'P'; buf[2] = '-';
+                    for (int i = 0; i < 4; i++) buf[3 + i] = gen[random(0, (int)(sizeof(gen)-1))];
+                    buf[7] = '-';
+                    for (int i = 0; i < 4; i++) buf[8 + i] = gen[random(0, (int)(sizeof(gen)-1))];
+                    buf[12] = '-';
+                    for (int i = 0; i < 4; i++) buf[13 + i] = gen[random(0, (int)(sizeof(gen)-1))];
+                    buf[16] = '\0';
+                    elrs_write_param_string(elrs_phrase_field_id, buf);
+                    memcpy(elrs_binding_phrase, buf, sizeof(buf));
+                }
+            } else if (menu_cursor == 2) {
+                rc_proto_enter_pairing_mode();
+            } else {
+                menu_screen = MENU_TOP;
+                menu_cursor = 0;
+            }
+        } else if (menu_screen == MENU_TX_MODE) {
+            if (menu_cursor <= 2) {
+                tx_mode_override = (TxModeOverride)menu_cursor;
+                if (tx_mode_override == TX_MODE_ELRS) crsfSerial.begin(CRSF_BAUDRATE);
+            }
+            menu_screen = MENU_TOP;
+            menu_cursor = 0;
+        }
     } else if (!enterPressed) {
         enterButtonPressed = false;
-    }
-    
-    // BACK button - STATUS_REQ command
-    if (backPressed && !backButtonPressed && (millis() - lastBackPress) > BUTTON_DEBOUNCE_MS) {
-        backButtonPressed = true;
-        lastBackPress = millis();
-        uartProto.sendCommand(UART_MSG_CMD_STATUS_REQ);
-        Serial.println("[RC] Sending STATUS_REQ command");
-    } else if (!backPressed) {
-        backButtonPressed = false;
     }
     
     // POWER button - Shutdown mode (active LOW)
@@ -707,12 +863,66 @@ void updateDisplay() {
     display.setTextColor(SH110X_WHITE);
     display.setTextWrap(false);
 
+    if (menu_screen != MENU_MAIN) {
+        int y = 0;
+        if (menu_screen == MENU_TOP) {
+            bool elrs = (get_effective_tx_type() == TX_TYPE_ELRS && elrs_role == ELRS_ROLE_TX);
+            const char* items4[] = {"TX Mode", "Re-detect TX", "Binding/ELRS", "Back"};
+            const char* items3[] = {"TX Mode", "Re-detect TX", "Back"};
+            int n = elrs ? 4 : 3;
+            for (int i = 0; i < n; i++) {
+                display.setCursor(COL_0, y);
+                if (i == (int)menu_cursor) display.print(">");
+                display.println(elrs ? items4[i] : items3[i]);
+                y += ROW_H;
+            }
+        } else if (menu_screen == MENU_TX_MODE) {
+            const char* items[] = {"Auto", "Custom", "ELRS", "Back"};
+            for (int i = 0; i < 4; i++) {
+                display.setCursor(COL_0, y);
+                if (i == (int)menu_cursor) display.print(">");
+                display.println(items[i]);
+                y += ROW_H;
+            }
+        } else if (menu_screen == MENU_BINDING) {
+            const char* items[] = {"View phrase", "Set phrase", "Initiate pair", "Back"};
+            for (int i = 0; i < MENU_BINDING_ITEMS; i++) {
+                display.setCursor(COL_0, y);
+                if (i == (int)menu_cursor) display.print(">");
+                display.println(items[i]);
+                y += ROW_H;
+            }
+            if (elrs_binding_phrase[0]) {
+                display.setCursor(COL_0, y);
+                display.print(elrs_binding_phrase);
+            }
+        }
+        display.display();
+        return;
+    }
+
     const char* linkStateNames[] = {"DISC", "PAIR", "CONN", "OK", "LOST"};
     int y = 0;
 
-    // Row 0: Title + link indicator (top-right)
+    // Row 0: TX type (or Detecting) + link indicator
     display.setCursor(COL_0, y);
-    display.print("RC-CRSF");
+    if (detecting_tx) {
+        display.print("Detecting TX...");
+    } else {
+        TxType eff = get_effective_tx_type();
+        if (eff == TX_TYPE_CUSTOM) display.print("TX: Custom");
+        else if (eff == TX_TYPE_ELRS) {
+            if (elrs_role == ELRS_ROLE_RX) {
+                display.print("Wrong: ELRS RX");
+            } else {
+                display.print("TX: ELRS");
+                if (elrs_device_name[0]) {
+                    display.print(" ");
+                    for (int i = 0; i < 10 && elrs_device_name[i]; i++) display.print(elrs_device_name[i]);
+                }
+            }
+        } else display.print("TX: --");
+    }
     drawLinkIndicator(LINK_INDICATOR_X, LINK_INDICATOR_Y, tx_connected);
     y += ROW_H;
 
@@ -793,54 +1003,162 @@ void updateDisplay() {
 // TX Device Connection Check
 // ============================================================
 void ping_tx_device(void) {
+    if (get_effective_tx_type() != TX_TYPE_CUSTOM) return;  // Only ping for Custom TX
     if (millis() - lastPingSent < PING_INTERVAL) return;
     lastPingSent = millis();
-    
-    static unsigned long lastPingLog = 0;
-    if (millis() - lastPingLog > 5000) {  // Log every 5 seconds to avoid spam
-        Serial.print("[TX] Sending ping (TX connected: ");
-        Serial.print(tx_connected ? "YES" : "NO");
-        Serial.println(")...");
-        lastPingLog = millis();
-    }
-    
     uartProto.sendPing();
 }
 
 bool check_tx_connection(void) {
-    // Check if we've received a pong recently
+    TxType eff = get_effective_tx_type();
+    if (eff == TX_TYPE_ELRS) {
+        // ELRS: consider connected if we received DEVICE_INFO (or later: link stats)
+        bool wasConnected = tx_connected;
+        tx_connected = elrs_device_info_received || crsfSerial.isLinkUp();
+        if (wasConnected != tx_connected && tx_connected)
+            Serial.println("[TX] ELRS module connected");
+        return tx_connected;
+    }
+    // Custom: pong-based
     unsigned long timeSincePong = (lastPongReceived > 0) ? (millis() - lastPongReceived) : PONG_TIMEOUT_MS + 1;
-    
     bool wasConnected = tx_connected;
     tx_connected = (timeSincePong < PONG_TIMEOUT_MS);
-    
     if (wasConnected != tx_connected) {
-        if (tx_connected) {
-            Serial.println("[TX] Device connected");
-        } else {
-            Serial.println("[TX] Device disconnected or not responding");
-            Serial.print("[TX] Last pong received: ");
-            if (lastPongReceived > 0) {
-                Serial.print(timeSincePong);
-                Serial.println("ms ago");
-            } else {
-                Serial.println("never");
-            }
-        }
+        if (tx_connected) Serial.println("[TX] Device connected");
+        else Serial.println("[TX] Device disconnected or not responding");
     }
-    
-    // Log initial status check
     static bool initialCheckDone = false;
     if (!initialCheckDone) {
         initialCheckDone = true;
-        if (tx_connected) {
-            Serial.println("[TX] Initial check: Device connected");
-        } else {
-            Serial.println("[TX] Initial check: Device not responding (waiting for pong...)");
+        if (tx_connected) Serial.println("[TX] Initial check: Device connected");
+        else Serial.println("[TX] Initial check: Device not responding");
+    }
+    return tx_connected;
+}
+
+static TxType get_effective_tx_type(void) {
+    if (tx_mode_override == TX_MODE_CUSTOM) return TX_TYPE_CUSTOM;
+    if (tx_mode_override == TX_MODE_ELRS) return TX_TYPE_ELRS;
+    return tx_type;
+}
+
+static void onCrsfDeviceInfo(const uint8_t *serial4, const char *name, uint8_t sourceAddr) {
+    if (!serial4 || memcmp(serial4, "ELRS", 4) != 0) return;
+    tx_type = TX_TYPE_ELRS;
+    elrs_device_info_received = true;
+    if (sourceAddr == CRSF_ADDRESS_CRSF_TRANSMITTER)
+        elrs_role = ELRS_ROLE_TX;
+    else if (sourceAddr == CRSF_ADDRESS_CRSF_RECEIVER)
+        elrs_role = ELRS_ROLE_RX;
+    else
+        elrs_role = ELRS_ROLE_UNKNOWN;
+    memset(elrs_device_name, 0, sizeof(elrs_device_name));
+    if (name) {
+        size_t n = strlen(name);
+        if (n >= sizeof(elrs_device_name)) n = sizeof(elrs_device_name) - 1;
+        memcpy(elrs_device_name, name, n);
+    }
+    if (elrs_role == ELRS_ROLE_TX) {
+        Serial.println("[TX] Detected ELRS transmitter");
+        if (elrs_device_name[0]) { Serial.print("[TX] Device name: "); Serial.println(elrs_device_name); }
+    } else if (elrs_role == ELRS_ROLE_RX) {
+        Serial.println("[TX] Wrong mode: ELRS RX (need TX module)");
+    }
+}
+
+static void elrs_request_param_chunk(uint8_t chunkIndex) {
+    crsfSerial.queuePacket(CRSF_ADDRESS_CRSF_TRANSMITTER, CRSF_FRAMETYPE_PARAMETER_READ, &chunkIndex, 1);
+}
+
+// CRSF type: 0x0A = STRING, 0x0D = COMMAND
+static void onCrsfParameterEntry(uint8_t fieldId, uint8_t paramType, uint8_t chunksRemaining, const char *label, const uint8_t *value, uint8_t valueLen) {
+    (void)chunksRemaining;
+    if (!label) return;
+    // Match "Binding Phrase" / "binding phrase" (ExpressLRS)
+    if (paramType == 0x0A) {
+        if (strstr(label, "inding") && strstr(label, "hrase")) {
+            elrs_phrase_field_id = fieldId;
+            memset(elrs_binding_phrase, 0, sizeof(elrs_binding_phrase));
+            if (value && valueLen > 0) {
+                uint8_t n = valueLen;
+                if (value[0] == 0 && valueLen > 1) { n = valueLen - 1; value = &value[1]; }  // optional max_len byte
+                if (n >= sizeof(elrs_binding_phrase)) n = sizeof(elrs_binding_phrase) - 1;
+                memcpy(elrs_binding_phrase, value, n);
+            }
+        }
+    } else if (paramType == 0x0D) {
+        if (strstr(label, "ind") && !strstr(label, "hrase")) {
+            elrs_bind_cmd_field_id = fieldId;
         }
     }
+    if (elrs_param_read_in_progress && elrs_param_chunk_next < ELRS_PARAM_MAX_CHUNKS) {
+        elrs_param_chunk_next++;
+        elrs_request_param_chunk(elrs_param_chunk_next);
+    } else {
+        elrs_param_read_in_progress = false;
+    }
+}
+
+static bool elrs_write_param_string(uint8_t fieldId, const char *str) {
+    size_t len = str ? strlen(str) : 0;
+    if (len > ELRS_PHRASE_MAX) len = ELRS_PHRASE_MAX;
+    if (len + 2 > CRSF_MAX_PAYLOAD_LEN) return false;
+    uint8_t buf[CRSF_MAX_PAYLOAD_LEN];
+    buf[0] = fieldId;
+    memcpy(&buf[1], str, len);
+    buf[1 + len] = '\0';
+    crsfSerial.queuePacket(CRSF_ADDRESS_CRSF_TRANSMITTER, CRSF_FRAMETYPE_PARAMETER_WRITE, buf, (uint8_t)(1 + len + 1));
+    return true;
+}
+
+static bool elrs_write_param_byte(uint8_t fieldId, uint8_t val) {
+    uint8_t buf[2] = { fieldId, val };
+    crsfSerial.queuePacket(CRSF_ADDRESS_CRSF_TRANSMITTER, CRSF_FRAMETYPE_PARAMETER_WRITE, buf, 2);
+    return true;
+}
+
+static void run_tx_detection(void) {
+    detecting_tx = true;
+    tx_type = TX_TYPE_UNKNOWN;
+    elrs_device_info_received = false;
+    elrs_role = ELRS_ROLE_UNKNOWN;
+    lastPongReceived = 0;
+    Serial.println("[TX] Detecting TX type...");
     
-    return tx_connected;
+    // Phase 1: Custom PING
+    uartProto.sendPing();
+    lastPingSent = millis();
+    const unsigned long detectTimeout = 400;
+    unsigned long deadline = millis() + detectTimeout;
+    while (millis() < deadline) {
+        uartProto.loop();
+        if (lastPongReceived != 0) {
+            tx_type = TX_TYPE_CUSTOM;
+            Serial.println("[TX] Detected: Custom TX (PONG)");
+            detecting_tx = false;
+            return;
+        }
+        delay(2);
+    }
+    
+    // Phase 2: CRSF DEVICE_PING to 0xEE
+    while (Serial2.available()) Serial2.read();
+    crsfSerial.begin(CRSF_BAUDRATE);
+    crsfSerial.onDeviceInfo = onCrsfDeviceInfo;
+    crsfSerial.queuePacket(CRSF_ADDRESS_CRSF_TRANSMITTER, CRSF_FRAMETYPE_DEVICE_PING, nullptr, 0);
+    deadline = millis() + detectTimeout;
+    while (millis() < deadline) {
+        crsfSerial.loop();
+        if (tx_type == TX_TYPE_ELRS) {
+            Serial.println("[TX] Detected: ELRS TX (DEVICE_INFO)");
+            detecting_tx = false;
+            return;
+        }
+        delay(2);
+    }
+    
+    Serial.println("[TX] Detection: No TX responded (Unknown)");
+    detecting_tx = false;
 }
 
 // ============================================================
@@ -909,13 +1227,35 @@ static bool rc_proto_set_binding_phrase_rx(const char* phrase, uint8_t len) {
 }
 
 static bool rc_proto_set_binding_phrase_tx(const char* phrase, uint8_t len) {
-    if (!tx_connected || !phrase || len == 0 || len > 32) return false;
-    bool sent = uartProto.sendCommandWithPayload(UART_MSG_CMD_SET_BIND_TX, (const uint8_t*)phrase, len);
-    if (sent) {
-        Serial.println("[RC] Forwarded TX binding phrase update command to TX");
-    } else {
-        Serial.println("[RC] Failed to forward TX binding phrase command to TX");
+    if (!phrase || len == 0 || len > 32) return false;
+    if (get_effective_tx_type() == TX_TYPE_ELRS && elrs_role == ELRS_ROLE_TX) {
+        if (elrs_phrase_field_id == ELRS_PARAM_FIELD_NONE) {
+            elrs_param_chunk_next = 0;
+            elrs_param_read_in_progress = true;
+            elrs_request_param_chunk(0);
+            unsigned long deadline = millis() + 800;
+            while (millis() < deadline) {
+                receiveUARTMessages();
+                if (elrs_phrase_field_id != ELRS_PARAM_FIELD_NONE) break;
+                delay(2);
+            }
+            elrs_param_read_in_progress = false;
+        }
+        if (elrs_phrase_field_id == ELRS_PARAM_FIELD_NONE) return false;
+        char buf[ELRS_PHRASE_MAX + 1];
+        if (len >= sizeof(buf)) len = sizeof(buf) - 1;
+        memcpy(buf, phrase, len);
+        buf[len] = '\0';
+        bool sent = elrs_write_param_string(elrs_phrase_field_id, buf);
+        if (sent) {
+            memcpy(elrs_binding_phrase, buf, len + 1);
+            Serial.println("[RC] Set ELRS binding phrase via CRSF");
+        }
+        return sent;
     }
+    if (!tx_connected) return false;
+    bool sent = uartProto.sendCommandWithPayload(UART_MSG_CMD_SET_BIND_TX, (const uint8_t*)phrase, len);
+    if (sent) Serial.println("[RC] Forwarded TX binding phrase to custom TX");
     return sent;
 }
 
@@ -925,14 +1265,80 @@ static void rc_proto_get_link_status(uint8_t* txConnected, uint8_t* txPaired, ui
     if (txState) *txState = statusValid ? status.connectionState : 0xFF;
 }
 
+static void rc_proto_get_link_status_ex(uint8_t* buf, uint8_t bufLen) {
+    if (!buf || bufLen < 4) return;
+    buf[0] = tx_connected ? 1 : 0;
+    buf[1] = statusValid ? status.pairingState : 0;
+    buf[2] = statusValid ? status.connectionState : 0xFF;
+    TxType eff = get_effective_tx_type();
+    buf[3] = (uint8_t)eff;
+    if (bufLen >= 6 && eff == TX_TYPE_ELRS) {
+        buf[4] = (uint8_t)elrs_role;  // 1=TX, 2=RX
+        if (elrs_device_name[0]) {
+            size_t n = strlen(elrs_device_name);
+            if (n > 20) n = 20;
+            buf[5] = (uint8_t)n;
+            if (bufLen >= (size_t)(6 + n)) memcpy(&buf[6], elrs_device_name, n);
+        } else {
+            buf[5] = 0;
+        }
+    }
+}
+
+static void rc_proto_re_detect_tx(void) {
+    run_tx_detection();
+    check_tx_connection();
+}
+
+static bool rc_proto_get_elrs_binding_phrase(char* phrase, uint8_t maxLen) {
+    if (!phrase || maxLen == 0 || get_effective_tx_type() != TX_TYPE_ELRS || elrs_role != ELRS_ROLE_TX) return false;
+    if (elrs_binding_phrase[0]) {
+        size_t n = strlen(elrs_binding_phrase);
+        if (n >= maxLen) n = maxLen - 1;
+        memcpy(phrase, elrs_binding_phrase, n);
+        phrase[n] = '\0';
+        return true;
+    }
+    elrs_param_chunk_next = 0;
+    elrs_param_read_in_progress = true;
+    elrs_request_param_chunk(0);
+    unsigned long deadline = millis() + 800;
+    while (millis() < deadline) {
+        receiveUARTMessages();
+        if (elrs_binding_phrase[0]) break;
+        delay(2);
+    }
+    elrs_param_read_in_progress = false;
+    if (!elrs_binding_phrase[0]) return false;
+    size_t n = strlen(elrs_binding_phrase);
+    if (n >= maxLen) n = maxLen - 1;
+    memcpy(phrase, elrs_binding_phrase, n);
+    phrase[n] = '\0';
+    return true;
+}
+
 static bool rc_proto_enter_pairing_mode(void) {
+    if (get_effective_tx_type() == TX_TYPE_ELRS && elrs_role == ELRS_ROLE_TX) {
+        if (elrs_bind_cmd_field_id == ELRS_PARAM_FIELD_NONE) {
+            elrs_param_chunk_next = 0;
+            elrs_param_read_in_progress = true;
+            elrs_request_param_chunk(0);
+            unsigned long deadline = millis() + 800;
+            while (millis() < deadline) {
+                receiveUARTMessages();
+                if (elrs_bind_cmd_field_id != ELRS_PARAM_FIELD_NONE) break;
+                delay(2);
+            }
+            elrs_param_read_in_progress = false;
+        }
+        if (elrs_bind_cmd_field_id == ELRS_PARAM_FIELD_NONE) return false;
+        bool sent = elrs_write_param_byte(elrs_bind_cmd_field_id, 0x01);  // CLICK = start bind
+        if (sent) Serial.println("[RC] ELRS bind command sent (CRSF param)");
+        return sent;
+    }
     if (!tx_connected) return false;
     bool sent = uartProto.sendCommand(UART_MSG_CMD_PAIR);
-    if (sent) {
-        Serial.println("[RC] Forwarded PAIR command to TX");
-    } else {
-        Serial.println("[RC] Failed to forward PAIR command to TX");
-    }
+    if (sent) Serial.println("[RC] Forwarded PAIR command to TX");
     return sent;
 }
 

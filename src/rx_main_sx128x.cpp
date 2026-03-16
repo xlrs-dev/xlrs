@@ -300,7 +300,8 @@ void loop() {
                 if (hasPairedTxId && (connectionState == STATE_CONNECTED || connectionState == STATE_CONNECTING)) {
                     if (payload_len >= FRAME_SIZE) {
                         uint16_t sequence = 0;
-                        if (Protocol::decodeFrame(payload, channels, &sequence, &security, &lastSequence, pairedTxDeviceId)) {
+                        int decodeFail = 0;
+                        if (Protocol::decodeFrame(payload, channels, &sequence, &security, &lastSequence, pairedTxDeviceId, &decodeFail)) {
                             lastDataReceived = millis();
 
                             static unsigned long lastChanLog = 0;
@@ -321,7 +322,9 @@ void loop() {
                         } else {
                             static unsigned long lastBadLog = 0;
                             if (millis() - lastBadLog > 2000) {
-                                Serial.println("[RX] Invalid channel frame (device ID mismatch / HMAC / decrypt)");
+                                const char* reason = (decodeFail == 1) ? "device_id" : (decodeFail == 2) ? "hmac" : (decodeFail == 3) ? "decrypt" : (decodeFail == 4) ? "channel_range" : (decodeFail == 5) ? "replay" : "unknown";
+                                Serial.print("[RX] Invalid channel frame: ");
+                                Serial.println(reason);
                                 lastBadLog = millis();
                             }
                         }

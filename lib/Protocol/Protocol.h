@@ -54,7 +54,8 @@ public:
     // Decode binary frame into channel values and verify security, device ID, and decrypt
     // Returns true if frame is valid, device ID matches, and security checks pass
     // expectedDeviceId: The device ID we expect to receive from (TX ID for RX, RX ID for TX)
-    static bool decodeFrame(const uint8_t* frame, uint16_t channels[NUM_CHANNELS], uint16_t* sequence, Security* security, uint16_t* lastSequence, const uint8_t* expectedDeviceId);
+    // failReason: if non-null and decode fails, set to 1=device_id, 2=hmac, 3=decrypt, 4=channel_range, 5=replay
+    static bool decodeFrame(const uint8_t* frame, uint16_t channels[NUM_CHANNELS], uint16_t* sequence, Security* security, uint16_t* lastSequence, const uint8_t* expectedDeviceId, int* failReason = nullptr);
     
     // Validate frame structure (basic checksum)
     static bool validateFrame(const uint8_t* frame);

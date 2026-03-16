@@ -273,7 +273,9 @@ int gattWriteCallback(uint16_t characteristic_id, uint8_t *buffer, uint16_t buff
     // Process channel data
     if (buffer_size == FRAME_SIZE) {
         uint16_t sequence = 0;
-        if (Protocol::decodeFrame(buffer, channels, &sequence, &security, &lastSequence)) {
+        // BLE: expect device ID from start of frame (first 8 bytes); use zero to accept any for now
+        static const uint8_t bleExpectedTxId[DEVICE_ID_SIZE] = {0};
+        if (Protocol::decodeFrame(buffer, channels, &sequence, &security, &lastSequence, bleExpectedTxId)) {
             lastDataReceived = millis();
             
             static unsigned long lastPrint = 0;

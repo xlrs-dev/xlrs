@@ -49,13 +49,15 @@ void Protocol::encodeFrame(uint16_t channels[NUM_CHANNELS], uint16_t sequence, S
     }
 }
 
-bool Protocol::decodeFrame(const uint8_t* frame, uint16_t channels[NUM_CHANNELS], uint16_t* sequence, Security* security, uint16_t* lastSequence, const uint8_t* expectedDeviceId) {
+bool Protocol::decodeFrame(const uint8_t* frame, uint16_t channels[NUM_CHANNELS], uint16_t* sequence, Security* security, uint16_t* lastSequence, const uint8_t* expectedDeviceId, int* failReason) {
     if (!frame || !expectedDeviceId) {
+        if (failReason) *failReason = 0;
         return false;
     }
     
     // CRITICAL: Verify device ID matches expected (1-to-1 enforcement)
     if (memcmp(frame, expectedDeviceId, DEVICE_ID_SIZE) != 0) {
+        if (failReason) *failReason = 1;
         return false;  // Device ID mismatch - reject packet
     }
     
@@ -66,6 +68,7 @@ bool Protocol::decodeFrame(const uint8_t* frame, uint16_t channels[NUM_CHANNELS]
         
         // Verify HMAC (over device ID + encrypted data + sequence)
         if (!security->verifyHMAC(frame, DEVICE_ID_SIZE + CHANNEL_DATA_SIZE + SEQUENCE_SIZE, receivedHmac)) {
+            if (failReason) *failReason = 2;
             return false;  // HMAC verification failed
         }
     }
@@ -84,6 +87,7 @@ bool Protocol::decodeFrame(const uint8_t* frame, uint16_t channels[NUM_CHANNELS]
     uint8_t plaintext[CHANNEL_DATA_SIZE];
     if (security && security->hasPairingKey()) {
         if (!security->decrypt(encrypted, CHANNEL_DATA_SIZE, plaintext, seq, expectedDeviceId)) {
+            if (failReason) *failReason = 3;
             return false;  // Decryption failed
         }
     } else {
@@ -98,6 +102,7 @@ bool Protocol::decodeFrame(const uint8_t* frame, uint16_t channels[NUM_CHANNELS]
         
         // Validate range
         if (channels[i] < CHANNEL_MIN || channels[i] > CHANNEL_MAX) {
+            if (failReason) *failReason = 4;
             return false;
         }
     }
@@ -108,6 +113,7 @@ bool Protocol::decodeFrame(const uint8_t* frame, uint16_t channels[NUM_CHANNELS]
         
         // Allow sequence to wrap around, but reject if it's too old (within last 1000 packets)
         if (seq != 0 && seq < lastSeq && (lastSeq - seq) > 1000) {
+            if (failReason) *failReason = 5;
             return false;  // Sequence too old (replay attack)
         }
         

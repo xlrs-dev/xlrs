@@ -240,11 +240,13 @@ The RC board can send commands to the TX module:
   - Check radio wiring (SPI, BUSY, DIO1, RST pins)
   - Monitor Serial output (115200 baud) for connection state and error messages
 
-- **Pairing fails:**
-  - Make sure RX is in pairing mode (hold BOOTSEL for 5 seconds, 60 second timeout)
-  - Verify binding phrase matches on both devices (check Serial for binding UID)
-  - Check radio initialization (should see "SX128x ready" in Serial)
-  - Ensure devices are within range (SX1280 has good range but test close first)
+- **Pairing fails / TX and RX not pairing anymore:**
+  - Put **RX** in pairing mode: hold BOOTSEL for 5 seconds (60 second timeout).
+  - Put **TX** in pairing mode in one of two ways:
+    - **Option A:** On the RC main screen, press **ENTER** to send the PAIR command to the TX (TX then sends pairing packets).
+    - **Option B:** Leave the system on; if the TX was already paired but gets no response from the RX, after about 60 seconds the TX automatically switches to pairing mode and sends pairing packets.
+  - Ensure both use the same binding phrase (e.g. `Kikobot-02` in build flags; check Serial for binding UID).
+  - Check radio init on both sides (Serial: "SX128x ready") and that devices are in range.
 
 - **No CRSF output from RX:**
   - Verify RX is connected (check Serial for "CONNECTED" state)

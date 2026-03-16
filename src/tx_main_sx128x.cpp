@@ -27,6 +27,7 @@ unsigned long lastSyncSent = 0;
 unsigned long lastSyncAckReceived = 0;
 uint16_t syncSequence = 0;
 unsigned long connectionStartTime = 0;
+unsigned long connectingStartTime = 0;  // when we entered STATE_CONNECTING (for timeout fallback to pairing)
 
 // Sync reliability / hysteresis
 // The link can be perfectly fine while we occasionally miss a SYNC_ACK due to half-duplex timing.
@@ -156,6 +157,9 @@ void setup() {
             pairingMode = true;
             connectionState = STATE_PAIRING;
         }
+        if (connectionState == STATE_CONNECTING) {
+            connectingStartTime = millis();
+        }
     } else {
         Serial.println("Security init failed");
         connectionState = STATE_DISCONNECTED;
@@ -275,6 +279,7 @@ void loop() {
                     if (Pairing::handlePairingAck(payload, payload_len, &security, 
                                                    pairedRxDeviceId, &hasPairedRxId, &pairingMode)) {
                         connectionState = STATE_CONNECTING;
+                        connectingStartTime = millis();
                     }
                 }
                 break;
@@ -532,11 +537,22 @@ void updateConnectionState() {
         case STATE_PAIRING:
             if (!pairingMode && isPaired()) {
                 connectionState = STATE_CONNECTING;
+                connectingStartTime = millis();
                 Serial.println("[STATE] PAIRING -> CONNECTING");
             }
             break;
             
-        case STATE_CONNECTING:
+        case STATE_CONNECTING: {
+            // If we've been trying to connect for a long time with no SYNC_ACK (e.g. RX is in pairing mode),
+            // fall back to sending pairing packets so re-pairing works without pressing ENTER on RC.
+            const unsigned long CONNECTING_PAIRING_FALLBACK_MS = 60000;  // match RX pairing timeout
+            bool noSyncAckSinceConnecting = (lastSyncAckReceived < connectingStartTime);
+            if (noSyncAckSinceConnecting && (millis() - connectingStartTime) > CONNECTING_PAIRING_FALLBACK_MS) {
+                pairingMode = true;
+                connectionState = STATE_PAIRING;
+                Serial.println("[STATE] CONNECTING timeout (no SYNC_ACK) - entering pairing mode");
+                break;
+            }
             // Wait for sync ACK to complete handshake
             if (lastSyncAckReceived > 0 && (millis() - lastSyncAckReceived < 1000)) {
                 connectionState = STATE_CONNECTED;
@@ -544,6 +560,7 @@ void updateConnectionState() {
                 Serial.println("[STATE] CONNECTING -> CONNECTED");
             }
             break;
+        }
             
         case STATE_CONNECTED:
             // Stay connected as long as we receive sync ACKs
@@ -553,6 +570,7 @@ void updateConnectionState() {
             // Try to reconnect
             if (isPaired()) {
                 connectionState = STATE_CONNECTING;
+                connectingStartTime = millis();
                 Serial.println("[STATE] LOST -> CONNECTING (reconnecting)");
             } else {
                 connectionState = STATE_DISCONNECTED;

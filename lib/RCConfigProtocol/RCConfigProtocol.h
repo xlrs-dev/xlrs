@@ -28,6 +28,7 @@ enum RCProtoCmd : uint8_t {
     RC_CMD_ENTER_PAIRING_MODE = 0x43,
     RC_CMD_RE_DETECT_TX      = 0x44,
     RC_CMD_GET_ELRS_BINDING_PHRASE = 0x45,
+    RC_CMD_ENTER_USB_UART_PROXY   = 0x46,
 };
 
 enum RCProtoStatus : uint8_t {
@@ -64,6 +65,7 @@ public:
     void setEnterPairingMode(bool (*fn)()) { enterPairingMode = fn; }
     void setReDetectTx(void (*fn)()) { reDetectTx = fn; }
     void setGetElrsBindingPhrase(bool (*fn)(char* phrase, uint8_t maxLen)) { getElrsBindingPhrase = fn; }
+    void setEnterUsbUartProxy(void (*fn)()) { enterUsbUartProxy = fn; }
     void setDeviceInfo(const char* name, const char* version);
 
     bool isStreamingState() const { return streamingState; }
@@ -96,6 +98,7 @@ private:
     bool (*enterPairingMode)();
     void (*reDetectTx)();
     bool (*getElrsBindingPhrase)(char* phrase, uint8_t maxLen);
+    void (*enterUsbUartProxy)();
     char deviceName[RC_PROTO_DEVICE_NAME_MAX];
     char deviceVersion[RC_PROTO_DEVICE_VER_MAX];
 

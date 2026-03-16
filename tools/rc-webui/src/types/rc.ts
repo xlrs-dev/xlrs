@@ -26,8 +26,8 @@ export function defaultRcConfig(): RcConfig {
     calib_max: [23420, 23420, 23420, 23420],
     calib_center: [13199, 13199, 13199, 13199],
     deadzone: [0.05, 0.05, 0.05, 0],
-    rate: [0.7, 0.7, 0.7, 0.7],
-    expo: [0.3, 0.3, 0.3, 0.3],
+    rate: [1.0, 1.0, 1.0, 1.0],   // Full range (1000-2000)
+    expo: [0, 0, 0, 0],
     cutoff_min: Array(NUM_CHANNELS).fill(1000),
     cutoff_max: Array(NUM_CHANNELS).fill(2000),
     high_pass_filter: false,

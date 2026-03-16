@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useSerialContext } from '../context/SerialContext';
 import { NUM_CHANNELS } from '../types/rc';
 
@@ -9,6 +9,8 @@ export function LivePanel() {
   const { serial, liveState, setLiveState, configDraft, setConfigDraft } = useSerialContext();
   const lastReceivedRef = useRef<number>(0);
   const retryRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [hpfStatus, setHpfStatus] = useState<string>('');
+  const [hpfPending, setHpfPending] = useState(false);
 
   useEffect(() => {
     if (!serial.connected) return;
@@ -50,8 +52,24 @@ export function LivePanel() {
   const ch = s?.ch ?? Array(NUM_CHANNELS).fill(1500);
   const toggles = s?.toggles ?? [false, false, false, false];
 
-  const toggleHighPass = () => {
-    setConfigDraft((c) => ({ ...c, high_pass_filter: !c.high_pass_filter }));
+  const toggleHighPass = async () => {
+    const newVal = !configDraft.high_pass_filter;
+    const newCfg = { ...configDraft, high_pass_filter: newVal };
+    setConfigDraft(newCfg);
+    setHpfPending(true);
+    setHpfStatus('');
+    try {
+      const drafted = await serial.setConfigDraft(newCfg);
+      if (!drafted) { setHpfStatus('Apply failed'); setHpfPending(false); return; }
+      const applied = await serial.applyConfig();
+      if (!applied) { setHpfStatus('Apply failed'); setHpfPending(false); return; }
+      const saved = await serial.saveConfig();
+      setHpfStatus(saved ? 'Saved' : 'Applied (not saved)');
+    } catch {
+      setHpfStatus('Error');
+    } finally {
+      setHpfPending(false);
+    }
   };
 
   return (
@@ -65,13 +83,24 @@ export function LivePanel() {
             type="checkbox"
             checked={configDraft.high_pass_filter ?? false}
             onChange={toggleHighPass}
+            disabled={hpfPending}
             className="rounded border-[var(--color-border)]"
           />
           <span className="text-sm text-[var(--color-text)]">High-pass filter (ADC)</span>
         </label>
-        <span className="text-xs text-[var(--color-text-muted)]">
-          Reduces stick drift. Apply in Save / Apply tab to use on device.
-        </span>
+        {hpfPending && (
+          <span className="text-xs text-[var(--color-text-muted)]">Saving…</span>
+        )}
+        {!hpfPending && hpfStatus && (
+          <span className={`text-xs ${hpfStatus.startsWith('Apply') || hpfStatus === 'Error' ? 'text-[var(--color-error)]' : 'text-[var(--color-success)]'}`}>
+            {hpfStatus}
+          </span>
+        )}
+        {!hpfPending && !hpfStatus && (
+          <span className="text-xs text-[var(--color-text-muted)]">
+            Reduces stick drift — saved automatically when toggled.
+          </span>
+        )}
       </div>
       <div className="viz-row">
         <div className="stick-viz">

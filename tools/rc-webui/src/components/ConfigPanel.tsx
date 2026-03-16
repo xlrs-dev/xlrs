@@ -4,12 +4,17 @@ import { defaultRcConfig } from '../types/rc';
 
 type StatusType = 'idle' | 'success' | 'error';
 
+const PROXY_CONFIRM_MSG =
+  'RC will forward raw bytes between USB and the TX module. This WebUI will disconnect. Use ELRS Buddy or similar to configure your TX directly. Reset RC to exit proxy mode. Continue?';
+
 export function ConfigPanel() {
   const { serial, configDraft, setConfigDraft, loadConfigFromDevice } = useSerialContext();
   const [status, setStatus] = useState('');
   const [statusType, setStatusType] = useState<StatusType>('idle');
   const [bindingPhrase, setBindingPhrase] = useState('');
   const [elrsPhraseView, setElrsPhraseView] = useState<string | null>(null);
+  const [proxyConfirmOpen, setProxyConfirmOpen] = useState(false);
+  const [proxyBusy, setProxyBusy] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const showStatus = (msg: string, type: StatusType) => {
@@ -105,6 +110,23 @@ export function ConfigPanel() {
       ok ? 'TX binding phrase updated.' : 'TX binding phrase update failed.',
       ok ? 'success' : 'error'
     );
+  };
+
+  const handleEnterProxyClick = () => setProxyConfirmOpen(true);
+  const handleProxyConfirmCancel = () => setProxyConfirmOpen(false);
+  const handleProxyConfirmOk = async () => {
+    setProxyBusy(true);
+    try {
+      const ok = await serial.enterUsbUartProxy();
+      if (ok) {
+        showStatus('Proxy mode enabled. ELRS Buddy will open below—click Connect to configure your TX.', 'success');
+        setProxyConfirmOpen(false);
+      } else {
+        showStatus('Failed to enter proxy mode.', 'error');
+      }
+    } finally {
+      setProxyBusy(false);
+    }
   };
 
   const handleViewElrsPhrase = async () => {
@@ -208,6 +230,47 @@ export function ConfigPanel() {
           )}
         </div>
       </div>
+
+      <div className="card mt-6 border-[var(--color-warning)]">
+        <h4 className="text-[var(--color-text)] font-semibold">USB-UART Proxy</h4>
+        <p className="hint text-sm mt-1">
+          Forward raw bytes between USB and the TX module. Use ELRS Buddy or similar to configure your TX directly. Reset RC to exit.
+        </p>
+        <div className="mt-3">
+          <button
+            type="button"
+            className="btn-secondary"
+            onClick={handleEnterProxyClick}
+            disabled={proxyBusy}
+          >
+            {proxyBusy ? 'Entering…' : 'Enter USB-UART Proxy Mode'}
+          </button>
+        </div>
+      </div>
+
+      {proxyConfirmOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="proxy-confirm-title"
+        >
+          <div className="bg-[var(--color-card)] rounded-lg p-4 max-w-md mx-4 shadow-lg border border-[var(--color-border)]">
+            <h3 id="proxy-confirm-title" className="font-semibold text-[var(--color-text)] mb-2">
+              Enter USB-UART Proxy Mode?
+            </h3>
+            <p className="text-sm text-[var(--color-text-muted)] mb-4">{PROXY_CONFIRM_MSG}</p>
+            <div className="flex justify-end gap-2">
+              <button type="button" className="btn-secondary" onClick={handleProxyConfirmCancel} disabled={proxyBusy}>
+                Cancel
+              </button>
+              <button type="button" className="btn-primary" onClick={handleProxyConfirmOk} disabled={proxyBusy}>
+                {proxyBusy ? 'Entering…' : 'Enter Proxy Mode'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {status && (
         <p

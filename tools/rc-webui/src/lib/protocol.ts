@@ -27,6 +27,7 @@ export const CMD = {
   ENTER_PAIRING_MODE: 0x43,
   RE_DETECT_TX: 0x44,
   GET_ELRS_BINDING_PHRASE: 0x45,
+  ENTER_USB_UART_PROXY: 0x46,
 } as const;
 
 export const STATUS = {
@@ -122,11 +123,13 @@ export class FrameParser {
   }
 }
 
-const CONFIG_PAYLOAD_SIZE =
-  4 + 4 + 4 * 2 * 3 + 4 * 4 * 3 + 8 * 2 * 2 + 1;
+// sizeof(rc_config_data_t) on ARM = 116: 113 bytes of fields + 3 bytes tail-padding
+// (largest member is float, so the struct is padded to a multiple of 4).
+const CONFIG_FIELDS_SIZE = 4 + 4 + 4 * 2 * 3 + 4 * 4 * 3 + 8 * 2 * 2 + 1; // 113
+const CONFIG_PAYLOAD_SIZE = 116; // must match sizeof(rc_config_data_t)
 
 function configToBytes(cfg: RcConfig): Uint8Array {
-  const buf = new ArrayBuffer(CONFIG_PAYLOAD_SIZE);
+  const buf = new ArrayBuffer(CONFIG_PAYLOAD_SIZE); // 116 bytes; tail 3 stay 0 (padding)
   const dv = new DataView(buf);
   let off = 0;
   for (let i = 0; i < NUM_AXES; i++) dv.setUint8(off++, cfg.channel_function[i] ?? i);
@@ -168,7 +171,7 @@ function configToBytes(cfg: RcConfig): Uint8Array {
 }
 
 function bytesToConfig(bytes: Uint8Array): RcConfig | null {
-  if (bytes.length < CONFIG_PAYLOAD_SIZE) return null;
+  if (bytes.length < CONFIG_FIELDS_SIZE) return null;
   const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const cfg: RcConfig = {
     channel_function: [],

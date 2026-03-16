@@ -336,6 +336,17 @@ All SX1280 pins can be overridden in `platformio.ini`:
 - [Adafruit GFX](https://github.com/adafruit/Adafruit-GFX-Library) - Graphics library
 - [Adafruit ADS1X15](https://github.com/adafruit/Adafruit_ADS1X15) - ADC driver
 
+### USB-UART Proxy Mode (rc-crsf / rc-rp2350)
+
+The RC board can act as a raw USB-to-UART bridge so browser tools (e.g. [ELRS Buddy](https://github.com/fourflies/elrsbuddy)) can talk directly to an ELRS/EdgeTX TX module:
+
+1. Connect RC to PC via USB and to TX module via UART (GP8/GP9, 420000 baud)
+2. Open the RC WebUI (`tools/rc-webui`), connect to the RC, go to Save/Apply tab
+3. Click "Enter USB-UART Proxy Mode" and confirm
+4. WebUI disconnects; RC now forwards raw bytes between USB and UART
+5. Open ELRS Buddy (or similar), connect to the RC's USB port — it will see the TX module directly
+6. Reset RC to exit proxy mode and return to normal operation
+
 ## Build Environments
 
 The project includes multiple build environments in `platformio.ini`:

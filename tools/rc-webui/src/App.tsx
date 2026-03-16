@@ -42,6 +42,29 @@ function AppContent() {
     }
   };
 
+  if (serial.proxyModeActive) {
+    return (
+      <div className="app w-full min-h-screen flex flex-col">
+        <div className="rounded-[var(--radius-card)] border border-[var(--color-border)] bg-[var(--color-card)] m-4 p-4 shrink-0">
+          <p className="text-sm text-[var(--color-text)]">
+            <strong>USB-UART Proxy mode active.</strong> RC is forwarding raw bytes. Use ELRS Buddy below to configure your TX. Reset RC to exit proxy mode.
+            {' '}
+            <a href="https://fourflies.mooo.com/elrsbuddy/" target="_blank" rel="noopener noreferrer" className="text-[var(--color-primary)] underline">
+              Open ELRS Buddy in new tab
+            </a>
+          </p>
+        </div>
+        <iframe
+          src="https://fourflies.mooo.com/elrsbuddy/"
+          title="ELRS Buddy"
+          className="flex-1 w-full min-h-[500px] border border-[var(--color-border)] rounded-[var(--radius-card)] mx-4 mb-4"
+          sandbox="allow-scripts allow-same-origin allow-forms"
+          allow="serial"
+        />
+      </div>
+    );
+  }
+
   return (
     <div className="app max-w-[920px] mx-auto px-5 py-6 w-full">
       <header className="mb-6">
@@ -74,7 +97,7 @@ function AppContent() {
                 <button
                   type="button"
                   className="btn-secondary"
-                  onClick={serial.disconnect}
+                  onClick={() => void serial.disconnect()}
                 >
                   Disconnect
                 </button>

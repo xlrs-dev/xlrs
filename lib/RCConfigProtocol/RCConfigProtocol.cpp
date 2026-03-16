@@ -26,6 +26,7 @@ RCConfigProtocol::RCConfigProtocol()
     , enterPairingMode(nullptr)
     , reDetectTx(nullptr)
     , getElrsBindingPhrase(nullptr)
+    , enterUsbUartProxy(nullptr)
     , streamingState(false)
 {
     memset(deviceName, 0, sizeof(deviceName));
@@ -253,6 +254,13 @@ void RCConfigProtocol::processRxByte(uint8_t byte) {
             }
             bool ok = enterPairingMode();
             sendResponse(cmd, seq, ok ? RC_STATUS_OK : RC_STATUS_ERR_FORWARD, nullptr, 0);
+            break;
+        }
+        case RC_CMD_ENTER_USB_UART_PROXY: {
+            sendResponse(cmd, seq, RC_STATUS_OK, nullptr, 0);
+            if (enterUsbUartProxy) {
+                enterUsbUartProxy();
+            }
             break;
         }
         default:

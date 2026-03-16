@@ -58,7 +58,7 @@ export interface UseSerialResult {
   /** Open browser picker to grant access to a new device, then connect. */
   connectNew: () => Promise<void>;
   connect: () => Promise<void>;
-  disconnect: () => void;
+  disconnect: () => Promise<void>;
   request: (cmd: number, payload?: Uint8Array | null) => Promise<ProtoResponse>;
   getDeviceInfo: () => Promise<DeviceInfo | null>;
   getConfig: () => Promise<RcConfig | null>;
@@ -74,6 +74,8 @@ export interface UseSerialResult {
   enterPairingMode: () => Promise<boolean>;
   reDetectTx: () => Promise<boolean>;
   getElrsBindingPhrase: () => Promise<string | null>;
+  enterUsbUartProxy: () => Promise<boolean>;
+  proxyModeActive: boolean;
   streamStart: (onState: (s: StateFrame) => void) => void;
   streamStop: () => void;
 }
@@ -89,6 +91,7 @@ export function useSerial(): UseSerialResult {
   const [deviceInfo, setDeviceInfo] = useState<DeviceInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [availablePorts, setAvailablePorts] = useState<SerialPort[]>([]);
+  const [proxyModeActive, setProxyModeActive] = useState(false);
 
   const portRef = useRef<SerialPort | null>(null);
   const readerRef = useRef<ReadableStreamDefaultReader<Uint8Array> | null>(null);
@@ -97,22 +100,34 @@ export function useSerial(): UseSerialResult {
   const stateCallbackRef = useRef<((s: StateFrame) => void) | null>(null);
   const readLoopRef = useRef<boolean>(false);
 
-  const disconnect = useCallback(() => {
+  const disconnect = useCallback(async () => {
     readLoopRef.current = false;
     stateCallbackRef.current = null;
-    if (readerRef.current) {
-      readerRef.current.cancel().catch(() => {});
-      readerRef.current = null;
-    }
-    if (portRef.current) {
-      portRef.current.close().catch(() => {});
-      portRef.current = null;
-    }
     setConnected(false);
     setPortName(null);
     setDeviceInfo(null);
     pendingRef.current.forEach((p) => p.resolve({ status: 255, schema: 0, data: null }));
     pendingRef.current.clear();
+
+    const reader = readerRef.current;
+    readerRef.current = null;
+    if (reader) {
+      try {
+        await reader.cancel();
+      } catch {
+        /* ignore */
+      }
+    }
+
+    const port = portRef.current;
+    portRef.current = null;
+    if (port) {
+      try {
+        await port.close();
+      } catch {
+        /* ignore */
+      }
+    }
   }, []);
 
   const send = useCallback(
@@ -181,9 +196,8 @@ export function useSerial(): UseSerialResult {
     } catch (e) {
       if (readLoopRef.current) setError(String(e));
     } finally {
-      readerRef.current = null;
       parser.reset();
-      disconnect();
+      void disconnect();
     }
   }, [processFrame, disconnect]);
 
@@ -230,7 +244,7 @@ export function useSerial(): UseSerialResult {
         await refreshPorts();
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
-        disconnect();
+        await disconnect();
       }
     },
     [openPort, refreshPorts, disconnect]
@@ -248,7 +262,7 @@ export function useSerial(): UseSerialResult {
       await refreshPorts();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
-      disconnect();
+      await disconnect();
     }
   }, [openPort, refreshPorts, disconnect]);
 
@@ -343,6 +357,14 @@ export function useSerial(): UseSerialResult {
     return new TextDecoder().decode(resp.data);
   }, [request]);
 
+  const enterUsbUartProxy = useCallback(async (): Promise<boolean> => {
+    const resp = await request(CMD.ENTER_USB_UART_PROXY);
+    if (resp.status !== 0) return false;
+    await disconnect();
+    setProxyModeActive(true);
+    return true;
+  }, [request, disconnect]);
+
   const streamStart = useCallback(
     (onState: (s: StateFrame) => void) => {
       stateCallbackRef.current = onState;
@@ -390,6 +412,8 @@ export function useSerial(): UseSerialResult {
     enterPairingMode,
     reDetectTx,
     getElrsBindingPhrase,
+    enterUsbUartProxy,
+    proxyModeActive,
     streamStart,
     streamStop,
   };

@@ -30,8 +30,8 @@ void rc_config_set_defaults(rc_config_data_t* config) {
         config->calib_max[i] = RC_CALIB_DEFAULT_MAX;
         config->calib_center[i] = RC_CALIB_DEFAULT_CENTER;
         config->deadzone[i] = (i == 3) ? 0.0f : 0.05f;   // no deadzone on throttle
-        config->rate[i] = 0.7f;
-        config->expo[i] = 0.3f;
+        config->rate[i] = 1.0f;   // Full range (1000-2000); use 0.7 for reduced throw (1150-1850)
+        config->expo[i] = 0.0f;
     }
     for (int i = 0; i < RC_NUM_CHANNELS; i++) {
         config->cutoff_min[i] = RC_CHANNEL_MIN;
@@ -55,9 +55,9 @@ bool rc_config_validate(rc_config_data_t* config) {
         if (config->deadzone[i] < 0.0f || config->deadzone[i] > 0.5f)
             config->deadzone[i] = 0.05f;
         if (config->rate[i] < 0.3f || config->rate[i] > 1.0f)
-            config->rate[i] = 0.7f;
+            config->rate[i] = 1.0f;
         if (config->expo[i] < 0.0f || config->expo[i] > 1.0f)
-            config->expo[i] = 0.3f;
+            config->expo[i] = 0.0f;
     }
     for (int i = 0; i < RC_NUM_CHANNELS; i++) {
         if (config->cutoff_min[i] < RC_CHANNEL_MIN) config->cutoff_min[i] = RC_CHANNEL_MIN;

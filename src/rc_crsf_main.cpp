@@ -4,6 +4,7 @@
 #include <Wire.h>
 #if defined(CRSF_CORE1_CHANNELS)
 #include "pico/mutex.h"
+#include "hardware/sync.h"
 #endif
 #include <EEPROM.h>
 #include <Adafruit_GFX.h>
@@ -18,6 +19,8 @@
 #include "bq2562x.h"
 #include "RCConfig.h"
 #include "RCConfigProtocol.h"
+
+static_assert(sizeof(rc_config_data_t) == 132, "rc_config_data_t size must match tools/rc-webui CONFIG_PAYLOAD_SIZE");
 #include "debug_ndjson.h"
 
 // OLED Configuration
@@ -72,6 +75,121 @@
 #define INTERNAL_ADC_BITS  12
 #define INTERNAL_ADC_MAX   ((1 << INTERNAL_ADC_BITS) - 1)  // 4095
 #define INTERNAL_ADC_SCALE_16BIT  (32767)  // scale 12-bit to 16-bit range for same calibration
+#if defined(RC_STICK_ADC_12BIT)
+// Keep hardware counts 0–4095 (no scaling to 32767)
+static inline int16_t internal_adc_raw_to_stick(uint32_t raw) {
+    return (int16_t)constrain(raw, 0u, (uint32_t)INTERNAL_ADC_MAX);
+}
+#else
+static inline int16_t internal_adc_raw_to_stick(uint32_t raw) {
+    return (int16_t)((raw * (uint32_t)INTERNAL_ADC_SCALE_16BIT) / (uint32_t)INTERNAL_ADC_MAX);
+}
+#endif
+
+// Internal ADC: oversampling + 1st-order IIR low-pass + optional 2-tap temporal blend (see cfg->stick_low_pass).
+static uint32_t internal_adc_oversample_pin_n(uint8_t pin, uint8_t os_log2) {
+    if (os_log2 > 6) os_log2 = 6;
+    const uint32_t n = 1u << os_log2;
+    uint32_t sum = 0;
+    for (uint32_t k = 0; k < n; k++) {
+        sum += analogRead(pin);
+    }
+    return (sum + (n >> 1)) >> os_log2;
+}
+
+static int16_t s_internal_stick_lpf_z[4];
+static uint8_t s_internal_stick_lpf_init_mask;
+static int16_t s_frame_blend_prev[4];
+static uint8_t s_frame_blend_init_mask;
+
+static void internal_adc_reset_stick_filter(void) {
+    s_internal_stick_lpf_init_mask = 0;
+    s_frame_blend_init_mask = 0;
+}
+
+// Populates axis_out[4] in the same units as internal_adc_raw_to_stick (0..4095 or 0..32767).
+static void internal_read_sticks_filtered(int16_t axis_out[4], const rc_config_data_t* cfg) {
+    uint8_t level = 2;
+    if (cfg) {
+        level = cfg->stick_low_pass;
+        if (level > 3) level = 2;
+    }
+    uint8_t os_log2 = 3;
+    uint8_t lpf_shift = 2;
+    bool blend = true;
+    switch (level) {
+        case 0:
+            os_log2 = 3;
+            lpf_shift = 0;
+            blend = false;
+            break;
+        case 1:
+            os_log2 = 3;
+            lpf_shift = 2;
+            blend = true;
+            break;
+        case 2:
+            os_log2 = 4;
+            lpf_shift = 3;
+            blend = true;
+            break;
+        case 3:
+        default:
+            os_log2 = 4;
+            lpf_shift = 4;
+            blend = true;
+            break;
+    }
+
+    const uint8_t pins[4] = {
+        INTERNAL_ADC_AILERON_PIN,
+        INTERNAL_ADC_ELEVATOR_PIN,
+        INTERNAL_ADC_RUDDER_PIN,
+        INTERNAL_ADC_THROTTLE_PIN,
+    };
+    if (!blend) {
+        s_frame_blend_init_mask = 0;
+    }
+
+    for (int i = 0; i < 4; i++) {
+        uint32_t avg = internal_adc_oversample_pin_n(pins[i], os_log2);
+        int16_t x = internal_adc_raw_to_stick(avg);
+        if (lpf_shift == 0) {
+            axis_out[i] = x;
+            s_internal_stick_lpf_init_mask &= (uint8_t)~(1u << i);
+        } else if ((s_internal_stick_lpf_init_mask & (1u << i)) == 0) {
+            s_internal_stick_lpf_z[i] = x;
+            s_internal_stick_lpf_init_mask |= (1u << i);
+            axis_out[i] = x;
+        } else {
+            int32_t z = (int32_t)s_internal_stick_lpf_z[i];
+            z += (((int32_t)x - z) >> lpf_shift);
+            s_internal_stick_lpf_z[i] = (int16_t)z;
+            axis_out[i] = (int16_t)z;
+        }
+    }
+    if (blend) {
+        for (int i = 0; i < 4; i++) {
+            int16_t y = axis_out[i];
+            if ((s_frame_blend_init_mask & (1u << i)) == 0) {
+                s_frame_blend_prev[i] = y;
+                s_frame_blend_init_mask |= (1u << i);
+            } else {
+                int32_t b = ((int32_t)y + (int32_t)s_frame_blend_prev[i] + 1) >> 1;
+                s_frame_blend_prev[i] = y;
+                axis_out[i] = (int16_t)b;
+            }
+        }
+    }
+#if defined(RC_STICK_ADC_12BIT)
+    const int32_t vmax = (int32_t)INTERNAL_ADC_MAX;
+#else
+    const int32_t vmax = 32767;
+#endif
+    for (int i = 0; i < 4; i++) {
+        axis_out[i] = (int16_t)constrain((int32_t)axis_out[i], 0, vmax);
+    }
+}
 #endif
 
 // Toggle switches (dual-pin reading)
@@ -219,6 +337,10 @@ static rc_config_data_t s_core1_config;  // Snapshot at boot; Core 1 uses this e
 static volatile uint16_t s_core1_channels[8];  // Core 1 writes; Core 0 reads for display
 static volatile bool s_core1_send_elrs_channels = false;  // Set in setup() after TX detection
 static volatile bool s_multicore_ready = false;  // Set by setup() after init
+#if defined(INTERNAL_ADC)
+// Latest filtered stick ADC (same pipeline as CRSF); Core 0 uses for raw_adc / calibration UI
+static volatile int16_t s_core1_stick_filtered[4];
+#endif
 #endif
 
 // Raw input snapshots (for logging/calibration)
@@ -233,9 +355,9 @@ typedef struct {
 } calib_data_t;
 
 static calib_data_t calib = {
-    {2917, 2917, 2917, 2917},
-    {23420, 23420, 23420, 23420},
-    {13199, 13199, 13199, 13199}
+    {RC_CALIB_DEFAULT_MIN, RC_CALIB_DEFAULT_MIN, RC_CALIB_DEFAULT_MIN, RC_CALIB_DEFAULT_MIN},
+    {RC_CALIB_DEFAULT_MAX, RC_CALIB_DEFAULT_MAX, RC_CALIB_DEFAULT_MAX, RC_CALIB_DEFAULT_MAX},
+    {RC_CALIB_DEFAULT_CENTER, RC_CALIB_DEFAULT_CENTER, RC_CALIB_DEFAULT_CENTER, RC_CALIB_DEFAULT_CENTER}
 };
 static bool calib_loaded = false;
 
@@ -256,7 +378,13 @@ static int16_t cal_axis_max[4];
 static float hpf_prev_in[4] = {0};
 static float hpf_prev_out[4] = {0};
 static bool hpf_initialized = false;
+#if defined(INTERNAL_ADC) && defined(RC_STICK_ADC_12BIT)
+#define RC_ADC_CENTER 2048
+#define RC_STICK_VALUE_MAX 4095
+#else
 #define RC_ADC_CENTER 16384
+#define RC_STICK_VALUE_MAX 32767
+#endif
 #define HPF_TAU_S     0.05f
 #define HPF_DT_S      0.02f
 #define HPF_ALPHA     (HPF_TAU_S / (HPF_TAU_S + HPF_DT_S))
@@ -443,7 +571,7 @@ void setup() {
     memcpy(&g_rc_config_draft, &g_rc_config, sizeof(g_rc_config));
 
     g_rc_proto.setStream(&Serial);
-    g_rc_proto.setDeviceInfo("RC-CRSF", "1.1");
+    g_rc_proto.setDeviceInfo("RC-CRSF", "1.3");
     g_rc_proto.setConfigGetter(rc_proto_get_config);
     g_rc_proto.setConfigDraftSetter(rc_proto_set_draft);
     g_rc_proto.setApplyCallback(rc_proto_apply);
@@ -487,6 +615,11 @@ void setup() {
 #if defined(CRSF_CORE1_CHANNELS)
     memcpy(&s_core1_config, &g_rc_config, sizeof(s_core1_config));
     s_core1_send_elrs_channels = (tx_type == TX_TYPE_ELRS && elrs_role == ELRS_ROLE_TX);
+#if defined(INTERNAL_ADC)
+    for (int i = 0; i < 4; i++) {
+        s_core1_stick_filtered[i] = RC_ADC_CENTER;
+    }
+#endif
     s_multicore_ready = true;
 #endif
 
@@ -583,16 +716,12 @@ void loop1() {
     lastSend = millis();
 
     const rc_config_data_t* cfg = &s_core1_config;
-    int16_t axis_adc[4] = {16384, 16384, 16384, 16384};
+    int16_t axis_adc[4] = {RC_ADC_CENTER, RC_ADC_CENTER, RC_ADC_CENTER, RC_ADC_CENTER};
 
-    uint32_t a0 = analogRead(INTERNAL_ADC_AILERON_PIN);
-    uint32_t a1 = analogRead(INTERNAL_ADC_ELEVATOR_PIN);
-    uint32_t a2 = analogRead(INTERNAL_ADC_RUDDER_PIN);
-    uint32_t a3 = analogRead(INTERNAL_ADC_THROTTLE_PIN);
-    axis_adc[0] = (int16_t)((a0 * INTERNAL_ADC_SCALE_16BIT) / INTERNAL_ADC_MAX);
-    axis_adc[1] = (int16_t)((a1 * INTERNAL_ADC_SCALE_16BIT) / INTERNAL_ADC_MAX);
-    axis_adc[2] = (int16_t)((a2 * INTERNAL_ADC_SCALE_16BIT) / INTERNAL_ADC_MAX);
-    axis_adc[3] = (int16_t)((a3 * INTERNAL_ADC_SCALE_16BIT) / INTERNAL_ADC_MAX);
+    internal_read_sticks_filtered(axis_adc, &s_core1_config);
+    for (int i = 0; i < 4; i++) {
+        s_core1_stick_filtered[i] = axis_adc[i];
+    }
 
     auto applyDeadzone = [](int16_t val, uint16_t vmin, uint16_t vmax, float frac) -> int16_t {
         if (vmax <= vmin + 10 || frac <= 0.0f) return val;
@@ -623,9 +752,6 @@ void loop1() {
         uint8_t fc = cfg->channel_function[a];
         if (fc < 4) localCh[fc] = axis_us[a];
     }
-    for (int c = 0; c < 4; c++) {
-        localCh[c] = (uint16_t)constrain(localCh[c], cfg->cutoff_min[c], cfg->cutoff_max[c]);
-    }
 
     auto readToggle = [](uint8_t in1_pin, uint8_t in2_pin) -> uint16_t {
         bool in1_high = digitalRead(in1_pin) == HIGH;
@@ -638,8 +764,9 @@ void loop1() {
     localCh[5] = readToggle(TOGGLE_SWITCH2_IN1_PIN, TOGGLE_SWITCH2_IN2_PIN);
     localCh[6] = readToggle(TOGGLE_SWITCH3_IN1_PIN, TOGGLE_SWITCH3_IN2_PIN);
     localCh[7] = readToggle(TOGGLE_SWITCH4_IN1_PIN, TOGGLE_SWITCH4_IN2_PIN);
-    for (int c = 4; c < 8; c++) {
-        localCh[c] = (uint16_t)constrain(localCh[c], cfg->cutoff_min[c], cfg->cutoff_max[c]);
+    for (int c = 0; c < 8; c++) {
+        int32_t v = (int32_t)localCh[c] + (int32_t)cfg->channel_trim[c];
+        localCh[c] = (uint16_t)constrain(v, (int32_t)cfg->cutoff_min[c], (int32_t)cfg->cutoff_max[c]);
     }
 
     for (int i = 0; i < 8; i++) s_core1_channels[i] = localCh[i];
@@ -656,17 +783,11 @@ void loop1() {
 // ============================================================
 void readInputs() {
 #if defined(CRSF_CORE1_CHANNELS) && defined(INTERNAL_ADC)
-    // Core 1 owns ADC+switches->channels. Core 0 just copies for display and reads raw for calibration.
-    {
-        uint32_t a0 = analogRead(INTERNAL_ADC_AILERON_PIN);
-        uint32_t a1 = analogRead(INTERNAL_ADC_ELEVATOR_PIN);
-        uint32_t a2 = analogRead(INTERNAL_ADC_RUDDER_PIN);
-        uint32_t a3 = analogRead(INTERNAL_ADC_THROTTLE_PIN);
-        raw_adc[0] = (int16_t)((a0 * INTERNAL_ADC_SCALE_16BIT) / INTERNAL_ADC_MAX);
-        raw_adc[1] = (int16_t)((a1 * INTERNAL_ADC_SCALE_16BIT) / INTERNAL_ADC_MAX);
-        raw_adc[2] = (int16_t)((a2 * INTERNAL_ADC_SCALE_16BIT) / INTERNAL_ADC_MAX);
-        raw_adc[3] = (int16_t)((a3 * INTERNAL_ADC_SCALE_16BIT) / INTERNAL_ADC_MAX);
-    }
+    // Core 1 owns ADC+switches->channels. Core 0 mirrors filtered sticks (no second ADC pipeline).
+    raw_adc[0] = s_core1_stick_filtered[0];
+    raw_adc[1] = s_core1_stick_filtered[1];
+    raw_adc[2] = s_core1_stick_filtered[2];
+    raw_adc[3] = s_core1_stick_filtered[3];
     for (int i = 0; i < 8; i++) channels[i] = s_core1_channels[i];
     raw_toggles[0] = digitalRead(TOGGLE_SWITCH1_IN1_PIN) == HIGH;
     raw_toggles[1] = digitalRead(TOGGLE_SWITCH2_IN1_PIN) == HIGH;
@@ -676,18 +797,11 @@ void readInputs() {
 #endif
 
     const rc_config_data_t* cfg = &g_rc_config;
-    int16_t axis_adc[4] = {16384, 16384, 16384, 16384};
+    int16_t axis_adc[4] = {RC_ADC_CENTER, RC_ADC_CENTER, RC_ADC_CENTER, RC_ADC_CENTER};
 
     if (ads_ok) {
 #if defined(INTERNAL_ADC)
-        uint32_t a0 = analogRead(INTERNAL_ADC_AILERON_PIN);
-        uint32_t a1 = analogRead(INTERNAL_ADC_ELEVATOR_PIN);
-        uint32_t a2 = analogRead(INTERNAL_ADC_RUDDER_PIN);
-        uint32_t a3 = analogRead(INTERNAL_ADC_THROTTLE_PIN);
-        axis_adc[0] = (int16_t)((a0 * INTERNAL_ADC_SCALE_16BIT) / INTERNAL_ADC_MAX);
-        axis_adc[1] = (int16_t)((a1 * INTERNAL_ADC_SCALE_16BIT) / INTERNAL_ADC_MAX);
-        axis_adc[2] = (int16_t)((a2 * INTERNAL_ADC_SCALE_16BIT) / INTERNAL_ADC_MAX);
-        axis_adc[3] = (int16_t)((a3 * INTERNAL_ADC_SCALE_16BIT) / INTERNAL_ADC_MAX);
+        internal_read_sticks_filtered(axis_adc, &g_rc_config);
 #else
         axis_adc[0] = ads.readADC_SingleEnded(AILERON_CHANNEL);
         axis_adc[1] = ads.readADC_SingleEnded(ELEVATOR_CHANNEL);
@@ -696,7 +810,7 @@ void readInputs() {
 #endif
     }
 
-    // Optional high-pass filter on ADC (reduces DC drift; center-referenced)
+    // Optional high-pass on sticks (slow drift about center). Separate from cfg stick_low_pass (Core1 ADC path).
     if (cfg->high_pass_filter) {
         if (!hpf_initialized) {
             for (int i = 0; i < 4; i++) {
@@ -712,7 +826,7 @@ void readInputs() {
             hpf_prev_in[i] = centered;
             hpf_prev_out[i] = out;
             int32_t v = RC_ADC_CENTER + (int32_t)out;
-            axis_adc[i] = (int16_t)constrain(v, 0, 32767);
+            axis_adc[i] = (int16_t)constrain(v, 0, RC_STICK_VALUE_MAX);
         }
     } else {
         hpf_initialized = false;
@@ -749,9 +863,6 @@ void readInputs() {
         uint8_t fc = cfg->channel_function[a];
         if (fc < 4) newCh[fc] = axis_us[a];
     }
-    for (int c = 0; c < 4; c++) {
-        newCh[c] = (uint16_t)constrain(newCh[c], cfg->cutoff_min[c], cfg->cutoff_max[c]);
-    }
 
     auto readToggle = [](uint8_t in1_pin, uint8_t in2_pin) -> uint16_t {
         bool in1_high = digitalRead(in1_pin) == HIGH;
@@ -764,8 +875,9 @@ void readInputs() {
     newCh[5] = readToggle(TOGGLE_SWITCH2_IN1_PIN, TOGGLE_SWITCH2_IN2_PIN);
     newCh[6] = readToggle(TOGGLE_SWITCH3_IN1_PIN, TOGGLE_SWITCH3_IN2_PIN);
     newCh[7] = readToggle(TOGGLE_SWITCH4_IN1_PIN, TOGGLE_SWITCH4_IN2_PIN);
-    for (int c = 4; c < 8; c++) {
-        newCh[c] = (uint16_t)constrain(newCh[c], cfg->cutoff_min[c], cfg->cutoff_max[c]);
+    for (int c = 0; c < 8; c++) {
+        int32_t v = (int32_t)newCh[c] + (int32_t)cfg->channel_trim[c];
+        newCh[c] = (uint16_t)constrain(v, (int32_t)cfg->cutoff_min[c], (int32_t)cfg->cutoff_max[c]);
     }
 
     memcpy(channels, newCh, sizeof(channels));
@@ -1590,6 +1702,23 @@ static void run_tx_detection(void) {
 // ============================================================
 // USB config protocol callbacks
 // ============================================================
+// Push g_rc_config to legacy calib, Core 1 snapshot, and reset filters so trim/calibration take effect without reboot.
+static void rc_sync_runtime_from_g_rc_config(void) {
+    for (int i = 0; i < 4; i++) {
+        calib.min[i] = g_rc_config.calib_min[i];
+        calib.max[i] = g_rc_config.calib_max[i];
+        calib.center[i] = g_rc_config.calib_center[i];
+    }
+#if defined(CRSF_CORE1_CHANNELS)
+    memcpy(&s_core1_config, &g_rc_config, sizeof(s_core1_config));
+    __dmb();
+#endif
+#if defined(INTERNAL_ADC)
+    internal_adc_reset_stick_filter();
+#endif
+    hpf_initialized = false;
+}
+
 static const rc_config_data_t* rc_proto_get_config(void) {
     return &g_rc_config;
 }
@@ -1598,13 +1727,15 @@ static void rc_proto_set_draft(const rc_config_data_t* draft) {
 }
 static void rc_proto_apply(void) {
     memcpy(&g_rc_config, &g_rc_config_draft, sizeof(g_rc_config));
-    for (int i = 0; i < 4; i++) {
-        calib.min[i] = g_rc_config.calib_min[i];
-        calib.max[i] = g_rc_config.calib_max[i];
-        calib.center[i] = g_rc_config.calib_center[i];
-    }
+    rc_config_validate(&g_rc_config);
+    memcpy(&g_rc_config_draft, &g_rc_config, sizeof(g_rc_config_draft));
+    rc_sync_runtime_from_g_rc_config();
 }
 static bool rc_proto_save(void) {
+    memcpy(&g_rc_config, &g_rc_config_draft, sizeof(g_rc_config));
+    rc_config_validate(&g_rc_config);
+    memcpy(&g_rc_config_draft, &g_rc_config, sizeof(g_rc_config_draft));
+    rc_sync_runtime_from_g_rc_config();
     return rc_config_save(&g_rc_config);
 }
 static void rc_proto_cal_start(void) {
@@ -1628,11 +1759,11 @@ static void rc_proto_cal_finish(void) {
         g_rc_config.calib_min[i] = (uint16_t)cal_axis_min[i];
         g_rc_config.calib_max[i] = (uint16_t)cal_axis_max[i];
         g_rc_config.calib_center[i] = (uint16_t)((cal_axis_min[i] + cal_axis_max[i]) / 2);
-        calib.min[i] = g_rc_config.calib_min[i];
-        calib.max[i] = g_rc_config.calib_max[i];
-        calib.center[i] = g_rc_config.calib_center[i];
     }
+    rc_config_validate(&g_rc_config);
+    rc_sync_runtime_from_g_rc_config();
     rc_config_save(&g_rc_config);
+    memcpy(&g_rc_config_draft, &g_rc_config, sizeof(g_rc_config_draft));
 }
 
 static void rc_proto_get_state(int16_t* adc4, uint16_t* ch8, uint8_t* toggles4) {
@@ -1778,11 +1909,11 @@ static void load_calibration(void) {
     EEPROM.get(CAL_DATA_ADDR, calib);
     for (int i = 0; i < 4; i++) {
         if (calib.min[i] >= calib.max[i]) {
-            calib.min[i] = 2917;
-            calib.max[i] = 23420;
+            calib.min[i] = RC_CALIB_DEFAULT_MIN;
+            calib.max[i] = RC_CALIB_DEFAULT_MAX;
         }
         if (calib.center[i] == 0 || calib.center[i] >= calib.max[i]) {
-            calib.center[i] = 13199;
+            calib.center[i] = RC_CALIB_DEFAULT_CENTER;
         }
     }
     calib_loaded = true;
@@ -1921,13 +2052,14 @@ static bool init_ads1115(void) {
 #else
 static bool init_internal_adc(void) {
     Serial.println("Using RP2350 internal ADC on GPIO26,27,28,29 (ADC0-3)");
+    internal_adc_reset_stick_filter();
     // No explicit init needed; analogRead() initializes ADC on first use.
     // Prime the ADC with a read to avoid first-sample skew
     (void)analogRead(INTERNAL_ADC_AILERON_PIN);
     (void)analogRead(INTERNAL_ADC_ELEVATOR_PIN);
     (void)analogRead(INTERNAL_ADC_RUDDER_PIN);
     (void)analogRead(INTERNAL_ADC_THROTTLE_PIN);
-    int16_t test = (int16_t)((analogRead(INTERNAL_ADC_AILERON_PIN) * INTERNAL_ADC_SCALE_16BIT) / INTERNAL_ADC_MAX);
+    int16_t test = internal_adc_raw_to_stick(analogRead(INTERNAL_ADC_AILERON_PIN));
     Serial.print("Internal ADC test read GP26 (Aileron): ");
     Serial.println(test);
     return true;

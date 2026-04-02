@@ -6,7 +6,7 @@
 #include <stdbool.h>
 
 // Schema version for protocol and EEPROM
-#define RC_CONFIG_SCHEMA_VERSION 2
+#define RC_CONFIG_SCHEMA_VERSION 4
 
 // EEPROM layout: avoid Security (120-168) and legacy cal block (150-175)
 #define RC_CONFIG_EEPROM_BASE   200
@@ -16,15 +16,24 @@
 #define RC_NUM_AXES     4
 #define RC_NUM_CHANNELS 8
 
-// Default ADC range (16-bit scaled, e.g. from ADS1115 or scaled internal ADC)
+// Default ADC range: 16-bit scaled (ADS1115 or internal scaled to 0–32767), or 12-bit raw (0–4095) when RC_STICK_ADC_12BIT
+#if defined(RC_STICK_ADC_12BIT) && defined(INTERNAL_ADC)
+#define RC_CALIB_DEFAULT_MIN    365
+#define RC_CALIB_DEFAULT_MAX    2927
+#define RC_CALIB_DEFAULT_CENTER 1650
+#else
 #define RC_CALIB_DEFAULT_MIN    2917
 #define RC_CALIB_DEFAULT_MAX    23420
 #define RC_CALIB_DEFAULT_CENTER 13199
+#endif
 
 // Channel value bounds (µs)
 #define RC_CHANNEL_MIN  1000
 #define RC_CHANNEL_MAX  2000
 #define RC_CHANNEL_MID  1500
+
+// Subtrim per output channel (µs); applied after stick mapping, before cutoff clamp
+#define RC_CHANNEL_TRIM_MAX_ABS  250
 
 typedef struct {
     // Axis -> logical channel mapping: channel_function[i] = which function (0=A,1=E,2=R,3=T) gets physical axis i
@@ -39,7 +48,9 @@ typedef struct {
     float expo[RC_NUM_AXES];           // 0.0..0.5 (expo curve)
     uint16_t cutoff_min[RC_NUM_CHANNELS];
     uint16_t cutoff_max[RC_NUM_CHANNELS];
-    uint8_t high_pass_filter;  // 0 = off, 1 = on (ADC high-pass filter for stick drift)
+    int16_t channel_trim[RC_NUM_CHANNELS];  // µs bias per CRSF channel (A,E,R,T + toggles)
+    uint8_t high_pass_filter;   // 0 = off, 1 = on (1st-order HPF on sticks for slow center drift)
+    uint8_t stick_low_pass;    // 0-3 IIR LPF strength on internal ADC sticks (broadband noise); Core1 + single-core path
 } rc_config_data_t;
 
 // Stored layout: magic(4) + version(2) + payload + crc32(4). Payload = rc_config_data_t.

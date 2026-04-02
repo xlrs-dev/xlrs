@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useSerialContext } from '../context/SerialContext';
-import { LABELS, AXIS_LABELS } from '../types/rc';
+import { LABELS, AXIS_LABELS, CHANNEL_LABELS, CHANNEL_TRIM_MAX_ABS, NUM_CHANNELS } from '../types/rc';
 
 type StatusType = 'idle' | 'success' | 'error';
 
@@ -30,6 +30,15 @@ export function MappingPanel() {
     });
   };
 
+  const setChannelTrim = (ch: number, value: number) => {
+    const v = Math.max(-CHANNEL_TRIM_MAX_ABS, Math.min(CHANNEL_TRIM_MAX_ABS, Math.round(value)));
+    setConfigDraft((prev) => {
+      const next = { ...prev, channel_trim: [...(prev.channel_trim ?? Array(NUM_CHANNELS).fill(0))] };
+      next.channel_trim[ch] = v;
+      return next;
+    });
+  };
+
   const handleLoad = async () => {
     showStatus('Loading…', 'idle');
     await loadConfigFromDevice();
@@ -49,14 +58,17 @@ export function MappingPanel() {
   };
 
   const handleSave = async () => {
-    showStatus('Applying & saving to EEPROM…', 'idle');
-    const applied = await applyDraftToDevice();
-    if (!applied) {
-      showStatus('Apply failed — config not saved.', 'error');
+    showStatus('Pushing & saving to EEPROM…', 'idle');
+    const sent = await serial.setConfigDraft(configDraft);
+    if (!sent) {
+      showStatus('Failed to send config.', 'error');
       return;
     }
     const saved = await serial.saveConfig();
-    showStatus(saved ? 'Saved to EEPROM.' : 'Save failed.', saved ? 'success' : 'error');
+    showStatus(
+      saved ? 'Saved to EEPROM (live config updated).' : 'Save failed.',
+      saved ? 'success' : 'error'
+    );
   };
 
   if (!serial.connected) {
@@ -107,6 +119,33 @@ export function MappingPanel() {
           </div>
         ))}
       </div>
+
+      <div className="mt-8">
+        <h4 className="text-sm font-semibold text-[var(--color-text)] mb-2">Trim (µs)</h4>
+        <p className="text-[var(--color-text-muted)] text-sm mb-3">
+          Constant bias per output channel (subtrim). Applied after stick mapping, before cutoffs. Range ±
+          {CHANNEL_TRIM_MAX_ABS} µs.
+        </p>
+        <div className="grid gap-3 sm:grid-cols-2">
+          {CHANNEL_LABELS.map((label, ch) => (
+            <label key={ch} className="flex flex-col gap-1 text-sm">
+              <span className="text-[var(--color-text-muted)]">
+                {label}: {configDraft.channel_trim?.[ch] ?? 0} µs
+              </span>
+              <input
+                type="range"
+                min={-CHANNEL_TRIM_MAX_ABS}
+                max={CHANNEL_TRIM_MAX_ABS}
+                step={1}
+                value={configDraft.channel_trim?.[ch] ?? 0}
+                onChange={(e) => setChannelTrim(ch, Number(e.target.value))}
+                className="w-full"
+              />
+            </label>
+          ))}
+        </div>
+      </div>
+
       <div className="flex flex-wrap gap-2 mt-4">
         <button type="button" className="btn-secondary" onClick={handleLoad}>
           Load from device

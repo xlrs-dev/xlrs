@@ -11,6 +11,8 @@ export function LivePanel() {
   const retryRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [hpfStatus, setHpfStatus] = useState<string>('');
   const [hpfPending, setHpfPending] = useState(false);
+  const [lpfStatus, setLpfStatus] = useState<string>('');
+  const [lpfPending, setLpfPending] = useState(false);
 
   useEffect(() => {
     if (!serial.connected) return;
@@ -52,6 +54,35 @@ export function LivePanel() {
   const ch = s?.ch ?? Array(NUM_CHANNELS).fill(1500);
   const toggles = s?.toggles ?? [false, false, false, false];
 
+  const STICK_LPF_OPTIONS = [
+    { v: 0, label: 'Off (oversample only)' },
+    { v: 1, label: 'Light' },
+    { v: 2, label: 'Medium (default)' },
+    { v: 3, label: 'Strong' },
+  ] as const;
+
+  const setStickLowPass = async (level: number) => {
+    const s = Math.max(0, Math.min(3, level));
+    const newCfg = { ...configDraft, stick_low_pass: s };
+    setConfigDraft(newCfg);
+    setLpfPending(true);
+    setLpfStatus('');
+    try {
+      const drafted = await serial.setConfigDraft(newCfg);
+      if (!drafted) {
+        setLpfStatus('Send failed');
+        setLpfPending(false);
+        return;
+      }
+      const applied = await serial.applyConfig();
+      setLpfStatus(applied ? 'Applied live. Save elsewhere to persist EEPROM.' : 'Apply failed');
+    } catch {
+      setLpfStatus('Error');
+    } finally {
+      setLpfPending(false);
+    }
+  };
+
   const toggleHighPass = async () => {
     const newVal = !configDraft.high_pass_filter;
     const newCfg = { ...configDraft, high_pass_filter: newVal };
@@ -60,11 +91,13 @@ export function LivePanel() {
     setHpfStatus('');
     try {
       const drafted = await serial.setConfigDraft(newCfg);
-      if (!drafted) { setHpfStatus('Apply failed'); setHpfPending(false); return; }
+      if (!drafted) {
+        setHpfStatus('Send failed');
+        setHpfPending(false);
+        return;
+      }
       const applied = await serial.applyConfig();
-      if (!applied) { setHpfStatus('Apply failed'); setHpfPending(false); return; }
-      const saved = await serial.saveConfig();
-      setHpfStatus(saved ? 'Saved' : 'Applied (not saved)');
+      setHpfStatus(applied ? 'Applied live. Save elsewhere to persist EEPROM.' : 'Apply failed');
     } catch {
       setHpfStatus('Error');
     } finally {
@@ -77,7 +110,7 @@ export function LivePanel() {
       <p className="text-[var(--color-text-muted)] text-sm mb-4">
         Live data over USB. Requires Chrome or Edge (Web Serial).
       </p>
-      <div className="flex flex-wrap items-center gap-4 mb-4">
+      <div className="flex flex-wrap items-center gap-6 mb-4">
         <label className="flex items-center gap-2 cursor-pointer">
           <input
             type="checkbox"
@@ -86,7 +119,7 @@ export function LivePanel() {
             disabled={hpfPending}
             className="rounded border-[var(--color-border)]"
           />
-          <span className="text-sm text-[var(--color-text)]">High-pass filter (ADC)</span>
+          <span className="text-sm text-[var(--color-text)]">High-pass (slow center drift)</span>
         </label>
         {hpfPending && (
           <span className="text-xs text-[var(--color-text-muted)]">Saving…</span>
@@ -97,8 +130,30 @@ export function LivePanel() {
           </span>
         )}
         {!hpfPending && !hpfStatus && (
-          <span className="text-xs text-[var(--color-text-muted)]">
-            Reduces stick drift — saved automatically when toggled.
+          <span className="text-xs text-[var(--color-text-muted)]">USB path only when Core1 is off.</span>
+        )}
+
+        <label className="flex items-center gap-2 text-sm text-[var(--color-text)]">
+          <span>Stick low-pass (noise)</span>
+          <select
+            className="py-1.5 px-2 rounded border border-[var(--color-input-border)] bg-[var(--color-input-bg)] text-inherit min-w-[200px]"
+            value={configDraft.stick_low_pass ?? 2}
+            disabled={lpfPending}
+            onChange={(e) => setStickLowPass(Number(e.target.value))}
+          >
+            {STICK_LPF_OPTIONS.map((o) => (
+              <option key={o.v} value={o.v}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        {lpfPending && <span className="text-xs text-[var(--color-text-muted)]">Saving…</span>}
+        {!lpfPending && lpfStatus && (
+          <span
+            className={`text-xs ${lpfStatus.startsWith('Apply') || lpfStatus === 'Error' ? 'text-[var(--color-error)]' : 'text-[var(--color-success)]'}`}
+          >
+            {lpfStatus}
           </span>
         )}
       </div>

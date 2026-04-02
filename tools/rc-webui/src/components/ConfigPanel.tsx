@@ -34,9 +34,14 @@ export function ConfigPanel() {
   };
 
   const handleSave = async () => {
-    showStatus('Saving to EEPROM…', 'idle');
+    showStatus('Pushing config & saving to EEPROM…', 'idle');
+    const sent = await serial.setConfigDraft(configDraft);
+    if (!sent) {
+      showStatus('Failed to send config to device.', 'error');
+      return;
+    }
     const ok = await serial.saveConfig();
-    showStatus(ok ? 'Saved to EEPROM.' : 'Save failed.', ok ? 'success' : 'error');
+    showStatus(ok ? 'Saved to EEPROM (live config updated).' : 'Save failed.', ok ? 'success' : 'error');
   };
 
   const handleLoad = async () => {

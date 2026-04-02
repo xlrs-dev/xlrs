@@ -7,7 +7,8 @@ import type { RcConfig } from '../types/rc';
 import { NUM_AXES, NUM_CHANNELS } from '../types/rc';
 
 const SYNC = 0xa5;
-const MAX_PAYLOAD = 128;
+// Match RC_PROTO_MAX_PAYLOAD (body length byte = cmd + seq + host payload).
+const MAX_PAYLOAD = 192;
 
 export const CMD = {
   GET_DEVICE_INFO: 0x01,
@@ -123,13 +124,12 @@ export class FrameParser {
   }
 }
 
-// sizeof(rc_config_data_t) on ARM = 116: 113 bytes of fields + 3 bytes tail-padding
-// (largest member is float, so the struct is padded to a multiple of 4).
-const CONFIG_FIELDS_SIZE = 4 + 4 + 4 * 2 * 3 + 4 * 4 * 3 + 8 * 2 * 2 + 1; // 113
-const CONFIG_PAYLOAD_SIZE = 116; // must match sizeof(rc_config_data_t)
+// sizeof(rc_config_data_t) on ARM = 132: fields through high_pass + 3 bytes tail-padding (schema v3 + channel_trim[8])
+const CONFIG_FIELDS_SIZE = 130; // through stick_low_pass (schema v4; byte 129)
+const CONFIG_PAYLOAD_SIZE = 132; // must match sizeof(rc_config_data_t)
 
 function configToBytes(cfg: RcConfig): Uint8Array {
-  const buf = new ArrayBuffer(CONFIG_PAYLOAD_SIZE); // 116 bytes; tail 3 stay 0 (padding)
+  const buf = new ArrayBuffer(CONFIG_PAYLOAD_SIZE); // tail bytes zero-padded to struct size
   const dv = new DataView(buf);
   let off = 0;
   for (let i = 0; i < NUM_AXES; i++) dv.setUint8(off++, cfg.channel_function[i] ?? i);
@@ -166,7 +166,25 @@ function configToBytes(cfg: RcConfig): Uint8Array {
     dv.setUint16(off, cfg.cutoff_max[i] ?? 2000, true);
     off += 2;
   }
+  for (let i = 0; i < NUM_CHANNELS; i++) {
+    let t = cfg.channel_trim?.[i] ?? 0;
+    if (t > 250) t = 250;
+    if (t < -250) t = -250;
+    dv.setInt16(off, t, true);
+    off += 2;
+  }
   dv.setUint8(off, cfg.high_pass_filter ? 1 : 0);
+  off += 1;
+  {
+    let s = cfg.stick_low_pass ?? 2;
+    if (s < 0) s = 0;
+    if (s > 3) s = 3;
+    dv.setUint8(off, s);
+    off += 1;
+  }
+  while (off < CONFIG_PAYLOAD_SIZE) {
+    dv.setUint8(off++, 0);
+  }
   return new Uint8Array(buf);
 }
 
@@ -184,7 +202,9 @@ function bytesToConfig(bytes: Uint8Array): RcConfig | null {
     expo: [],
     cutoff_min: [],
     cutoff_max: [],
+    channel_trim: [],
     high_pass_filter: false,
+    stick_low_pass: 2,
   };
   let off = 0;
   for (let i = 0; i < NUM_AXES; i++) cfg.channel_function[i] = dv.getUint8(off++);
@@ -221,7 +241,19 @@ function bytesToConfig(bytes: Uint8Array): RcConfig | null {
     cfg.cutoff_max[i] = dv.getUint16(off, true);
     off += 2;
   }
+  for (let i = 0; i < NUM_CHANNELS; i++) {
+    cfg.channel_trim[i] = dv.getInt16(off, true);
+    off += 2;
+  }
   cfg.high_pass_filter = dv.getUint8(off) !== 0;
+  off += 1;
+  if (off < bytes.byteLength) {
+    let s = dv.getUint8(off++);
+    if (s > 3) s = 2;
+    cfg.stick_low_pass = s;
+  } else {
+    cfg.stick_low_pass = 2;
+  }
   return cfg;
 }
 

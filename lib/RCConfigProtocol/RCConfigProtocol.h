@@ -5,7 +5,8 @@
 #include "../RCConfig/RCConfig.h"
 
 #define RC_PROTO_SYNC_BYTE  0xA5
-#define RC_PROTO_MAX_PAYLOAD 128
+// Must fit SET_CONFIG (2 + sizeof(rc_config_data_t)) and GET_CONFIG response (2 + 3 + payload).
+#define RC_PROTO_MAX_PAYLOAD 192
 #define RC_PROTO_RESP_BIT   0x80
 #define RC_PROTO_DEVICE_NAME_MAX 16
 #define RC_PROTO_DEVICE_VER_MAX 16

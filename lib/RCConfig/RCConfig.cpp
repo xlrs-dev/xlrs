@@ -36,8 +36,10 @@ void rc_config_set_defaults(rc_config_data_t* config) {
     for (int i = 0; i < RC_NUM_CHANNELS; i++) {
         config->cutoff_min[i] = RC_CHANNEL_MIN;
         config->cutoff_max[i] = RC_CHANNEL_MAX;
+        config->channel_trim[i] = 0;
     }
     config->high_pass_filter = 0;
+    config->stick_low_pass = 2;
 }
 
 bool rc_config_validate(rc_config_data_t* config) {
@@ -66,8 +68,13 @@ bool rc_config_validate(rc_config_data_t* config) {
             config->cutoff_min[i] = RC_CHANNEL_MIN;
             config->cutoff_max[i] = RC_CHANNEL_MAX;
         }
+        if (config->channel_trim[i] < -RC_CHANNEL_TRIM_MAX_ABS)
+            config->channel_trim[i] = -RC_CHANNEL_TRIM_MAX_ABS;
+        if (config->channel_trim[i] > RC_CHANNEL_TRIM_MAX_ABS)
+            config->channel_trim[i] = RC_CHANNEL_TRIM_MAX_ABS;
     }
     if (config->high_pass_filter > 1) config->high_pass_filter = 0;
+    if (config->stick_low_pass > 3) config->stick_low_pass = 2;
     return true;
 }
 

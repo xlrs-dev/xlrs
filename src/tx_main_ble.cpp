@@ -1103,24 +1103,21 @@ void readInputs() {
     channels[2] = mapCal(stick2_x, calib.min[2], calib.max[2]);  // Rudder
     channels[3] = mapCal(stick2_y, calib.min[3], calib.max[3]);  // Throttle
 
-    // // Apply EdgeTX-style dual-rate/expo (Radiomaster Pocket defaults)
-    // auto applyCurve = [](uint16_t us, float rate, float expo) -> uint16_t {
-    //     float x = (int(us) - 1500) / 500.0f;                  // -1..1
-    //     float x_expo = (1.0f - expo) * x + expo * x * x * x;  // soften center
-    //     float scaled = x_expo * rate;                         // cap max throw
-    //     int out = int(1500 + scaled * 500);
-    //     return (uint16_t)constrain(out, 1000, 2000);
-    // };
-    // // Typical EdgeTX wizard defaults: ~70% rate, 30% expo on sticks
-    // // (throttle stays linear)
-    // const float RATE = 0.7f;
-    // const float EXPO = 0.3f;
-    // channels[0] = applyCurve(channels[0], RATE, EXPO);
-    // channels[1] = applyCurve(channels[1], RATE, EXPO);
-    // channels[3] = applyCurve(channels[3], RATE, EXPO);
-    // Limit CH0/CH1 travel to 1300-1700 with center 1500
-    // channels[0] = (uint16_t)constrain(channels[0], 1300, 1700);
-    // channels[1] = (uint16_t)constrain(channels[1], 1300, 1700);
+    // Apply EdgeTX-style dual-rate/expo (Radiomaster Pocket defaults)
+    auto applyCurve = [](uint16_t us, float rate, float expo) -> uint16_t {
+        float x = (int(us) - 1500) / 500.0f;                  // -1..1
+        float x_expo = (1.0f - expo) * x + expo * x * x * x;  // soften center
+        float scaled = x_expo * rate;                         // cap max throw
+        int out = int(1500 + scaled * 500);
+        return (uint16_t)constrain(out, 1000, 2000);
+    };
+    // Typical EdgeTX wizard defaults: ~70% rate, 30% expo on sticks
+    // (throttle stays linear)
+    const float RATE = 0.7f;
+    const float EXPO = 0.3f;
+    channels[0] = applyCurve(channels[0], RATE, EXPO);
+    channels[1] = applyCurve(channels[1], RATE, EXPO);
+    channels[3] = applyCurve(channels[3], RATE, EXPO);
     
     if (menu_state == MENU_NORMAL_OPERATION) {
         

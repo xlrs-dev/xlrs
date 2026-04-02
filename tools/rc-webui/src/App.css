@@ -1,0 +1,520 @@
+/* Buttons and inputs using design tokens */
+.btn-primary {
+  border-radius: var(--radius-btn);
+  border: 1px solid transparent;
+  padding: 0.5rem 1rem;
+  font-size: 0.95rem;
+  font-weight: 500;
+  font-family: inherit;
+  background-color: var(--color-primary);
+  color: white;
+  cursor: pointer;
+  transition: opacity 0.2s, border-color 0.2s;
+}
+.btn-primary:hover {
+  opacity: 0.92;
+}
+
+.btn-secondary {
+  border-radius: var(--radius-btn);
+  border: 1px solid transparent;
+  padding: 0.5rem 1rem;
+  font-size: 0.95rem;
+  font-weight: 500;
+  font-family: inherit;
+  background-color: var(--color-input-bg);
+  color: var(--color-text);
+  cursor: pointer;
+  transition: border-color 0.2s;
+}
+.btn-secondary:hover {
+  border-color: var(--color-primary);
+}
+
+.input-select {
+  min-width: 180px;
+  padding: 0.5rem 2rem 0.5rem 0.75rem;
+  font-size: 0.95rem;
+  font-family: inherit;
+  color: inherit;
+  background: var(--color-input-bg);
+  border: 1px solid var(--color-input-border);
+  border-radius: var(--radius-input);
+  cursor: pointer;
+}
+@media (max-width: 640px) {
+  .input-select {
+    min-width: 0;
+    width: 100%;
+  }
+}
+.input-select:hover,
+.input-select:focus {
+  border-color: var(--color-primary);
+  outline: none;
+}
+
+.tabs-trigger {
+  flex-shrink: 0;
+  padding: 0.6rem 1.1rem;
+  font-size: 0.9rem;
+  border: none;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  background: none;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  border-radius: 6px 6px 0 0;
+  transition: color 0.15s, background 0.15s;
+}
+.tabs-trigger:hover {
+  color: var(--color-text);
+  background: var(--color-card);
+}
+.tabs-trigger[data-state="active"] {
+  color: var(--color-primary);
+  border-bottom-color: var(--color-primary);
+  font-weight: 500;
+}
+.tabs-trigger:focus {
+  outline: none;
+}
+.tabs-trigger:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+
+/* Panel content and shared components */
+.panel-content {
+  padding: 0.5rem 0;
+}
+
+.panel-content .hint,
+.panel-content .status {
+  font-size: 0.85rem;
+  color: var(--color-text-muted);
+  margin-top: 1rem;
+}
+
+.btn-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin: 1rem 0;
+}
+
+.card {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-input);
+  padding: 0.75rem 1rem;
+  background: var(--color-card);
+}
+
+.card h4 {
+  margin: 0 0 0.25rem;
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
+/* Binding phrase (ConfigPanel) */
+.binding-phrase-card {
+  margin-top: 1rem;
+  padding: 0.75rem 1rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-input);
+  background: var(--color-card);
+}
+
+.binding-phrase-card h4 {
+  margin: 0 0 0.25rem;
+  font-size: 0.95rem;
+}
+
+.binding-phrase-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+
+.binding-phrase-input {
+  min-width: 240px;
+  flex: 1 1 240px;
+  padding: 0.45rem 0.6rem;
+  font-size: 0.9rem;
+  border-radius: 6px;
+  border: 1px solid var(--color-input-border);
+  background: var(--color-input-bg);
+  color: inherit;
+}
+
+/* Preflight (AutoPairPanel) */
+.preflight-card {
+  margin-top: 0.75rem;
+  padding: 0.75rem 1rem;
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  background: var(--color-card);
+}
+
+.preflight-card .hint {
+  margin: 0 0 0.5rem;
+  font-size: 0.82rem;
+  color: var(--color-text-muted);
+}
+
+.preflight-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.preflight-list li {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  font-size: 0.9rem;
+}
+
+.preflight-list li .preflight-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.preflight-list li.ok .preflight-dot {
+  background: var(--color-success);
+  box-shadow: 0 0 0 2px var(--color-success-glow);
+}
+
+.preflight-list li.fail .preflight-dot {
+  background: var(--color-error);
+}
+
+.preflight-detail {
+  width: 100%;
+  margin-left: 1.25rem;
+  font-size: 0.82rem;
+  color: var(--color-text-muted);
+}
+
+/* Steps (AutoPairPanel) */
+.step-list {
+  margin-top: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.step-item {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-input);
+  padding: 0.5rem 0.65rem;
+}
+
+.step-title {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.9rem;
+  font-weight: 500;
+}
+
+.step-detail {
+  margin-left: 1rem;
+  margin-top: 0.2rem;
+  font-size: 0.82rem;
+  color: var(--color-text-muted);
+}
+
+.step-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.step-dot.pending {
+  background: var(--color-text-muted);
+}
+
+.step-dot.running {
+  background: var(--color-warning);
+}
+
+.step-dot.done {
+  background: var(--color-success);
+}
+
+.step-dot.error {
+  background: var(--color-error);
+}
+
+/* Live panel */
+.viz-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1.5rem;
+}
+
+@media (max-width: 640px) {
+  .viz-row {
+    grid-template-columns: 1fr;
+  }
+}
+
+.stick-viz h3,
+.ch-viz h3 {
+  margin: 0 0 0.5rem;
+  font-size: 1rem;
+}
+
+.stick-grid,
+.ch-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.stick-cell,
+.ch-cell {
+  display: grid;
+  grid-template-columns: 60px 1fr 50px;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.85rem;
+}
+
+.bar-wrap {
+  height: 12px;
+  background: var(--color-input-bg);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.bar {
+  height: 100%;
+  background: var(--color-primary);
+  border-radius: 4px;
+  transition: width 0.05s ease-out;
+}
+
+.ch-bar {
+  background: var(--color-success);
+}
+
+.toggles-row h3 {
+  margin: 1rem 0 0.5rem;
+  font-size: 1rem;
+}
+
+.toggles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.toggle-badge {
+  padding: 0.25rem 0.5rem;
+  border-radius: 6px;
+  font-size: 0.85rem;
+  background: var(--color-input-bg);
+}
+
+.toggle-badge.on {
+  background: rgba(52, 199, 89, 0.25);
+  color: var(--color-success);
+}
+
+/* Mapping */
+.mapping-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  margin: 1rem 0;
+}
+
+.mapping-row {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.mapping-row label {
+  font-size: 0.9rem;
+}
+
+.mapping-row select {
+  padding: 0.35rem 0.5rem;
+  font-size: 0.9rem;
+  border-radius: 6px;
+  min-width: 120px;
+  background: var(--color-input-bg);
+  border: 1px solid var(--color-input-border);
+  color: inherit;
+}
+
+.checkbox-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+/* Curves - sliders and rows */
+.curves-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin: 1rem 0;
+}
+
+.curves-grid h4 {
+  margin: 1rem 0 0.25rem;
+  font-size: 0.95rem;
+}
+
+.curves-grid h4:first-child {
+  margin-top: 0;
+}
+
+.curve-row {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.curve-row span {
+  min-width: 48px;
+  font-size: 0.9rem;
+}
+
+.curve-row label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.85rem;
+}
+
+.curve-row input[type="number"] {
+  width: 70px;
+  padding: 0.3rem;
+  font-size: 0.9rem;
+  border-radius: 4px;
+  border: 1px solid var(--color-input-border);
+  background: var(--color-input-bg);
+  color: inherit;
+}
+
+/* Curves panel – slider layout so thumb stays on track and doesn’t overlap value */
+.curves-slider-field {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 0.5rem 0.75rem;
+  min-width: 0;
+}
+
+.curves-slider-label {
+  font-size: 0.85rem;
+  color: var(--color-text-muted);
+  width: 2rem;
+  flex-shrink: 0;
+}
+
+.curves-slider-root {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-width: 100px;
+  height: 24px;
+  touch-action: none;
+  user-select: none;
+}
+
+.curves-slider-track {
+  position: relative;
+  width: 100%;
+  height: 8px;
+  border-radius: 4px;
+  background: var(--color-input-bg);
+}
+
+.curves-slider-range {
+  position: absolute;
+  height: 100%;
+  border-radius: 4px;
+  background: var(--color-primary);
+}
+
+.curves-slider-thumb {
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--color-primary);
+  border: 2px solid var(--color-surface);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+  top: 50%;
+  transform: translate(-50%, -50%);
+  display: block;
+}
+
+.curves-slider-value {
+  font-size: 0.85rem;
+  width: 2.5rem;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+
+.curves-axis-row {
+  display: grid;
+  grid-template-columns: auto minmax(140px, 1fr) minmax(140px, 1fr) minmax(140px, 1fr);
+  gap: 0.75rem;
+  align-items: center;
+  padding: 0.5rem 0;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.curves-axis-row:last-child {
+  border-bottom: none;
+}
+
+.curves-axis-name {
+  min-width: 60px;
+  font-weight: 500;
+  font-size: 0.9rem;
+}
+
+@media (max-width: 640px) {
+  .curves-axis-row {
+    grid-template-columns: 1fr;
+    gap: 0.5rem;
+  }
+
+  .curves-axis-row .curves-axis-name {
+    grid-column: 1;
+  }
+
+  .curves-axis-row .curves-slider-field {
+    grid-column: 1;
+  }
+}
+
+/* Status message (success/error) */
+.status-ok {
+  color: var(--color-success);
+  font-size: 0.9rem;
+}
+
+.status-err {
+  color: var(--color-error);
+  font-size: 0.9rem;
+}

@@ -337,42 +337,10 @@ int gattWriteCallback(uint16_t characteristic_id, uint8_t *buffer, uint16_t buff
     // Process channel data
     if (buffer_size == FRAME_SIZE) {
         uint16_t sequence = 0;
-        uint32_t txTimestampMs = 0;
-        uint16_t decodedChannels[NUM_CHANNELS] = {0};
-        if (Protocol::decodeFrame(buffer, decodedChannels, &sequence, &txTimestampMs, &security, &lastSequence)) {
-            unsigned long now = millis();
-            lastFrameArrivalMs = now;
-            
-            uint32_t alignedRxTimeMs = timeSynced
-                ? static_cast<uint32_t>(static_cast<int32_t>(txTimestampMs) + txToRxOffsetMs)
-                : now;
-            uint32_t ageMs = clampAgeToMs(static_cast<int32_t>(now) - static_cast<int32_t>(alignedRxTimeMs));
-            
-            lastTxTimestampMs = txTimestampMs;
-            lastRxAlignedMs = alignedRxTimeMs;
-            lastPacketAgeMs = ageMs;
-            
-            if (ageMs <= PACKET_STALE_THRESHOLD_MS) {
-                // Fresh packet - apply channels
-                memcpy(channels, decodedChannels, sizeof(channels));
-                lastDataReceived = now;
-            } else {
-                // Stale packet - return to failsafe / center
-                for (int i = 0; i < 8; i++) {
-                    channels[i] = FAILSAFE_CENTER_US;
-                }
-                if (now - lastStaleLogMs > 1000) {
-                    Serial.print("Stale packet ignored, age=");
-                    Serial.print(ageMs);
-                    Serial.println("ms (holding last targets)");
-                    lastStaleLogMs = now;
-                }
-                if (Serial) {
-                    Serial.print("Stale packet ignored, age=");
-                    Serial.print(ageMs);
-                    Serial.println("ms (returning to failsafe)");
-                }
-            }
+        // BLE: expect device ID from start of frame (first 8 bytes); use zero to accept any for now
+        static const uint8_t bleExpectedTxId[DEVICE_ID_SIZE] = {0};
+        if (Protocol::decodeFrame(buffer, channels, &sequence, &security, &lastSequence, bleExpectedTxId)) {
+            lastDataReceived = millis();
             
             static unsigned long lastPrint = 0;
             if (millis() - lastPrint > 1000) {

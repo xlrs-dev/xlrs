@@ -490,25 +490,90 @@ static bool rc_proto_enter_wifi_mode(void);
 static void rc_proto_enter_usb_uart_proxy(void);
 
 #if defined(PICO_RP2350) && PICO_RP2350
+// Splash / logo: large centered wordmark in a rounded frame + subtitle + bar.
+// Title uses GFX size 3 (~18px tall) so "Dhanush" reads as a product logo.
 static void rc_draw_splash(const char* title, const char* subtitle, uint8_t progress_pct) {
     if (!display_ok) {
         return;
     }
     display.clearDisplay();
-    display.setTextSize(1);
-    display.setTextColor(SH110X_WHITE);
     display.setTextWrap(false);
-    display.setCursor(0, 4);
+
+    // Measure wordmark (try largest size that fits the 128px width)
+    int16_t tx1, ty1;
+    uint16_t ttw, tth;
+    uint8_t title_sz = 3;
+    display.setTextSize(title_sz);
+    display.getTextBounds(title, 0, 0, &tx1, &ty1, &ttw, &tth);
+    if ((int)ttw > SCREEN_WIDTH - 8) {
+        title_sz = 2;
+        display.setTextSize(title_sz);
+        display.getTextBounds(title, 0, 0, &tx1, &ty1, &ttw, &tth);
+    }
+
+    const int16_t pad = 4;
+    const int16_t rr = 5;
+    const int16_t top_margin = 1;
+    // Cursor so cap line sits just below top_margin (ty1 often ≤ 0 for caps)
+    const int16_t cur_y = (int16_t)(top_margin - ty1);
+    const int16_t cur_x = (int16_t)((SCREEN_WIDTH - (int)ttw) / 2 - tx1);
+
+    // Rounded frame first (so glyph strokes sit inside the border)
+    {
+        int16_t bx = (int16_t)((SCREEN_WIDTH - (int)ttw) / 2) - pad;
+        int16_t by = (int16_t)(cur_y + ty1) - pad;
+        int16_t bw = (int16_t)ttw + 2 * pad;
+        int16_t bh = (int16_t)tth + 2 * pad;
+        if (bx < 0) {
+            bw += bx;
+            bx = 0;
+        }
+        if (bx + bw > SCREEN_WIDTH) {
+            bw = (int16_t)(SCREEN_WIDTH - bx);
+        }
+        if (by < 0) {
+            bh += by;
+            by = 0;
+        }
+        if (bw > 1 && bh > 1) {
+            display.drawRoundRect(bx, by, (uint16_t)bw, (uint16_t)bh, (uint16_t)rr, SH110X_WHITE);
+        }
+    }
+
+    display.setTextColor(SH110X_WHITE);
+    display.setCursor(cur_x, cur_y);
     display.print(title);
-    display.setCursor(0, 20);
+
+    // Pixel bottom of the wordmark (for placing subtitle)
+    const int16_t mark_bottom = (int16_t)(cur_y + ty1 + (int16_t)tth);
+
+    // Subtitle: centered under the logo, above the progress bar
+    display.setTextSize(1);
+    int16_t sx1, sy1;
+    uint16_t sw, sh;
+    display.getTextBounds(subtitle, 0, 0, &sx1, &sy1, &sw, &sh);
+    {
+        int16_t sub_y = (int16_t)(mark_bottom + 3 - sy1);
+        if (sub_y + (int16_t)sh > 50) {
+            sub_y = (int16_t)(50 - (int)sh - sy1);
+        }
+        if (sub_y < mark_bottom) {
+            sub_y = (int16_t)(mark_bottom + 3 - sy1);
+        }
+        const int16_t sub_x = (int16_t)((SCREEN_WIDTH - (int)sw) / 2) - sx1;
+        display.setCursor(sub_x, sub_y);
+    }
     display.print(subtitle);
-    display.drawRect(4, 54, 120, 6, SH110X_WHITE);
+
+    // Progress bar (bottom)
+    const int bar_y = 52;
+    display.drawRect(4, bar_y, 120, 6, SH110X_WHITE);
     if (progress_pct > 100) {
         progress_pct = 100;
     }
-    uint16_t w = (uint16_t)((uint32_t)progress_pct * 116u / 100u);
-    if (w > 0) {
-        display.fillRect(6, 56, w, 2, SH110X_WHITE);
+    const uint16_t fill_w = (uint16_t)((uint32_t)progress_pct * 116u / 100u);
+    if (fill_w > 0) {
+        display.fillRect(6, bar_y + 2, fill_w, 2, SH110X_WHITE);
     }
     display.display();
 }

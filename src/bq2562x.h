@@ -79,7 +79,13 @@
 
 // REG0x18 - Charger Control 3 bitfield definitions
 #define BATFET_CTRL_POS 0
-#define BATFET_CTRL_MSK (0x3 << BATFET_CTRL_POS)
+#define BATFET_CTRL_MSK (0x3u << BATFET_CTRL_POS)
+/** Delay after BATFET command before action: 0 = 25 ms, 1 = 12.5 s (POR default). */
+#define BATFET_DLY_POS 2
+#define BATFET_DLY_MSK (1u << BATFET_DLY_POS)
+/** Allow ship/shutdown/reset with VBUS present (reg 0x18 bit 3). */
+#define BATFET_CTRL_WVBUS_POS 3
+#define BATFET_CTRL_WVBUS_MSK (1u << BATFET_CTRL_WVBUS_POS)
 
 // REG0x14 bitfield definitions
 #define CHARGE_CONTROL_0_VRECHG_POS 0
@@ -341,6 +347,21 @@ int bq2562x_get_battery_voltage_oneshot(uint16_t *voltage_mv);
  *         a VBUS source is present, preventing entry into ship mode.
  */
 int bq2562x_enter_ship_mode(void);
+
+/**
+ * @brief Read CHARGER_CONTROL_3 (0x18).
+ * @return 0 on success, negative on I2C error.
+ */
+int bq2562x_read_charger_control_3(uint8_t *val);
+
+/**
+ * @brief Request ship mode in one I2C write: BATFET_CTRL = ship, BATFET_DLY = 0 (25 ms),
+ *        BATFET_CTRL_WVBUS = 1. Used when the power button can release before the
+ *        delay elapses: QON must be released before the ship commit (see datasheet
+ *        ship-mode / QON timing); VBUS may be present, unlike bq2562x_enter_ship_mode().
+ * @return 0 on success, negative error code on failure.
+ */
+int bq2562x_power_off_ship_mode(void);
 
 /**
  * @brief Puts the device into Shutdown Mode.

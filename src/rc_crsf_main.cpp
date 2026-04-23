@@ -6,6 +6,12 @@
 #include "pico/mutex.h"
 #include "hardware/sync.h"
 #endif
+#if defined(PICO_RP2350) && PICO_RP2350
+#include "hardware/powman.h"
+#include "hardware/gpio.h"
+#include "pico/multicore.h"
+#include "pico/error.h"
+#endif
 #include <EEPROM.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SH110X.h>
@@ -216,8 +222,20 @@ static void internal_read_sticks_filtered(int16_t axis_out[4], const rc_config_d
 #define SPI_TX_PIN 19
 #define SPI_CSN_PIN 21
 
-// Power button (GPIO 20)
+// Power / QON (Dhanush: GP22 active low; other builds use GP19)
+#if defined(PICO_RP2350) && PICO_RP2350
+#define POWER_BUTTON_PIN 22
+#define RC_PRODUCT_NAME "Dhanush"
+static const uint32_t POWER_ON_HOLD_MS = 5000;
+static const uint32_t POWER_OFF_LONG_PRESS_MS = 2500;
+static uint32_t s_boot_start_ms;
+static volatile bool s_power_ui_active = false;
+#if defined(CRSF_CORE1_CHANNELS)
+static volatile bool s_core1_halt_request = false;
+#endif
+#else
 #define POWER_BUTTON_PIN 19
+#endif
 
 // Buzzer (for boot jingle)
 #define BUZZER_PIN 24
@@ -297,14 +315,17 @@ static const unsigned long TELEMETRY_TIMEOUT_MS = 2000;
 // Button state for command handling
 static bool enterButtonPressed = false;
 static bool backButtonPressed = false;
-static bool powerButtonPressed = false;
 static bool enterButtonIdleLevel = HIGH;
 static bool backButtonIdleLevel = HIGH;
 static unsigned long lastEnterPress = 0;
 static unsigned long lastBackPress = 0;
-static unsigned long lastPowerPress = 0;
 static const unsigned long BUTTON_DEBOUNCE_MS = 200;
 static const unsigned long LONG_PRESS_MS = 600;
+#if defined(PICO_RP2350) && PICO_RP2350
+static unsigned long s_power_hold_start_ms = 0;
+static bool s_power_off_long_press_done = false;
+static unsigned long s_power_splash_throttle_ms = 0;
+#endif
 // Menu nav uses calibrated channel values (1000-2000, center=1500).
 // Deadzone: stick must leave the center band (1500 ± NAV_DEAD) to unlock.
 // Trigger: stick must be past 1500 ± NAV_TRIG for one step to fire.
@@ -468,23 +489,173 @@ static bool rc_proto_enter_pairing_mode(void);
 static bool rc_proto_enter_wifi_mode(void);
 static void rc_proto_enter_usb_uart_proxy(void);
 
+#if defined(PICO_RP2350) && PICO_RP2350
+static void rc_draw_splash(const char* title, const char* subtitle, uint8_t progress_pct) {
+    if (!display_ok) {
+        return;
+    }
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setTextColor(SH110X_WHITE);
+    display.setTextWrap(false);
+    display.setCursor(0, 4);
+    display.print(title);
+    display.setCursor(0, 20);
+    display.print(subtitle);
+    display.drawRect(4, 54, 120, 6, SH110X_WHITE);
+    if (progress_pct > 100) {
+        progress_pct = 100;
+    }
+    uint16_t w = (uint16_t)((uint32_t)progress_pct * 116u / 100u);
+    if (w > 0) {
+        display.fillRect(6, 56, w, 2, SH110X_WHITE);
+    }
+    display.display();
+}
+
+__attribute__((noreturn)) static void rc_enter_rp2350_deep_sleep(uint32_t wake_gpio) {
+    Serial.println("[PWR] Entering RP2350 deep sleep (POWMAN)");
+    Serial.flush();
+    if (display_ok) {
+        display.clearDisplay();
+        display.display();
+        display.oled_command(0xAE);
+    }
+    digitalWrite(BUZZER_PIN, LOW);
+#if defined(LED_BUILTIN)
+    digitalWrite(LED_BUILTIN, LOW);
+#endif
+#if defined(CRSF_CORE1_CHANNELS)
+    multicore_reset_core1();
+    s_core1_halt_request = true;
+    __dmb();
+#endif
+    gpio_set_input_enabled(wake_gpio, true);
+    gpio_set_pulls(wake_gpio, true, false);
+    {
+        const uint32_t t0 = millis();
+        while (digitalRead(wake_gpio) == LOW) {
+            if (millis() - t0 > 5000) {
+                break;
+            }
+            delay(1);
+        }
+    }
+    delay(30);
+    powman_disable_all_wakeups();
+    powman_enable_gpio_wakeup(0, wake_gpio, true, false);
+    const powman_power_state sleep_st = 0;
+    powman_power_state wakeup = POWMAN_POWER_STATE_NONE;
+    wakeup = powman_power_state_with_domain_on(wakeup, POWMAN_POWER_DOMAIN_SRAM_BANK1);
+    wakeup = powman_power_state_with_domain_on(wakeup, POWMAN_POWER_DOMAIN_SRAM_BANK0);
+    wakeup = powman_power_state_with_domain_on(wakeup, POWMAN_POWER_DOMAIN_XIP_CACHE);
+    wakeup = powman_power_state_with_domain_on(wakeup, POWMAN_POWER_DOMAIN_SWITCHED_CORE);
+    if (!powman_configure_wakeup_state(sleep_st, wakeup)) {
+        Serial.println("[PWR] powman_configure_wakeup_state failed");
+        Serial.flush();
+    }
+    powman_set_debug_power_request_ignored(true);
+    const int pr = powman_set_power_state(sleep_st);
+    if (pr != PICO_OK) {
+        Serial.printf("[PWR] powman_set_power_state: %d\n", pr);
+        Serial.flush();
+    }
+    for (;;) {
+        __asm volatile("wfi");
+    }
+}
+
+static bool rc_power_on_splash_wait(uint32_t boot_start_ms) {
+    if (digitalRead(POWER_BUTTON_PIN) != LOW) {
+        return false;
+    }
+    uint32_t last_draw = 0;
+    for (;;) {
+        if (digitalRead(POWER_BUTTON_PIN) != LOW) {
+            return false;
+        }
+        if (millis() - boot_start_ms >= POWER_ON_HOLD_MS) {
+            rc_draw_splash(RC_PRODUCT_NAME, "Power on", 100);
+            delay(400);
+            return true;
+        }
+        if (millis() - last_draw >= 40) {
+            last_draw = millis();
+            const uint32_t el = millis() - boot_start_ms;
+            uint8_t pct = (el * 100u) / POWER_ON_HOLD_MS;
+            if (pct > 100) {
+                pct = 100;
+            }
+            rc_draw_splash(RC_PRODUCT_NAME, "Keep holding", pct);
+        }
+    }
+}
+
+__attribute__((noreturn)) static void rc_power_off_splash_and_sleep(void) {
+    s_power_ui_active = true;
+    {
+        const uint32_t t0 = millis();
+        while (millis() - t0 < 600) {
+            const uint8_t pct = (uint8_t)constrain(
+                ((unsigned long)(millis() - t0)) * 100ul / 600ul, 0ul, 100ul);
+            rc_draw_splash(RC_PRODUCT_NAME, "Powering off", pct);
+            delay(20);
+        }
+    }
+    uint8_t reg18_before = 0, reg18_after = 0;
+    (void)bq2562x_read_charger_control_3(&reg18_before);
+    const int bqret = bq2562x_power_off_ship_mode();
+    (void)bq2562x_read_charger_control_3(&reg18_after);
+    Serial.printf("[BQ] CHARGER_CONTROL_3: 0x%02X -> ship mode (%d) -> 0x%02X\n", (unsigned)reg18_before, bqret, (unsigned)reg18_after);
+    Serial.flush();
+    if (display_ok) {
+        display.clearDisplay();
+        display.display();
+        display.oled_command(0xAE);
+    }
+    rc_enter_rp2350_deep_sleep(POWER_BUTTON_PIN);
+}
+#endif
+
 // ============================================================
 // Setup
 // ============================================================
 void setup() {
+#if defined(PICO_RP2350) && PICO_RP2350
+    s_boot_start_ms = millis();
+    pinMode(POWER_BUTTON_PIN, INPUT_PULLUP);
+    delay(2);
+#endif
     Serial.begin(115200);
+#if defined(PICO_RP2350) && PICO_RP2350
+    delay(300);
+#else
     unsigned long start = millis();
     while (!Serial && (millis() - start < 2000)) {
         delay(10);
     }
     delay(200);
+#endif
 
 #if defined(CRSF_CORE1_CHANNELS)
     crsfSerial.initTxMutex();
 #endif
 
+#if defined(PICO_RP2350) && PICO_RP2350
+    Serial.println("=== Dhanush (RC-CRSF) ===");
+    Serial.print("[PWR] GP");
+    Serial.print((unsigned)POWER_BUTTON_PIN);
+    Serial.print(" (power): ");
+    Serial.println(digitalRead(POWER_BUTTON_PIN) == HIGH ? "HIGH" : "LOW");
+    if (digitalRead(POWER_BUTTON_PIN) != LOW) {
+        Serial.println("[PWR] Boot gate: not holding power — deep sleep");
+        Serial.flush();
+        rc_enter_rp2350_deep_sleep(POWER_BUTTON_PIN);
+    }
+#else
     Serial.println("=== RC-CRSF Controller ===");
     Serial.println("Display, battery, analog inputs -> CRSF serial output");
+#endif
 
     // Initialize I2C for OLED and ADS1115
     Wire.setSDA(I2C_SDA);
@@ -508,6 +679,14 @@ void setup() {
         Serial.println("ERROR: Display initialization failed!");
         Serial.println("Check wiring: SDA=GP4, SCL=GP5, VCC=3.3V, GND=GND");
     }
+
+#if defined(PICO_RP2350) && PICO_RP2350
+    if (!rc_power_on_splash_wait(s_boot_start_ms)) {
+        Serial.println("[PWR] Power-on hold not completed — deep sleep");
+        Serial.flush();
+        rc_enter_rp2350_deep_sleep(POWER_BUTTON_PIN);
+    }
+#endif
 
     // Initialize ADC (internal RP2350 or I2C ADS1115)
 #if defined(INTERNAL_ADC)
@@ -571,7 +750,11 @@ void setup() {
     memcpy(&g_rc_config_draft, &g_rc_config, sizeof(g_rc_config));
 
     g_rc_proto.setStream(&Serial);
+#if defined(PICO_RP2350) && PICO_RP2350
+    g_rc_proto.setDeviceInfo("Dhanush", "1.3");
+#else
     g_rc_proto.setDeviceInfo("RC-CRSF", "1.3");
+#endif
     g_rc_proto.setConfigGetter(rc_proto_get_config);
     g_rc_proto.setConfigDraftSetter(rc_proto_set_draft);
     g_rc_proto.setApplyCallback(rc_proto_apply);
@@ -711,6 +894,13 @@ void setup1() {
 }
 
 void loop1() {
+#if defined(CRSF_CORE1_CHANNELS) && defined(PICO_RP2350) && PICO_RP2350
+    if (s_core1_halt_request) {
+        for (;;) {
+            __asm volatile("wfi");
+        }
+    }
+#endif
     static unsigned long lastSend = 0;
     if (millis() - lastSend < 4) return;  // 250 Hz
     lastSend = millis();
@@ -1138,42 +1328,36 @@ void handleButtons() {
         enterButtonPressed = false;
     }
     
-    // POWER button - Shutdown mode (active LOW)
-    // Debug: log button state changes
-    static bool lastPowerState = false;
-    static unsigned long lastPowerDebugLog = 0;
-    if (powerPressed != lastPowerState) {
-        Serial.print("[RC] Power button state changed: ");
-        Serial.print(lastPowerState ? "PRESSED (LOW)" : "RELEASED (HIGH)");
-        Serial.print(" -> ");
-        Serial.println(powerPressed ? "PRESSED (LOW)" : "RELEASED (HIGH)");
-        lastPowerState = powerPressed;
-    }
-    // Periodic debug log every 5 seconds
-    if (millis() - lastPowerDebugLog > 5000) {
-        Serial.print("[RC] Power button (GPIO ");
-        Serial.print(POWER_BUTTON_PIN);
-        Serial.print(") state: ");
-        Serial.println(powerPressed ? "PRESSED (LOW)" : "RELEASED (HIGH)");
-        lastPowerDebugLog = millis();
-    }
-    
-    if (powerPressed && !powerButtonPressed && (millis() - lastPowerPress) > BUTTON_DEBOUNCE_MS) {
-        powerButtonPressed = true;
-        lastPowerPress = millis();
-        Serial.println("[RC] Power button pressed - entering shutdown mode");
-        int ret = bq2562x_enter_shutdown_mode();
-        if (ret == 0) {
-            Serial.println("[RC] Shutdown mode command sent successfully");
-        } else if (ret == -3) {
-            Serial.println("[RC] Cannot shutdown: VBUS source is present");
-        } else {
-            Serial.print("[RC] Failed to enter shutdown mode: ");
-            Serial.println(ret);
+#if defined(PICO_RP2350) && PICO_RP2350
+    if (powerPressed) {
+        if (s_power_hold_start_ms == 0) {
+            s_power_hold_start_ms = millis();
         }
-    } else if (!powerPressed) {
-        powerButtonPressed = false;
+        s_power_ui_active = true;
+        if (millis() - s_power_hold_start_ms >= POWER_OFF_LONG_PRESS_MS) {
+            s_power_off_long_press_done = true;
+        }
+        if (millis() - s_power_splash_throttle_ms >= 40) {
+            s_power_splash_throttle_ms = millis();
+            const char* sub = s_power_off_long_press_done ? "Release to confirm" : "Hold to power off";
+            const uint8_t pr = (uint8_t)constrain(
+                (int32_t)(millis() - s_power_hold_start_ms) * 100 / (int32_t)POWER_OFF_LONG_PRESS_MS,
+                0, 100);
+            rc_draw_splash(RC_PRODUCT_NAME, sub, pr);
+        }
+    } else {
+        if (s_power_hold_start_ms != 0) {
+            if (s_power_off_long_press_done) {
+                rc_power_off_splash_and_sleep();
+            }
+            s_power_hold_start_ms = 0;
+            s_power_off_long_press_done = false;
+            s_power_ui_active = false;
+            s_power_splash_throttle_ms = 0;
+            lastDisplayUpdate = 0;
+        }
     }
+#endif
 }
 
 static bool is_menu_button_pressed(uint8_t pin, bool idleLevel) {
@@ -1216,6 +1400,11 @@ void updateDisplay() {
     lastDisplayUpdate = millis();
 
     if (!display_ok) return;
+#if defined(PICO_RP2350) && PICO_RP2350
+    if (s_power_ui_active) {
+        return;
+    }
+#endif
 
     resync_display_viewport();
 
@@ -1470,7 +1659,11 @@ static void onCrsfDeviceInfo(const uint8_t *serial4, const char *name, uint8_t s
 // Announce ourselves to the ELRS TX module as a Lua/config client.
 // ELRS TX requires a DEVICE_INFO handshake before it will respond to PARAMETER_READ.
 static void send_crsf_device_info(void) {
+#if defined(PICO_RP2350) && PICO_RP2350
+    static const char devName[] = "Dhanush";
+#else
     static const char devName[] = "RC-CRSF";
+#endif
     uint8_t payload[32];
     uint8_t offset = 0;
     memcpy(payload, devName, sizeof(devName));   // includes null terminator

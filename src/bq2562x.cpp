@@ -312,6 +312,25 @@ int bq2562x_enter_ship_mode(void)
     return ret;
 }
 
+int bq2562x_read_charger_control_3(uint8_t *val)
+{
+    if (!val) {
+        return -1;
+    }
+    return bq2562x_read_reg(BQ2562X_REG_CHARGER_CONTROL_3, val);
+}
+
+int bq2562x_power_off_ship_mode(void)
+{
+    const uint8_t v = (uint8_t)(FIELD_PREP(BATFET_CTRL_MSK, (uint8_t)BQ2562X_BATFET_SHIP_MODE) |
+                                FIELD_PREP(BATFET_DLY_MSK, 0) |
+                                FIELD_PREP(BATFET_CTRL_WVBUS_MSK, 1));
+    return bq2562x_update_reg(
+        BQ2562X_REG_CHARGER_CONTROL_3,
+        (uint8_t)(BATFET_CTRL_MSK | BATFET_DLY_MSK | BATFET_CTRL_WVBUS_MSK),
+        v);
+}
+
 int bq2562x_enter_shutdown_mode(void)
 {
     int ret;

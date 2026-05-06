@@ -2,6 +2,17 @@
 
 A 2.4GHz radio-based remote control system for FPV drones using Raspberry Pi Pico (RP2040) boards with SX1280 radio modules. The system uses a split architecture where an RC board reads analog sticks and switches, communicates with the TX module via UART, and the TX module transmits to the RX module over radio. The receiver (RX) outputs CRSF protocol signals compatible with Betaflight/ELRS flight controllers.
 
+## Documentation
+
+User-focused guides for the **RC handset**, **browser config tool**, **USB HID gamepad**, and **firmware targets** are in **[`docs/`](docs/README.md)**:
+
+| Guide | Topics |
+|-------|--------|
+| [**RC overview**](docs/rc-overview.md) | Stick/switch/OLED capabilities, **custom Pico TX (XLRS-style UART)** vs **ELRS CRSF handset**, USB roles |
+| [**RC Web UI**](docs/rc-webui.md) | `tools/rc-webui`: **Live**, **Calibrate**, **Mapping**, **Curves**, **Save/Apply**, **Auto Pair**, **USB-UART proxy** (ELRS Buddy) |
+| [**USB HID**](docs/rc-usb-hid.md) | Optional composite gamepad (`rc-HID-rp2350`), axis/button mapping, host notes |
+| [**Build & flash (RC)**](docs/rc-build-flash.md) | `rc-crsf`, `rc-rp2350`, `rc-HID-rp2350`, Dhanush USB product string, UART pins |
+
 ## Architecture Overview
 
 The system consists of three main components:
@@ -77,7 +88,7 @@ The RC board is a separate module that reads analog inputs and communicates with
 3. Build and upload:
    - For TX Module: `pio run -e tx_sx128x -t upload`
    - For RX Module: `pio run -e rx_sx128x -t upload`
-   - For RC Board: `pio run -e rc-crsf -t upload`
+   - For RC Board: `pio run -e rc-crsf -t upload` (RP2040 + ADS1115) or `pio run -e rc-rp2350 -t upload` / `pio run -e rc-HID-rp2350 -t upload` (RP2350 Dhanush; see [`docs/rc-build-flash.md`](docs/rc-build-flash.md))
 
 **Note:** The TX module expects to receive channel data from the RC board via UART protocol. Make sure the RC board is running and connected before the TX module will transmit.
 
@@ -338,16 +349,9 @@ All SX1280 pins can be overridden in `platformio.ini`:
 - [Adafruit GFX](https://github.com/adafruit/Adafruit-GFX-Library) - Graphics library
 - [Adafruit ADS1X15](https://github.com/adafruit/Adafruit_ADS1X15) - ADC driver
 
-### USB-UART Proxy Mode (rc-crsf / rc-rp2350)
+### USB-UART Proxy Mode (ELRS module passthrough)
 
-The RC board can act as a raw USB-to-UART bridge so browser tools (e.g. [ELRS Buddy](https://github.com/fourflies/elrsbuddy)) can talk directly to an ELRS/EdgeTX TX module:
-
-1. Connect RC to PC via USB and to TX module via UART (GP8/GP9, 420000 baud)
-2. Open the RC WebUI (`tools/rc-webui`), connect to the RC, go to Save/Apply tab
-3. Click "Enter USB-UART Proxy Mode" and confirm
-4. WebUI disconnects; RC now forwards raw bytes between USB and UART
-5. Open ELRS Buddy (or similar), connect to the RC's USB port — it will see the TX module directly
-6. Reset RC to exit proxy mode and return to normal operation
+The RC can bridge **USB CDC ↔ handset UART** so tools like [ELRS Buddy](https://github.com/fourflies/elrsbuddy) talk directly to the **ELRS TX module** on **GP8/GP9** (baud per your `platformio.ini`, often 400000 for ELRS handset). Full step-by-step and caveats (HID pauses, Web Serial) are in **[`docs/rc-webui.md`](docs/rc-webui.md)**.
 
 ## Build Environments
 
@@ -355,9 +359,14 @@ The project includes multiple build environments in `platformio.ini`:
 
 - **`tx_sx128x`**: TX module (SX1280 radio, UART protocol)
 - **`rx_sx128x`**: RX module (SX1280 radio, CRSF output)
-- **`rc-crsf`**: RC board (inputs, display, UART to TX module)
+- **`rc-crsf`**: RC board — RP2040, ADS1115 ADC, OLED, UART to TX / ELRS module
+- **`rc-rp2350`**: RC — RP2350 (Dhanush), internal ADC, Core1 CRSF handset path
+- **`rc-HID-rp2350`**: Same as `rc-rp2350` plus **USB HID gamepad** (composite with CDC)
+- **`rc-rp2350-debug`**: `rc-rp2350` with extra link-rate logging on Serial
 - **`tx-ble`**: Legacy BLE TX (deprecated)
 - **`rx-ble`**: Legacy BLE RX (deprecated)
+
+RC-centric details: **[`docs/rc-build-flash.md`](docs/rc-build-flash.md)**.
 
 ## Important Notes
 

@@ -20,14 +20,28 @@
 #endif
 #include <math.h>
 
-#include "UARTProtocol.h"
 #include "CRSFSerialConnector.h"
+#include "SimpleTxCrsf.h"
+#include "CRSFRouter.h"
+#include "handset_telemetry_types.h"
+
 #include "bq2562x.h"
 #include "RCConfig.h"
 #include "RCConfigProtocol.h"
+#include "rc_power_config.h"
 
 static_assert(sizeof(rc_config_data_t) == 132, "rc_config_data_t size must match tools/rc-webui CONFIG_PAYLOAD_SIZE");
 #include "debug_ndjson.h"
+
+#if defined(RC_USB_HID_JOYSTICK)
+#include <Joystick.h>
+extern int usb_hid_poll_interval;
+#endif
+
+// ELRS handset UART: optional multi-baud / invert probe (see run_tx_detection).
+#if !defined(RC_CRSF_UART_PROBE_DWELL_MS)
+#define RC_CRSF_UART_PROBE_DWELL_MS 450u
+#endif
 
 // OLED Configuration
 #define SCREEN_WIDTH 128
@@ -265,7 +279,17 @@ static unsigned long s_maxLoopMs = 0;
 static unsigned long lastDisplayUpdate = 0;
 static const unsigned long DISPLAY_INTERVAL = 200; // ms
 static unsigned long lastPingSent = 0;
-static const unsigned long PING_INTERVAL = 1000;  // 1Hz ping for device check
+static const unsigned long PING_INTERVAL = 1000;  // steady-state DEVICE_PING for ELRS LUA session (~EdgeTX-ish)
+/** After ELRS locks, ping faster briefly so LUA does not stall on an empty CRSF handset. */
+#if !defined(RC_ELRS_LUA_PING_FAST_MS)
+#define RC_ELRS_LUA_PING_FAST_MS 200u
+#endif
+#if !defined(RC_ELRS_LUA_PING_BOOST_MS)
+#define RC_ELRS_LUA_PING_BOOST_MS 12000ul
+#endif
+static unsigned long s_elrs_lua_ping_boost_until_ms = 0;
+static bool s_elrs_lua_ping_pending_immediate = false;
+static unsigned long s_elrs_lua_session_until_ms = 0;
 static unsigned long lastPongReceived = 0;
 static const unsigned long PONG_TIMEOUT_MS = 2000;  // TX considered disconnected if no pong for 2s
 
@@ -274,15 +298,21 @@ Adafruit_SH1106G display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 #if !defined(INTERNAL_ADC)
 Adafruit_ADS1115 ads;  // ADS1115 ADC on I2C bus
 #endif
-UARTProtocol uartProto(&Serial2);
 CRSFSerialConnector crsfSerial(Serial2, CRSFSerialConnector::CRSF_BAUDRATE);
 
-// TX type: detected at boot or overridden in menu
-enum TxType : uint8_t { TX_TYPE_UNKNOWN = 0, TX_TYPE_CUSTOM = 1, TX_TYPE_ELRS = 2 };
-enum TxModeOverride : uint8_t { TX_MODE_AUTO = 0, TX_MODE_CUSTOM = 1, TX_MODE_ELRS = 2 };
+// Working Serial2 settings after detection (used by USB UART proxy re-init).
+static uint32_t s_handset_serial_baud = CRSFSerialConnector::CRSF_BAUDRATE;
+static bool s_handset_serial_inverted = false;
+
+// CRSF handset mode only (no custom UART 0xA5 protocol): ELRS transmitter on Serial2.
+
+// Detected CRSF endpoints
+enum TxType : uint8_t { TX_TYPE_UNKNOWN = 0, TX_TYPE_ELRS = 2 };
 static TxType tx_type = TX_TYPE_UNKNOWN;
-static TxModeOverride tx_mode_override = TX_MODE_AUTO;
 static char elrs_device_name[24] = {0};
+/** MCU serial from inbound DEVICE_INFO (binding / identify); not the passphrase. */
+static uint8_t elrs_tx_module_serial[4] = {0};
+static bool elrs_tx_serial_valid = false;
 static bool detecting_tx = false;
 static bool elrs_device_info_received = false;
 static unsigned long lastElrsFrameReceived = 0;
@@ -297,12 +327,32 @@ static const unsigned long ELRS_FRAME_TIMEOUT_MS = 2000;
 static uint8_t elrs_phrase_field_id = ELRS_PARAM_FIELD_NONE;
 static uint8_t elrs_bind_cmd_field_id = ELRS_PARAM_FIELD_NONE;
 static uint8_t elrs_wifi_cmd_field_id = ELRS_PARAM_FIELD_NONE;
+static uint8_t elrs_rx_wifi_cmd_field_id = ELRS_PARAM_FIELD_NONE;
 static char elrs_binding_phrase[ELRS_PHRASE_MAX + 1] = {0};
 static uint8_t elrs_param_chunk_next = 0;
 static uint8_t elrs_param_chunk_index = 0;
 static bool elrs_param_read_in_progress = false;
-static const unsigned int ELRS_PARAM_MAX_CHUNKS = 48;
+static const unsigned int ELRS_PARAM_MAX_CHUNKS = 64;
 static unsigned long elrs_last_param_entry_ms = 0;  // timestamp of last received parameter entry (for retry)
+static uint8_t elrs_param_probe_field = 0;
+/** Time budget for ELRS Lua param scan (phrase / bind / WiFi CMD fields). */
+#if !defined(RC_ELRS_PARAM_DISCOVERY_MS)
+#define RC_ELRS_PARAM_DISCOVERY_MS 8000UL
+#endif
+#if !defined(RC_ELRS_PARAM_PROBE_INTERVAL_MS)
+#define RC_ELRS_PARAM_PROBE_INTERVAL_MS 80UL
+#endif
+#if !defined(RC_SIMPLETX_ELRS_PKT_RATE)
+#define RC_SIMPLETX_ELRS_PKT_RATE 3
+#endif
+#if !defined(RC_SIMPLETX_ELRS_POWER)
+#define RC_SIMPLETX_ELRS_POWER 1
+#endif
+#if !defined(RC_SIMPLETX_ELRS_DYNAMIC)
+#define RC_SIMPLETX_ELRS_DYNAMIC 1
+#endif
+/** Suppress repeating Serial logs when ELRS floods DEVICE_INFO (Lua session housekeeping). */
+static char s_elrs_logged_device_name[sizeof(elrs_device_name)] = {0};
 
 // Telemetry data from TX
 static TelemetryData telemetry = {0};
@@ -311,6 +361,11 @@ static bool telemetryValid = false;
 static bool statusValid = false;
 static unsigned long lastTelemetryUpdate = 0;
 static const unsigned long TELEMETRY_TIMEOUT_MS = 2000;
+static int16_t s_elrs_uplink_rssi2 = 0;
+static int16_t s_elrs_downlink_rssi = 0;
+static int16_t s_elrs_uplink_snr = 0;
+static uint8_t s_elrs_downlink_lq = 0;
+static bool s_elrs_link_stats_valid = false;
 
 // Button state for command handling
 static bool enterButtonPressed = false;
@@ -338,10 +393,10 @@ static unsigned long lastMenuNavMs = 0;
 static bool menuNavLatched = false;
 
 // Menu state: 0 = main screen, 1 = top-level menu, 2+ = submenu
-enum MenuScreen : uint8_t { MENU_MAIN = 0, MENU_TOP = 1, MENU_TX_MODE = 2, MENU_BINDING = 3 };
+enum MenuScreen : uint8_t { MENU_MAIN = 0, MENU_TOP = 1, MENU_BINDING = 2 };
 static MenuScreen menu_screen = MENU_MAIN;
 static uint8_t menu_cursor = 0;  // index in current menu
-static const uint8_t MENU_BINDING_ITEMS = 5; // View phrase, Set phrase, Initiate pairing, Start WiFi, Back
+static const uint8_t MENU_BINDING_ITEMS = 7; // Binding menu rows (phrase..RF + Back)
 static unsigned long back_press_start = 0;
 static bool back_long_press_handled = false;
 
@@ -350,13 +405,14 @@ bool ads_ok = false;
 bool display_ok = false;
 bool tx_connected = false;  // TX board connection status
 
-// Channel values (mapped to CRSF range 1000-2000)
+// Internal order is A,E,R,T (+ AUX). CRSFSerialConnector normalizes to SimpleTX wire order A,E,T,R.
 uint16_t channels[8] = {1500, 1500, 1500, 1500, 1500, 1500, 1500, 1500};
 #if defined(CRSF_CORE1_CHANNELS)
 bool core1_separate_stack = true;  // 8KB stack for Core 1
 static rc_config_data_t s_core1_config;  // Snapshot at boot; Core 1 uses this exclusively
 static volatile uint16_t s_core1_channels[8];  // Core 1 writes; Core 0 reads for display
 static volatile bool s_core1_send_elrs_channels = false;  // Set in setup() after TX detection
+static volatile bool s_core1_suppress_rc_during_elrs_lua = false;  // quieter UART during ELRS param scan
 static volatile bool s_multicore_ready = false;  // Set by setup() after init
 #if defined(INTERNAL_ADC)
 // Latest filtered stick ADC (same pipeline as CRSF); Core 0 uses for raw_adc / calibration UI
@@ -432,6 +488,9 @@ static bool init_ads1115(void);
 static bool init_internal_adc(void);
 #endif
 static void readInputs();
+#if defined(RC_USB_HID_JOYSTICK)
+static void rc_usb_hid_update_gamepad(void);
+#endif
 static void updateDisplay();
 static void sendChannels();
 static void receiveUARTMessages();
@@ -450,23 +509,25 @@ static void drawLinkIndicator(int x, int y, bool connected);
 static void resync_display_viewport(void);
 
 // UART Protocol callbacks
-static void onTelemetryReceived(const TelemetryData* data);
-static void onStatusReceived(const StatusData* data);
-static void onAckReceived(UARTMsgType ackedCmd);
-static void onErrorReceived(uint8_t errorCode);
-static void onPongReceived();
-
-// Device check functions
 static bool check_tx_connection(void);
 static void ping_tx_device(void);
 static void run_tx_detection(void);
+static void flush_crsf_tx_queue(void);
+static void elrs_simpletx_settings_burst_tx(void);
+static void crsfx_enqueue_handset_timing_frame(void);
+static void elrs_queue_device_ping_variants(void);
+static void elrs_queue_lua_packet_variants(uint8_t type, const void *payload, uint8_t len);
+static void elrs_lua_session_begin(unsigned long durationMs);
+static void elrs_lua_session_end(void);
+static void elrs_linkstat_handshake_write(void);
 static void send_crsf_device_info(void);
 static void onCrsfExtendedFrame(uint8_t sourceAddr, uint8_t type);
 static void onCrsfDeviceInfo(const uint8_t *serial4, const char *name, uint8_t sourceAddr);
+static void onCrsfLinkStatistics(crsfLinkStatistics_t *ls);
+static void onCrsfBattery(float voltage, float current, uint32_t capacity, uint8_t remaining);
 static void onCrsfParameterEntry(uint8_t fieldId, uint8_t paramType, uint8_t chunksRemaining, const char *label, const uint8_t *value, uint8_t valueLen);
-static TxType get_effective_tx_type(void);
 static void elrs_request_param_chunk(uint8_t fieldId, uint8_t chunkIndex);
-static bool elrs_discover_params(bool needPhrase, bool needBind, unsigned long timeoutMs);
+static bool elrs_discover_params(bool needPhrase, bool needBind, bool needWifi, unsigned long timeoutMs);
 static bool elrs_write_param_string(uint8_t fieldId, const char *str);
 static bool elrs_write_param_byte(uint8_t fieldId, uint8_t val);
 
@@ -581,6 +642,8 @@ static void rc_draw_splash(const char* title, const char* subtitle, uint8_t prog
 __attribute__((noreturn)) static void rc_enter_rp2350_deep_sleep(uint32_t wake_gpio) {
     Serial.println("[PWR] Entering RP2350 deep sleep (POWMAN)");
     Serial.flush();
+    // Deep sleep can run before setup() configures the buzzer pin.
+    pinMode(BUZZER_PIN, OUTPUT);
     if (display_ok) {
         display.clearDisplay();
         display.display();
@@ -609,12 +672,20 @@ __attribute__((noreturn)) static void rc_enter_rp2350_deep_sleep(uint32_t wake_g
     delay(30);
     powman_disable_all_wakeups();
     powman_enable_gpio_wakeup(0, wake_gpio, true, false);
-    const powman_power_state sleep_st = 0;
-    powman_power_state wakeup = POWMAN_POWER_STATE_NONE;
-    wakeup = powman_power_state_with_domain_on(wakeup, POWMAN_POWER_DOMAIN_SRAM_BANK1);
-    wakeup = powman_power_state_with_domain_on(wakeup, POWMAN_POWER_DOMAIN_SRAM_BANK0);
-    wakeup = powman_power_state_with_domain_on(wakeup, POWMAN_POWER_DOMAIN_XIP_CACHE);
+
+    powman_power_state current = powman_get_power_state();
+    powman_power_state wakeup = current;
     wakeup = powman_power_state_with_domain_on(wakeup, POWMAN_POWER_DOMAIN_SWITCHED_CORE);
+    wakeup = powman_power_state_with_domain_on(wakeup, POWMAN_POWER_DOMAIN_XIP_CACHE);
+    wakeup = powman_power_state_with_domain_on(wakeup, POWMAN_POWER_DOMAIN_SRAM_BANK0);
+    wakeup = powman_power_state_with_domain_on(wakeup, POWMAN_POWER_DOMAIN_SRAM_BANK1);
+
+    powman_power_state sleep_st = wakeup;
+    sleep_st = powman_power_state_with_domain_off(sleep_st, POWMAN_POWER_DOMAIN_SWITCHED_CORE);
+    sleep_st = powman_power_state_with_domain_off(sleep_st, POWMAN_POWER_DOMAIN_XIP_CACHE);
+    sleep_st = powman_power_state_with_domain_off(sleep_st, POWMAN_POWER_DOMAIN_SRAM_BANK0);
+    sleep_st = powman_power_state_with_domain_off(sleep_st, POWMAN_POWER_DOMAIN_SRAM_BANK1);
+
     if (!powman_configure_wakeup_state(sleep_st, wakeup)) {
         Serial.println("[PWR] powman_configure_wakeup_state failed");
         Serial.flush();
@@ -631,8 +702,20 @@ __attribute__((noreturn)) static void rc_enter_rp2350_deep_sleep(uint32_t wake_g
 }
 
 static bool rc_power_on_splash_wait(uint32_t boot_start_ms) {
+#if RC_SKIP_POWER_ON_SEQUENCE
+    (void)boot_start_ms;
+    return true;
+#else
     if (digitalRead(POWER_BUTTON_PIN) != LOW) {
         return false;
+    }
+    // Init (I2C, OLED) can take >1 s; if the user never released since reset
+    // and wall time already exceeds the gate, finish boot without forcing
+    // another full 5 s on the splash screen.
+    if (millis() - boot_start_ms >= POWER_ON_HOLD_MS) {
+        rc_draw_splash(RC_PRODUCT_NAME, "Power on", 100);
+        delay(400);
+        return true;
     }
     uint32_t last_draw = 0;
     for (;;) {
@@ -654,6 +737,7 @@ static bool rc_power_on_splash_wait(uint32_t boot_start_ms) {
             rc_draw_splash(RC_PRODUCT_NAME, "Keep holding", pct);
         }
     }
+#endif // !RC_SKIP_POWER_ON_SEQUENCE
 }
 
 __attribute__((noreturn)) static void rc_power_off_splash_and_sleep(void) {
@@ -712,11 +796,13 @@ void setup() {
     Serial.print((unsigned)POWER_BUTTON_PIN);
     Serial.print(" (power): ");
     Serial.println(digitalRead(POWER_BUTTON_PIN) == HIGH ? "HIGH" : "LOW");
-    if (digitalRead(POWER_BUTTON_PIN) != LOW) {
-        Serial.println("[PWR] Boot gate: not holding power — deep sleep");
-        Serial.flush();
-        rc_enter_rp2350_deep_sleep(POWER_BUTTON_PIN);
-    }
+#if RC_SKIP_POWER_ON_SEQUENCE
+    Serial.println("[PWR] Power-on hold disabled — see include/rc_power_config.h");
+#else
+    Serial.print("[PWR] Hold GP");
+    Serial.print((unsigned)POWER_BUTTON_PIN);
+    Serial.println(" through splash to power on (see OLED after init)");
+#endif
 #else
     Serial.println("=== RC-CRSF Controller ===");
     Serial.println("Display, battery, analog inputs -> CRSF serial output");
@@ -750,6 +836,14 @@ void setup() {
         Serial.println("[PWR] Power-on hold not completed — deep sleep");
         Serial.flush();
         rc_enter_rp2350_deep_sleep(POWER_BUTTON_PIN);
+    }
+    // Drop the logo bitmap during long init (less time on a busy frame before
+    // the next full refresh). One resync only — avoid hammering oled_command
+    // every splash frame (that load was suspected to wedge I2C / the panel).
+    if (display_ok) {
+        resync_display_viewport();
+        display.clearDisplay();
+        display.display();
     }
 #endif
 
@@ -837,24 +931,20 @@ void setup() {
     g_rc_proto.setEnterPairingMode(rc_proto_enter_pairing_mode);
     g_rc_proto.setEnterUsbUartProxy(rc_proto_enter_usb_uart_proxy);
 
-    // Initialize UART protocol (outputting to TX side)
-    Serial.println("Initializing UART protocol...");
+    // CRSF handset UART to ELRS TX module
+    Serial.println("Initializing CRSF handset UART...");
     Serial2.setTX(CRSF_TX_PIN);
     Serial2.setRX(CRSF_RX_PIN);
-    uartProto.begin(UART_PROTOCOL_BAUDRATE);
-    uartProto.setOnTelemetry(onTelemetryReceived);
-    uartProto.setOnStatus(onStatusReceived);
-    uartProto.setOnAck(onAckReceived);
-    uartProto.setOnError(onErrorReceived);
-    uartProto.setOnPong(onPongReceived);
     crsfSerial.onExtendedFrame = onCrsfExtendedFrame;
     crsfSerial.onParameterEntry = onCrsfParameterEntry;
+    crsfSerial.onPacketLinkStatistics = onCrsfLinkStatistics;
+    crsfSerial.onPacketBattery = onCrsfBattery;
     Serial.print("UART Protocol on Serial2: TX=GP");
     Serial.print(CRSF_TX_PIN);
     Serial.print(", RX=GP");
     Serial.println(CRSF_RX_PIN);
-    
-    // TX type detection at boot (Custom PING/PONG vs ELRS DEVICE_PING/DEVICE_INFO)
+
+    // TX detection: CRSF-only (same UART as handset → ELRS TX module)
     delay(100);  // UART stabilize
     run_tx_detection();
     lastPingSent = millis();
@@ -872,10 +962,16 @@ void setup() {
 #endif
 
     if (display_ok) {
+#if defined(PICO_RP2350) && PICO_RP2350
+        resync_display_viewport();
+        rc_draw_splash(RC_PRODUCT_NAME, "Ready", 100);
+#else
+        resync_display_viewport();
         display.clearDisplay();
         display.setCursor(0, 0);
         display.println("RC-CRSF ready");
         display.display();
+#endif
     }
 
     // Play boot jingle
@@ -885,7 +981,48 @@ void setup() {
     // Some OLED modules show page-wrap artifacts at 400kHz on longer/noisy wires.
     Wire.setClock(100000);
     Serial.println("I2C bus speed kept at 100kHz for stable OLED updates");
+
+#if defined(RC_USB_HID_JOYSTICK)
+    // Composite USB: CDC (WebUI / Serial) + 16-bit HID gamepad (PC, Meta Quest, etc.).
+    usb_hid_poll_interval = 2;
+    Joystick.use16bit();
+    Joystick.useManualSend(true);
+    Joystick.begin();
+    Serial.println("[USB] HID gamepad: sticks A,E,R,T -> X,Y,Z,Rz; aux -> buttons 1-4 (on >1700us)");
+#endif
 }
+
+#if defined(RC_USB_HID_JOYSTICK)
+#ifndef RC_USB_HID_MIN_INTERVAL_US
+#define RC_USB_HID_MIN_INTERVAL_US 4000u
+#endif
+
+static int16_t rc_crsf_us_to_hid16(uint16_t us) {
+    int32_t v = constrain((int32_t)us, (int32_t)RC_CHANNEL_MIN, (int32_t)RC_CHANNEL_MAX);
+    return (int16_t)map(v, (int32_t)RC_CHANNEL_MIN, (int32_t)RC_CHANNEL_MAX, -32767, 32767);
+}
+
+static void rc_usb_hid_update_gamepad(void) {
+    static uint32_t s_lastHidUs;
+    const uint32_t now = micros();
+    if ((uint32_t)(now - s_lastHidUs) < (uint32_t)RC_USB_HID_MIN_INTERVAL_US) {
+        return;
+    }
+    s_lastHidUs = now;
+
+    Joystick.X(rc_crsf_us_to_hid16(channels[AILERON_CHANNEL]));
+    Joystick.Y(rc_crsf_us_to_hid16(channels[ELEVATOR_CHANNEL]));
+    Joystick.Z(rc_crsf_us_to_hid16(channels[RUDDER_CHANNEL]));
+    Joystick.Zrotate(rc_crsf_us_to_hid16(channels[THROTTLE_CHANNEL]));
+    Joystick.sliderLeft(0);
+    Joystick.sliderRight(0);
+    Joystick.hat(-1);
+    for (int i = 0; i < 4; i++) {
+        Joystick.setButton((uint8_t)i, channels[4 + i] >= 1700);
+    }
+    Joystick.send_now();
+}
+#endif
 
 // ============================================================
 // Loop
@@ -907,6 +1044,9 @@ void loop() {
     }
 
     readInputs();
+#if defined(RC_USB_HID_JOYSTICK)
+    rc_usb_hid_update_gamepad();
+#endif
     sendChannels();
     receiveUARTMessages();
     g_rc_proto.poll();
@@ -936,11 +1076,15 @@ void loop() {
             uint32_t chCount = s_channelSendsThisSec;
             s_channelSendsThisSec = 0;
 #endif
-            Serial.printf("[LINK_DIAG] ch/s=%lu telem/s=%lu loopMaxMs=%lu link=%s\n",
+            Serial.printf("[LINK_DIAG] ch/s=%lu telem/s=%lu loopMaxMs=%lu link=%s ulq=%u urssi=%d dlq=%u dlrssi=%d\n",
                 (unsigned long)chCount,
                 (unsigned long)linkStats,
                 (unsigned long)s_maxLoopMs,
-                crsfSerial.isLinkUp() ? "UP" : "DOWN");
+                (crsfSerial.isLinkUp() || s_elrs_link_stats_valid) ? "UP" : "DOWN",
+                s_elrs_link_stats_valid ? (unsigned)telemetry.linkQuality : 0u,
+                s_elrs_link_stats_valid ? (int)telemetry.rssi : 0,
+                s_elrs_link_stats_valid ? (unsigned)s_elrs_downlink_lq : 0u,
+                s_elrs_link_stats_valid ? (int)s_elrs_downlink_rssi : 0);
 #if !defined(CRSF_CORE1_CHANNELS)
             s_channelSendsThisSec = 0;
 #endif
@@ -966,9 +1110,11 @@ void loop1() {
         }
     }
 #endif
-    static unsigned long lastSend = 0;
-    if (millis() - lastSend < 4) return;  // 250 Hz
-    lastSend = millis();
+    static uint32_t lastSendUs = 0;
+    const uint32_t nowUs = micros();
+    if ((uint32_t)(nowUs - lastSendUs) < (uint32_t)CRSFSerialConnector::SIMPLETX_FRAME_SPACING_US)
+        return;
+    lastSendUs = nowUs;
 
     const rc_config_data_t* cfg = &s_core1_config;
     int16_t axis_adc[4] = {RC_ADC_CENTER, RC_ADC_CENTER, RC_ADC_CENTER, RC_ADC_CENTER};
@@ -1026,9 +1172,11 @@ void loop1() {
 
     for (int i = 0; i < 8; i++) s_core1_channels[i] = localCh[i];
 
-    crsfSerial.core1_drainAndSendChannels(localCh, s_core1_send_elrs_channels);
+    crsfSerial.core1_drainAndSendChannels(
+        localCh, s_core1_send_elrs_channels && !s_core1_suppress_rc_during_elrs_lua);
 #if defined(DEBUG_LINK_STATS)
-    if (s_core1_send_elrs_channels) s_core1_channelSendsThisSec++;
+    if (s_core1_send_elrs_channels && !s_core1_suppress_rc_during_elrs_lua)
+        s_core1_channelSendsThisSec++;
 #endif
 }
 #endif
@@ -1148,96 +1296,73 @@ void readInputs() {
 // ============================================================
 void sendChannels() {
 #if defined(CRSF_CORE1_CHANNELS)
-    // ELRS channel sending is done on Core 1 at 250 Hz
-    if (get_effective_tx_type() == TX_TYPE_ELRS && elrs_role == ELRS_ROLE_TX)
+    // CRSF handset transmits on Core 1 (HardwareSerial @ RC_TX_MODULE_UART_BAUD).
+    if (tx_type == TX_TYPE_ELRS && elrs_role == ELRS_ROLE_TX)
         return;
 #endif
     if (millis() - lastChannelSend < CHANNEL_INTERVAL) return;
     lastChannelSend = millis();
 
-    TxType eff = get_effective_tx_type();
-    if (eff == TX_TYPE_ELRS && elrs_role == ELRS_ROLE_TX) {
-        // Unreachable when CRSF_CORE1_CHANNELS (handled above)
+#if !defined(CRSF_CORE1_CHANNELS)
+    if (tx_type != TX_TYPE_ELRS || elrs_role != ELRS_ROLE_TX)
         return;
-    } else {
-        uartProto.sendChannels(channels);
-#if defined(DEBUG_LINK_STATS)
-        s_channelSendsThisSec++;
+    crsfSerial.queueSimpleTxRcChannelsPacked8(channels);
 #endif
-    }
+#if defined(DEBUG_LINK_STATS)
+    s_channelSendsThisSec++;
+#endif
 }
 
-// ============================================================
-// UART Protocol - Message Reception
-// ============================================================
 void receiveUARTMessages() {
-    TxType eff = get_effective_tx_type();
-    if (eff == TX_TYPE_ELRS) {
-        crsfSerial.loop();
-        // Optionally drive telemetry from CRSF link/battery when ELRS
-        if (crsfSerial.isLinkUp()) {
-            telemetryValid = true;
-            lastTelemetryUpdate = millis();
-            telemetry.rssi = crsfSerial.getLinkStatistics()->uplink_RSSI_1;
-            telemetry.linkQuality = crsfSerial.getLinkStatistics()->uplink_Link_quality;
-            telemetry.rxBattMv = (uint16_t)(crsfSerial.getBatteryVoltage() * 1000);
-            telemetry.rxBattPct = crsfSerial.getBatteryRemaining();
-        }
-    } else {
-        uartProto.loop();
-    }
+    crsfSerial.loop();
     if (telemetryValid && (millis() - lastTelemetryUpdate) > TELEMETRY_TIMEOUT_MS)
         telemetryValid = false;
+    if (s_elrs_link_stats_valid && (millis() - lastTelemetryUpdate) > TELEMETRY_TIMEOUT_MS)
+        s_elrs_link_stats_valid = false;
 }
 
-// ============================================================
-// UART Protocol - Callbacks
-// ============================================================
-void onTelemetryReceived(const TelemetryData* data) {
-    if (data) {
-        memcpy(&telemetry, data, sizeof(TelemetryData));
-        telemetryValid = true;
-        lastTelemetryUpdate = millis();
+static void onCrsfLinkStatistics(crsfLinkStatistics_t *ls) {
+    if (!ls)
+        return;
+    static unsigned long s_lastLinkStatsLogMs = 0;
+    telemetryValid = true;
+    lastTelemetryUpdate = millis();
+    telemetry.rssi = ls->uplink_RSSI_1;
+    telemetry.snr = (float)ls->uplink_SNR;
+    telemetry.linkQuality = ls->uplink_Link_quality;
+    s_elrs_uplink_rssi2 = ls->uplink_RSSI_2;
+    s_elrs_downlink_rssi = ls->downlink_RSSI_1;
+    s_elrs_uplink_snr = ls->uplink_SNR;
+    s_elrs_downlink_lq = ls->downlink_Link_quality;
+    s_elrs_link_stats_valid = true;
+    if (millis() - s_lastLinkStatsLogMs >= 2000) {
+        s_lastLinkStatsLogMs = millis();
+        Serial.printf("[ELRS LINK] uplinkLQ=%u uplinkRSSI=%d/%d uplinkSNR=%d downlinkLQ=%u downlinkRSSI=%d\n",
+                      (unsigned)telemetry.linkQuality,
+                      (int)telemetry.rssi,
+                      (int)s_elrs_uplink_rssi2,
+                      (int)s_elrs_uplink_snr,
+                      (unsigned)s_elrs_downlink_lq,
+                      (int)s_elrs_downlink_rssi);
     }
 }
 
-void onStatusReceived(const StatusData* data) {
-    if (data) {
-        memcpy(&status, data, sizeof(StatusData));
-        statusValid = true;
-    }
+static void onCrsfBattery(float voltage, float current, uint32_t capacity, uint8_t remaining) {
+    (void)current;
+    (void)capacity;
+    telemetryValid = true;
+    lastTelemetryUpdate = millis();
+    telemetry.rxBattMv = (uint16_t)(voltage * 1000.0f);
+    telemetry.rxBattPct = remaining;
 }
 
-void onAckReceived(UARTMsgType ackedCmd) {
-    Serial.print("[UART] ACK received for command: 0x");
-    Serial.println((uint8_t)ackedCmd, HEX);
-}
-
-void onErrorReceived(uint8_t errorCode) {
-    Serial.print("[UART] Error received: 0x");
-    Serial.println(errorCode, HEX);
-}
-
-void onPongReceived() {
-    lastPongReceived = millis();
-    if (!tx_connected) {
-        tx_connected = true;
-        Serial.println("[TX] Device connected!");
-    }
-}
-
-// ============================================================
-// Button Handling for Commands and Menu
-// ============================================================
 void handleButtons() {
     bool enterPressed = is_menu_button_pressed(ENTER_BUTTON_PIN, enterButtonIdleLevel);
     bool backPressed = is_menu_button_pressed(BACK_BUTTON_PIN, backButtonIdleLevel);
     bool powerPressed = digitalRead(POWER_BUTTON_PIN) == LOW;  // Active LOW button
     auto currentMenuItems = []() -> uint8_t {
         if (menu_screen == MENU_TOP)
-            return (get_effective_tx_type() == TX_TYPE_ELRS && elrs_role == ELRS_ROLE_TX) ? 4 : 3;
-        if (menu_screen == MENU_TX_MODE)
-            return 4;
+            return 3;
         if (menu_screen == MENU_BINDING)
             return MENU_BINDING_ITEMS;
         return 0;
@@ -1295,7 +1420,7 @@ void handleButtons() {
     }
     // #endregion
     
-    // BACK: long-press = menu / back, short-press = STATUS_REQ when on main
+    // BACK: long-press = menu / back, short-press cycles highlight (top menu only)
     if (backPressed) {
         if (back_press_start == 0) back_press_start = millis();
         if (!back_long_press_handled && (millis() - back_press_start) >= LONG_PRESS_MS) {
@@ -1318,13 +1443,9 @@ void handleButtons() {
     } else {
         if (back_press_start > 0 && !back_long_press_handled && (millis() - back_press_start) >= BUTTON_DEBOUNCE_MS) {
             if (menu_screen == MENU_MAIN) {
-                uartProto.sendCommand(UART_MSG_CMD_STATUS_REQ);
-                Serial.println("[RC] Sending STATUS_REQ command");
+                Serial.println("[RC] CRSF handset: use Binding menu for ELRS actions");
             } else if (menu_screen == MENU_TOP) {
-                uint8_t n = (get_effective_tx_type() == TX_TYPE_ELRS && elrs_role == ELRS_ROLE_TX) ? 4 : 3;
-                menu_cursor = (menu_cursor + 1) % n;
-            } else if (menu_screen == MENU_TX_MODE) {
-                menu_cursor = (menu_cursor + 1) % 4;
+                menu_cursor = (menu_cursor + 1) % 3;
             } else if (menu_screen == MENU_BINDING) {
                 menu_cursor = (menu_cursor + 1) % MENU_BINDING_ITEMS;
             }
@@ -1335,25 +1456,34 @@ void handleButtons() {
     }
     if (backPressed) backButtonPressed = true;
 
-    // ENTER: in menu = select, on main = PAIR
+    // ENTER: on main cycles nothing; in menu selects
     if (enterPressed && !enterButtonPressed && (millis() - lastEnterPress) > BUTTON_DEBOUNCE_MS) {
         enterButtonPressed = true;
         lastEnterPress = millis();
         if (menu_screen == MENU_MAIN) {
-            uartProto.sendCommand(UART_MSG_CMD_PAIR);
-            Serial.println("[RC] Sending PAIR command");
+            Serial.println("[RC] Open menu (hold Back) — CRSF handset / ELRS only");
         } else if (menu_screen == MENU_TOP) {
-            if (menu_cursor == 0) { menu_screen = MENU_TX_MODE; menu_cursor = (uint8_t)tx_mode_override; }
-            else if (menu_cursor == 1) { run_tx_detection(); check_tx_connection(); menu_screen = MENU_MAIN; }
-            else if (menu_cursor == 2 && get_effective_tx_type() == TX_TYPE_ELRS && elrs_role == ELRS_ROLE_TX) { menu_screen = MENU_BINDING; menu_cursor = 0; }
-            else menu_screen = MENU_MAIN;  // Back (cursor 2 when not ELRS, or cursor 3 when ELRS)
+            if (menu_cursor == 0) {
+                if (tx_type == TX_TYPE_ELRS && elrs_role == ELRS_ROLE_TX) {
+                    menu_screen = MENU_BINDING;
+                    menu_cursor = 0;
+                } else {
+                    Serial.println("[RC] Binding needs ELRS TX on CRSF uart");
+                }
+            } else if (menu_cursor == 1) {
+                run_tx_detection();
+                check_tx_connection();
+                menu_screen = MENU_MAIN;
+            } else {
+                menu_screen = MENU_MAIN;
+            }
         } else if (menu_screen == MENU_BINDING) {
             if (menu_cursor == 0) {
-                if (!elrs_discover_params(true, false, 1200))
+                if (!elrs_discover_params(true, false, false, RC_ELRS_PARAM_DISCOVERY_MS))
                     Serial.println("[RC] Failed to read ELRS binding phrase");
             } else if (menu_cursor == 1) {
                 if (elrs_phrase_field_id == ELRS_PARAM_FIELD_NONE) {
-                    if (!elrs_discover_params(true, false, 1200))
+                    if (!elrs_discover_params(true, false, false, RC_ELRS_PARAM_DISCOVERY_MS))
                         Serial.println("[RC] Failed to discover ELRS binding phrase parameter");
                 }
                 if (elrs_phrase_field_id != ELRS_PARAM_FIELD_NONE) {
@@ -1377,17 +1507,26 @@ void handleButtons() {
             } else if (menu_cursor == 3) {
                 if (!rc_proto_enter_wifi_mode())
                     Serial.println("[RC] Failed to enter ELRS WiFi mode");
+            } else if (menu_cursor == 4) {
+                if (elrs_tx_serial_valid) {
+                    Serial.print("[RC] ELRS TX module UID (DEVICE_INFO): ");
+                    for (unsigned i = 0; i < sizeof(elrs_tx_module_serial); i++) {
+                        if (elrs_tx_module_serial[i] < 16) Serial.print('0');
+                        Serial.print(elrs_tx_module_serial[i], HEX);
+                    }
+                    Serial.println();
+                    Serial.println("[RC] Compare module UID / phrase with RX or ELRS Buddy; binding hash derives from passphrase+UID firmware-side.");
+                } else {
+                    Serial.println("[RC] TX UID not received yet — wait on main screen for DEVICE_INFO after link-up");
+                }
+            } else if (menu_cursor == 5) {
+                elrs_simpletx_settings_burst_tx();
+                Serial.printf("[RC] SimpleTX SETTINGS burst applied (pktRate idx=%u power idx=%u dyn idx=%u) — rebuild with RC_SIMPLETX_ELRS_* overrides to customize\n",
+                              (unsigned)RC_SIMPLETX_ELRS_PKT_RATE, (unsigned)RC_SIMPLETX_ELRS_POWER, (unsigned)RC_SIMPLETX_ELRS_DYNAMIC);
             } else {
                 menu_screen = MENU_TOP;
                 menu_cursor = 0;
             }
-        } else if (menu_screen == MENU_TX_MODE) {
-            if (menu_cursor <= 2) {
-                tx_mode_override = (TxModeOverride)menu_cursor;
-                if (tx_mode_override == TX_MODE_ELRS) crsfSerial.begin(CRSFSerialConnector::CRSF_BAUDRATE);
-            }
-            menu_screen = MENU_TOP;
-            menu_cursor = 0;
         }
     } else if (!enterPressed) {
         enterButtonPressed = false;
@@ -1481,26 +1620,18 @@ void updateDisplay() {
     if (menu_screen != MENU_MAIN) {
         int y = 0;
         if (menu_screen == MENU_TOP) {
-            bool elrs = (get_effective_tx_type() == TX_TYPE_ELRS && elrs_role == ELRS_ROLE_TX);
-            const char* items4[] = {"TX Mode", "Re-detect TX", "Binding/ELRS", "Back"};
-            const char* items3[] = {"TX Mode", "Re-detect TX", "Back"};
-            int n = elrs ? 4 : 3;
-            for (int i = 0; i < n; i++) {
+            const char* items3[] = {"Binding/ELRS", "Re-detect TX", "Back"};
+            for (int i = 0; i < 3; i++) {
                 display.setCursor(COL_0, y);
                 if (i == (int)menu_cursor) display.print(">");
-                display.println(elrs ? items4[i] : items3[i]);
-                y += ROW_H;
-            }
-        } else if (menu_screen == MENU_TX_MODE) {
-            const char* items[] = {"Auto", "Custom", "ELRS", "Back"};
-            for (int i = 0; i < 4; i++) {
-                display.setCursor(COL_0, y);
-                if (i == (int)menu_cursor) display.print(">");
-                display.println(items[i]);
+                display.println(items3[i]);
                 y += ROW_H;
             }
         } else if (menu_screen == MENU_BINDING) {
-            const char* items[] = {"View phrase", "Set phrase", "Initiate pair", "Start WiFi", "Back"};
+            const char* items[] = {
+                "View phrase", "Set phrase", "Initiate pair",
+                "Start WiFi", "TX module ID", "RF preset",
+                "Back"};
             for (int i = 0; i < MENU_BINDING_ITEMS; i++) {
                 display.setCursor(COL_0, y);
                 if (i == (int)menu_cursor) display.print(">");
@@ -1516,7 +1647,6 @@ void updateDisplay() {
         return;
     }
 
-    const char* linkStateNames[] = {"DISC", "PAIR", "CONN", "OK", "LOST"};
     int y = 0;
 
     // Row 0: TX type (or Detecting) + link indicator
@@ -1524,9 +1654,8 @@ void updateDisplay() {
     if (detecting_tx) {
         display.print("Detecting TX...");
     } else {
-        TxType eff = get_effective_tx_type();
-        if (eff == TX_TYPE_CUSTOM) display.print("TX: Custom");
-        else if (eff == TX_TYPE_ELRS) {
+        TxType eff = tx_type;
+        if (eff == TX_TYPE_ELRS) {
             if (elrs_role == ELRS_ROLE_RX) {
                 display.print("Wrong: ELRS RX");
             } else {
@@ -1539,8 +1668,8 @@ void updateDisplay() {
         } else display.print("TX: --");
     }
     // Link indicator: for ELRS, show RX connection (link stats); for Custom, show TX presence
-    bool linkOk = (get_effective_tx_type() == TX_TYPE_ELRS && elrs_role == ELRS_ROLE_TX)
-        ? crsfSerial.isLinkUp()
+    bool linkOk = (tx_type == TX_TYPE_ELRS && elrs_role == ELRS_ROLE_TX)
+        ? (crsfSerial.isLinkUp() || s_elrs_link_stats_valid)
         : tx_connected;
     drawLinkIndicator(LINK_INDICATOR_X, LINK_INDICATOR_Y, linkOk);
     y += ROW_H;
@@ -1582,29 +1711,27 @@ void updateDisplay() {
     // Row 3: Link: OK   RSSI:-50 LQ:98
     display.setCursor(COL_0, y);
     display.print("Link:");
-    if (get_effective_tx_type() == TX_TYPE_ELRS && elrs_role == ELRS_ROLE_TX) {
-        display.print(crsfSerial.isLinkUp() ? "OK" : "---");
-    } else if (tx_connected) {
-        if (statusValid && status.connectionState < 5) {
-            display.print(linkStateNames[status.connectionState]);
-        } else {
-            display.print("OK");
-        }
+    if (tx_type == TX_TYPE_ELRS && elrs_role == ELRS_ROLE_TX) {
+        display.print((crsfSerial.isLinkUp() || s_elrs_link_stats_valid) ? "OK" : "---");
+    } else if (tx_type == TX_TYPE_UNKNOWN) {
+        display.print("...");
     } else {
         display.print("---");
     }
     display.setCursor(COL_LINK, y);
-    if (telemetryValid) {
-        display.print("R:");
-        display.print(telemetry.rssi);
-        display.print(" L:");
+    if (s_elrs_link_stats_valid) {
+        display.print("U:");
         display.print(telemetry.linkQuality);
+        display.print("/");
+        display.print(telemetry.rssi);
+        display.print(" D:");
+        display.print(s_elrs_downlink_lq);
     } else {
-        display.print("R:-- L:--");
+        display.print("U:--/-- D:--");
     }
     y += ROW_H;
 
-    // Row 4-5: A   E   R   T  and values
+    // Row 4-5: internal logical outputs A,E,R,T before SimpleTX wire reordering
     display.setCursor(COL_0, y);
     display.print("A    E    R    T");
     y += ROW_H;
@@ -1624,45 +1751,43 @@ void updateDisplay() {
 // TX Device Connection Check
 // ============================================================
 void ping_tx_device(void) {
-    if (get_effective_tx_type() != TX_TYPE_CUSTOM) return;  // Only ping for Custom TX
-    if (millis() - lastPingSent < PING_INTERVAL) return;
+    if (proxy_mode_enabled) return;
+    if (tx_type != TX_TYPE_ELRS || elrs_role != ELRS_ROLE_TX) return;
+    if ((long)(s_elrs_lua_session_until_ms - millis()) <= 0)
+        return;
+
+    unsigned long interval = PING_INTERVAL;
+    if ((long)(s_elrs_lua_ping_boost_until_ms - millis()) > 0)
+        interval = (unsigned long)RC_ELRS_LUA_PING_FAST_MS;
+
+    if (!s_elrs_lua_ping_pending_immediate) {
+        if ((unsigned long)(millis() - lastPingSent) < interval)
+            return;
+    }
+    s_elrs_lua_ping_pending_immediate = false;
     lastPingSent = millis();
-    uartProto.sendPing();
+
+    // Mirrors EdgeTX CRSF housekeeping: LUA on the ELRS TX module expects periodic handset DEVICE_PING
+    // to keep luaConnected; without it firmware logs Timeout! while waiting on field reads.
+    elrs_queue_device_ping_variants();
+    crsfx_enqueue_handset_timing_frame();
+    flush_crsf_tx_queue();
 }
 
 bool check_tx_connection(void) {
-    TxType eff = get_effective_tx_type();
-    if (eff == TX_TYPE_ELRS) {
-        // ELRS: consider connected if we received DEVICE_INFO (or later: link stats)
+    if (tx_type == TX_TYPE_ELRS) {
         bool wasConnected = tx_connected;
         tx_connected = elrs_device_info_received ||
                        crsfSerial.isLinkUp() ||
+                       s_elrs_link_stats_valid ||
                        (lastElrsFrameReceived > 0 && (millis() - lastElrsFrameReceived) < ELRS_FRAME_TIMEOUT_MS);
         if (wasConnected != tx_connected && tx_connected)
             Serial.println("[TX] ELRS module connected");
         return tx_connected;
     }
-    // Custom: pong-based
-    unsigned long timeSincePong = (lastPongReceived > 0) ? (millis() - lastPongReceived) : PONG_TIMEOUT_MS + 1;
-    bool wasConnected = tx_connected;
-    tx_connected = (timeSincePong < PONG_TIMEOUT_MS);
-    if (wasConnected != tx_connected) {
-        if (tx_connected) Serial.println("[TX] Device connected");
-        else Serial.println("[TX] Device disconnected or not responding");
-    }
-    static bool initialCheckDone = false;
-    if (!initialCheckDone) {
-        initialCheckDone = true;
-        if (tx_connected) Serial.println("[TX] Initial check: Device connected");
-        else Serial.println("[TX] Initial check: Device not responding");
-    }
-    return tx_connected;
-}
-
-static TxType get_effective_tx_type(void) {
-    if (tx_mode_override == TX_MODE_CUSTOM) return TX_TYPE_CUSTOM;
-    if (tx_mode_override == TX_MODE_ELRS) return TX_TYPE_ELRS;
-    return tx_type;
+    // Handset FW is CRSF-only: before first ELRS frame, treat UART as probing.
+    tx_connected = false;
+    return false;
 }
 
 static void onCrsfExtendedFrame(uint8_t sourceAddr, uint8_t type) {
@@ -1678,7 +1803,9 @@ static void onCrsfExtendedFrame(uint8_t sourceAddr, uint8_t type) {
 
     // ELRS TX sends periodic DEVICE_PING; responding with DEVICE_INFO registers us as
     // a Lua client so the TX will answer PARAMETER_READ requests.
-    if (type == CRSF_FRAMETYPE_DEVICE_PING && newRole == ELRS_ROLE_TX)
+    if (type == CRSF_FRAMETYPE_DEVICE_PING &&
+        newRole == ELRS_ROLE_TX &&
+        (long)(s_elrs_lua_session_until_ms - millis()) > 0)
         send_crsf_device_info();
 
     if (!firstSeen || type == CRSF_FRAMETYPE_DEVICE_INFO)
@@ -1696,7 +1823,10 @@ static void onCrsfExtendedFrame(uint8_t sourceAddr, uint8_t type) {
 static void onCrsfDeviceInfo(const uint8_t *serial4, const char *name, uint8_t sourceAddr) {
     // Accept DEVICE_INFO from the CRSF TX module regardless of serial number.
     // ELRS 3.x uses a real MCU UID, not the string "ELRS", so don't check serial4.
-    (void)serial4;
+    if (serial4 && sourceAddr == CRSF_ADDRESS_CRSF_TRANSMITTER) {
+        memcpy(elrs_tx_module_serial, serial4, sizeof(elrs_tx_module_serial));
+        elrs_tx_serial_valid = true;
+    }
     if (sourceAddr != CRSF_ADDRESS_CRSF_TRANSMITTER) return;
     lastElrsFrameReceived = millis();
     tx_type = TX_TYPE_ELRS;
@@ -1714,15 +1844,73 @@ static void onCrsfDeviceInfo(const uint8_t *serial4, const char *name, uint8_t s
         memcpy(elrs_device_name, name, n);
     }
     if (elrs_role == ELRS_ROLE_TX) {
-        Serial.println("[TX] Detected ELRS transmitter");
-        if (elrs_device_name[0]) { Serial.print("[TX] Device name: "); Serial.println(elrs_device_name); }
+        // ELRS can send DEVICE_INFO very often once the Lua/session link is active; log only on change.
+        if (strncmp(elrs_device_name, s_elrs_logged_device_name, sizeof(elrs_device_name)) != 0) {
+            memcpy(s_elrs_logged_device_name, elrs_device_name, sizeof(elrs_device_name));
+            s_elrs_logged_device_name[sizeof(s_elrs_logged_device_name) - 1] = '\0';
+            Serial.println("[TX] Detected ELRS transmitter");
+            if (elrs_device_name[0]) {
+                Serial.print("[TX] Device name: ");
+                Serial.println(elrs_device_name);
+            }
+        }
+        if ((long)(s_elrs_lua_session_until_ms - millis()) > 0) {
+            s_elrs_lua_ping_boost_until_ms = millis() + RC_ELRS_LUA_PING_BOOST_MS;
+            s_elrs_lua_ping_pending_immediate = true;
+        }
     } else if (elrs_role == ELRS_ROLE_RX) {
         Serial.println("[TX] Wrong mode: ELRS RX (need TX module)");
     }
 }
 
+static void elrs_lua_session_begin(unsigned long durationMs) {
+    s_elrs_lua_session_until_ms = millis() + durationMs;
+    s_elrs_lua_ping_boost_until_ms = millis() + RC_ELRS_LUA_PING_BOOST_MS;
+    s_elrs_lua_ping_pending_immediate = true;
+}
+
+static void elrs_lua_session_end(void) {
+    s_elrs_lua_session_until_ms = 0;
+    s_elrs_lua_ping_boost_until_ms = 0;
+    s_elrs_lua_ping_pending_immediate = false;
+}
+
 // Announce ourselves to the ELRS TX module as a Lua/config client.
 // ELRS TX requires a DEVICE_INFO handshake before it will respond to PARAMETER_READ.
+static void elrs_queue_device_ping_variants(void) {
+    // EdgeTX Lua examples use a broadcast DEVICE_PING with handset origin 0xEA.
+    crsfSerial.queueExtendedPacketRaw(
+        CRSF_ADDRESS_RADIO_TRANSMITTER,
+        CRSF_ADDRESS_BROADCAST,
+        CRSF_ADDRESS_RADIO_TRANSMITTER,
+        CRSF_FRAMETYPE_DEVICE_PING,
+        nullptr, 0);
+    // Keep the direct-to-TX form as well; some SimpleTX captures show 0xEE here.
+    crsfSerial.queueExtendedPacketRaw(
+        CRSF_ADDRESS_CRSF_TRANSMITTER,
+        CRSF_ADDRESS_CRSF_TRANSMITTER,
+        CRSF_ADDRESS_RADIO_TRANSMITTER,
+        CRSF_FRAMETYPE_DEVICE_PING,
+        nullptr, 0);
+}
+
+static void elrs_queue_lua_packet_variants(uint8_t type, const void *payload, uint8_t len) {
+    // ELRS Lua parameter traffic is usually sourced from 0xEF, but radios differ on the
+    // outer sync/device byte. Send both observed header variants to maximize compatibility.
+    crsfSerial.queueExtendedPacketRaw(
+        CRSF_ADDRESS_CRSF_TRANSMITTER,
+        CRSF_ADDRESS_CRSF_TRANSMITTER,
+        CRSF_ADDRESS_ELRS_LUA,
+        type,
+        payload, len);
+    crsfSerial.queueExtendedPacketRaw(
+        CRSF_ADDRESS_RADIO_TRANSMITTER,
+        CRSF_ADDRESS_CRSF_TRANSMITTER,
+        CRSF_ADDRESS_ELRS_LUA,
+        type,
+        payload, len);
+}
+
 static void send_crsf_device_info(void) {
 #if defined(PICO_RP2350) && PICO_RP2350
     static const char devName[] = "Dhanush";
@@ -1731,48 +1919,95 @@ static void send_crsf_device_info(void) {
 #endif
     uint8_t payload[32];
     uint8_t offset = 0;
-    memcpy(payload, devName, sizeof(devName));   // includes null terminator
+    memcpy(payload + offset, devName, sizeof(devName));   // includes null terminator
     offset += sizeof(devName);
-    uint32_t serial = 0x52435246UL;              // "RCRF" as LE identifier
+    uint32_t serial = htobe32(0x52435246UL);     // "RCRF"
     memcpy(payload + offset, &serial, 4); offset += 4;
-    uint32_t ver = 0x00010000UL;
+    uint32_t ver = htobe32(0x00010000UL);
     memcpy(payload + offset, &ver, 4); offset += 4;   // hwVer
     memcpy(payload + offset, &ver, 4); offset += 4;   // swVer
     payload[offset++] = 0;   // fieldCnt (we have no params to expose)
     payload[offset++] = 0;   // paramVer
-    crsfSerial.queueExtendedPacket(
-        CRSF_ADDRESS_CRSF_TRANSMITTER,
-        CRSF_ADDRESS_RADIO_TRANSMITTER,
+    elrs_queue_lua_packet_variants(
         CRSF_FRAMETYPE_DEVICE_INFO,
         payload, offset);
+}
+
+/** EdgeTX-style HANDSET_TIMING: inner dest EA / orig EE; first wire byte EE (cannot use queueExtendedPacket). */
+static void crsfx_enqueue_handset_timing_frame(void) {
+    uint8_t buf[CRSF_MAX_PACKET_LEN];
+    crsf_ext_header_t *const ext = (crsf_ext_header_t *)buf;
+    ext->device_addr = CRSF_ADDRESS_CRSF_TRANSMITTER;
+    ext->frame_size = CRSF_EXT_FRAME_SIZE((uint8_t)sizeof(crsf_sync_packet_t));
+    ext->type = CRSF_FRAMETYPE_HANDSET;
+    ext->dest_addr = CRSF_ADDRESS_RADIO_TRANSMITTER;
+    ext->orig_addr = CRSF_ADDRESS_CRSF_TRANSMITTER;
+    crsf_sync_packet_t *sync = (crsf_sync_packet_t *)ext->payload;
+    sync->subType = CRSF_HANDSET_SUBCMD_TIMING;
+    const uint32_t interval_us = 2000u;
+    sync->rate = __builtin_bswap32(interval_us * 10u);
+    sync->offset = 0;
+    const uint8_t pl = (uint8_t)sizeof(crsf_sync_packet_t);
+    ext->payload[pl] = crsfRouter.crsf_crc.calc(&buf[2], (uint16_t)(pl + 3u));
+    crsfSerial.queueCrsfRawTx(buf, (uint8_t)(2u + ext->frame_size));
+}
+
+/** ELRS TXModuleEndpoint treats PARAMETER_WRITE(field 0, val 0) as linkstat/session poke (Lua crossfireTelemetryPush 0x2D). */
+static void elrs_linkstat_handshake_write(void) {
+    uint8_t poke[2] = { 0, 0 };
+    elrs_queue_lua_packet_variants(
+        CRSF_FRAMETYPE_PARAMETER_WRITE,
+        poke,
+        sizeof(poke));
 }
 
 static void elrs_request_param_chunk(uint8_t fieldId, uint8_t chunkIndex) {
     Serial.printf("[ELRS PARAM_READ] field=%u chunk=%u\n", fieldId, chunkIndex);
     uint8_t req[2] = { fieldId, chunkIndex };
-    crsfSerial.queueExtendedPacket(CRSF_ADDRESS_CRSF_TRANSMITTER, CRSF_ADDRESS_RADIO_TRANSMITTER, CRSF_FRAMETYPE_PARAMETER_READ, req, 2);
+    elrs_queue_lua_packet_variants(CRSF_FRAMETYPE_PARAMETER_READ, req, 2);
+    flush_crsf_tx_queue();
 }
 
-static bool elrs_discover_params(bool needPhrase, bool needBind, unsigned long timeoutMs) {
+static bool elrs_discover_params(bool needPhrase, bool needBind, bool needWifi, unsigned long timeoutMs) {
     if ((!needPhrase || elrs_phrase_field_id != ELRS_PARAM_FIELD_NONE) &&
-        (!needBind || elrs_bind_cmd_field_id != ELRS_PARAM_FIELD_NONE)) {
+        (!needBind || elrs_bind_cmd_field_id != ELRS_PARAM_FIELD_NONE) &&
+        (!needWifi || elrs_wifi_cmd_field_id != ELRS_PARAM_FIELD_NONE)) {
         return true;
     }
 
-    // Enable verbose UART logging for the entire discovery window so we can see
-    // every raw byte in both directions and every parsed/rejected frame.
+#if defined(CRSF_CORE1_CHANNELS)
+    // ELRS Buddy (web UART) owns the wire during config; here Core 1 would still send ~500 Hz RC frames
+    // and splice incoming telemetry/Lua frames — pause RC so the CRSF parser sees whole packets.
+    struct Core1PauseRcDuringElrsLua {
+        Core1PauseRcDuringElrsLua() {
+            s_core1_suppress_rc_during_elrs_lua = true;
+            __dmb();
+            // Longer than SIMPLETX spacing so Core 1 does not enqueue another RC_CHANNELS mid-handshake.
+            delayMicroseconds(3500);
+        }
+        ~Core1PauseRcDuringElrsLua() {
+            s_core1_suppress_rc_during_elrs_lua = false;
+            __dmb();
+        }
+    } pauseCore1Rc;
+#endif
+
+#if defined(RC_ELRS_VERBOSE_PARAM_DISCOVERY)
     crsfSerial.setVerboseMode(true);
+#endif
+    elrs_lua_session_begin(timeoutMs + 1000UL);
 
     // Send DEVICE_PING to (re-)establish the Lua session on the ELRS TX.
     // ELRS TX firmware only responds to PARAMETER_READ when its luaConnected flag is set,
     // which is triggered by receiving a DEVICE_PING from the radio — not by DEVICE_INFO.
     // The session from boot detection expires after ~10-15 s, so we must refresh it here.
     Serial.println("[ELRS] Sending DEVICE_PING to start Lua session...");
-    crsfSerial.queueExtendedPacket(
-        CRSF_ADDRESS_CRSF_TRANSMITTER,
-        CRSF_ADDRESS_RADIO_TRANSMITTER,
-        CRSF_FRAMETYPE_DEVICE_PING,
-        nullptr, 0);
+    elrs_queue_device_ping_variants();
+    for (unsigned i = 0; i < 3u; i++) {
+        crsfx_enqueue_handset_timing_frame();
+        elrs_linkstat_handshake_write();
+    }
+    flush_crsf_tx_queue();
     // Process incoming bytes for ~120 ms while the TX opens its Lua session and
     // optionally sends DEVICE_INFO back.
     {
@@ -1784,29 +2019,40 @@ static bool elrs_discover_params(bool needPhrase, bool needBind, unsigned long t
         }
     }
 
-    elrs_param_chunk_next = 1;
+    elrs_param_probe_field = 0;
+    elrs_param_chunk_next = elrs_param_probe_field;
     elrs_param_chunk_index = 0;
     elrs_param_read_in_progress = true;
     elrs_last_param_entry_ms = millis();
-    Serial.printf("[ELRS] Starting param discovery (needPhrase=%u needBind=%u timeout=%lums)\n",
-                  needPhrase, needBind, timeoutMs);
-    elrs_request_param_chunk(elrs_param_chunk_next, elrs_param_chunk_index);
+    Serial.printf("[ELRS] Starting param discovery (needPhrase=%u needBind=%u needWifi=%u timeout=%lums)\n",
+                  needPhrase, needBind, needWifi, timeoutMs);
+    elrs_request_param_chunk(elrs_param_probe_field, elrs_param_chunk_index);
 
     unsigned long deadline = millis() + timeoutMs;
     while (millis() < deadline) {
         receiveUARTMessages();
         sendChannels();  // keep channel packets flowing so the TX link stays healthy
         if ((!needPhrase || elrs_phrase_field_id != ELRS_PARAM_FIELD_NONE) &&
-            (!needBind || elrs_bind_cmd_field_id != ELRS_PARAM_FIELD_NONE)) {
+            (!needBind || elrs_bind_cmd_field_id != ELRS_PARAM_FIELD_NONE) &&
+            (!needWifi || elrs_wifi_cmd_field_id != ELRS_PARAM_FIELD_NONE)) {
             elrs_param_read_in_progress = false;
+            elrs_lua_session_end();
+#if defined(RC_ELRS_VERBOSE_PARAM_DISCOVERY)
             crsfSerial.setVerboseMode(false);
+#endif
             return true;
         }
         if (!elrs_param_read_in_progress)
             break;
-        // Retry the current request if we haven't received a response in 250 ms.
-        if (millis() - elrs_last_param_entry_ms > 250) {
-            Serial.printf("[ELRS] Retry param request field=%u chunk=%u\n",
+        // Keep probing the field range even if some ids do not answer.
+        if (millis() - elrs_last_param_entry_ms > RC_ELRS_PARAM_PROBE_INTERVAL_MS) {
+            if (elrs_param_chunk_index == 0) {
+                elrs_param_probe_field = (uint8_t)(elrs_param_probe_field + 1);
+                if (elrs_param_probe_field >= ELRS_PARAM_MAX_CHUNKS)
+                    break;
+                elrs_param_chunk_next = elrs_param_probe_field;
+            }
+            Serial.printf("[ELRS] Probe param request field=%u chunk=%u\n",
                           elrs_param_chunk_next, elrs_param_chunk_index);
             elrs_last_param_entry_ms = millis();
             elrs_request_param_chunk(elrs_param_chunk_next, elrs_param_chunk_index);
@@ -1815,36 +2061,81 @@ static bool elrs_discover_params(bool needPhrase, bool needBind, unsigned long t
     }
 
     elrs_param_read_in_progress = false;
+    elrs_lua_session_end();
+#if defined(RC_ELRS_VERBOSE_PARAM_DISCOVERY)
     crsfSerial.setVerboseMode(false);
+#endif
     return (!needPhrase || elrs_phrase_field_id != ELRS_PARAM_FIELD_NONE) &&
-           (!needBind || elrs_bind_cmd_field_id != ELRS_PARAM_FIELD_NONE);
+           (!needBind || elrs_bind_cmd_field_id != ELRS_PARAM_FIELD_NONE) &&
+           (!needWifi || elrs_wifi_cmd_field_id != ELRS_PARAM_FIELD_NONE);
 }
 
-// CRSF type: 0x0A = STRING, 0x0D = COMMAND
+// CRSF type: 0x0A = STRING, 0x0D = COMMAND; paramType 0 = SETTINGS_ENTRY continuation chunk (no label)
 static void onCrsfParameterEntry(uint8_t fieldId, uint8_t paramType, uint8_t chunksRemaining, const char *label, const uint8_t *value, uint8_t valueLen) {
-    if (!label) return;
-    elrs_last_param_entry_ms = millis();
-    Serial.printf("[ELRS PARAM] field=%u type=%u chunks=%u label=\"%s\"\n", fieldId, paramType, chunksRemaining, label);
+    (void)value;
+    (void)valueLen;
+    const char *lab = label ? label : "";
+    const bool labeled = lab[0] != '\0';
+    auto label_matched_or_io = [&]() {
+        elrs_last_param_entry_ms = millis();
+    };
+    auto scan_io = [&]() {
+        if (!elrs_param_read_in_progress)
+            return false;
+        elrs_last_param_entry_ms = millis();
+        return true;
+    };
+
+    if (labeled) {
+        Serial.printf("[ELRS PARAM] field=%u type=%u chunks=%u label=\"%s\"\n", fieldId, paramType, chunksRemaining, lab);
+    } else {
+        Serial.printf("[ELRS PARAM] field=%u type=%u chunks=%u continuation len=%u\n",
+                      fieldId, paramType, chunksRemaining, (unsigned)valueLen);
+    }
+
     // Match "Binding Phrase" / "binding phrase" (ExpressLRS)
-    if (paramType == 0x0A) {
-        if (strstr(label, "inding") && strstr(label, "hrase")) {
+    if (labeled && paramType == 0x0A) {
+        if (strstr(lab, "inding") && strstr(lab, "hrase")) {
             elrs_phrase_field_id = fieldId;
+            label_matched_or_io();
             memset(elrs_binding_phrase, 0, sizeof(elrs_binding_phrase));
             if (value && valueLen > 0) {
                 uint8_t n = valueLen;
-                if (value[0] == 0 && valueLen > 1) { n = valueLen - 1; value = &value[1]; }  // optional max_len byte
-                if (n >= sizeof(elrs_binding_phrase)) n = sizeof(elrs_binding_phrase) - 1;
-                memcpy(elrs_binding_phrase, value, n);
+                const uint8_t *vv = value;
+                if (vv[0] == 0 && valueLen > 1) {
+                    n = valueLen - 1;
+                    vv = &vv[1];
+                } // optional max_len byte
+                if (n >= sizeof(elrs_binding_phrase))
+                    n = sizeof(elrs_binding_phrase) - 1;
+                memcpy(elrs_binding_phrase, vv, n);
             }
         }
-    } else if (paramType == 0x0D) {
-        if (strstr(label, "ind") && !strstr(label, "hrase")) {
-            elrs_bind_cmd_field_id = fieldId;
+    } else if (labeled && paramType == 0x0D) {
+        char lower[48];
+        size_t lowerLen = strlen(lab);
+        if (lowerLen >= sizeof(lower))
+            lowerLen = sizeof(lower) - 1;
+        for (size_t i = 0; i < lowerLen; i++) {
+            char c = lab[i];
+            lower[i] = (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c;
         }
-        // Match "Enable WiFi Update", "WiFi Connectivity", etc.  Take the first WiFi COMMAND found.
-        if (elrs_wifi_cmd_field_id == ELRS_PARAM_FIELD_NONE &&
-            (strstr(label, "WiFi") || strstr(label, "wifi") || strstr(label, "Wifi"))) {
+        lower[lowerLen] = '\0';
+        // COMMAND rows only; folders use CRSF_FOLDER and must not steal the bind slot.
+        if (strstr(lower, "bind") != nullptr && strstr(lower, "phrase") == nullptr) {
+            elrs_bind_cmd_field_id = fieldId;
+            label_matched_or_io();
+            Serial.printf("[ELRS PARAM] Bind cmd field=%u\n", fieldId);
+        }
+        const bool hasWifi = strstr(lower, "wifi") != nullptr;
+        const bool hasRx = strstr(lower, "rx") != nullptr;
+        if (hasWifi && hasRx) {
+            elrs_rx_wifi_cmd_field_id = fieldId;
+            label_matched_or_io();
+            Serial.printf("[ELRS PARAM] Rx WiFi cmd field=%u\n", fieldId);
+        } else if (elrs_wifi_cmd_field_id == ELRS_PARAM_FIELD_NONE && hasWifi) {
             elrs_wifi_cmd_field_id = fieldId;
+            label_matched_or_io();
             Serial.printf("[ELRS PARAM] WiFi cmd field=%u\n", fieldId);
         }
     }
@@ -1858,13 +2149,25 @@ static void onCrsfParameterEntry(uint8_t fieldId, uint8_t paramType, uint8_t chu
         return;
     }
 
-    if (elrs_param_read_in_progress && chunksRemaining > 0) {
+    if (!elrs_param_read_in_progress)
+        return;
+
+    if (!scan_io())
+        return;
+
+    if (chunksRemaining > 0) {
+        elrs_param_chunk_next = fieldId;
         elrs_param_chunk_index++;
         elrs_request_param_chunk(fieldId, elrs_param_chunk_index);
-    } else if (elrs_param_read_in_progress && fieldId < ELRS_PARAM_MAX_CHUNKS) {
-        elrs_param_chunk_next = fieldId + 1;
+    } else if (elrs_param_probe_field < ELRS_PARAM_MAX_CHUNKS) {
+        if (fieldId >= elrs_param_probe_field)
+            elrs_param_probe_field = (uint8_t)(fieldId + 1);
+        elrs_param_chunk_next = elrs_param_probe_field;
         elrs_param_chunk_index = 0;
-        elrs_request_param_chunk(elrs_param_chunk_next, 0);
+        if (elrs_param_probe_field < ELRS_PARAM_MAX_CHUNKS)
+            elrs_request_param_chunk(elrs_param_chunk_next, 0);
+        else
+            elrs_param_read_in_progress = false;
     } else {
         elrs_param_read_in_progress = false;
     }
@@ -1878,14 +2181,136 @@ static bool elrs_write_param_string(uint8_t fieldId, const char *str) {
     buf[0] = fieldId;
     memcpy(&buf[1], str, len);
     buf[1 + len] = '\0';
-    crsfSerial.queueExtendedPacket(CRSF_ADDRESS_CRSF_TRANSMITTER, CRSF_ADDRESS_RADIO_TRANSMITTER, CRSF_FRAMETYPE_PARAMETER_WRITE, buf, (uint8_t)(1 + len + 1));
+    elrs_queue_lua_packet_variants(CRSF_FRAMETYPE_PARAMETER_WRITE, buf, (uint8_t)(1 + len + 1));
     return true;
 }
 
 static bool elrs_write_param_byte(uint8_t fieldId, uint8_t val) {
     uint8_t buf[2] = { fieldId, val };
-    crsfSerial.queueExtendedPacket(CRSF_ADDRESS_CRSF_TRANSMITTER, CRSF_ADDRESS_RADIO_TRANSMITTER, CRSF_FRAMETYPE_PARAMETER_WRITE, buf, 2);
+    elrs_queue_lua_packet_variants(CRSF_FRAMETYPE_PARAMETER_WRITE, buf, 2);
     return true;
+}
+
+static void apply_handset_uart_physical(bool inverted) {
+    Serial2.setTX(CRSF_TX_PIN);
+    Serial2.setRX(CRSF_RX_PIN);
+#if defined(ARDUINO_ARCH_RP2040)
+    // Earle Philhower SerialUART: must be set before each begin(); ok after end().
+    Serial2.setInvertTX(inverted);
+    Serial2.setInvertRX(inverted);
+#else
+    (void)inverted;
+#endif
+}
+
+/** Returns true if ELRS was identified within dwellMs. Sets s_handset_serial_baud / s_handset_serial_inverted. */
+static bool attempt_handset_uart(uint32_t baud, bool invert, unsigned dwellMs) {
+    Serial2.end();
+    delay(3);
+    apply_handset_uart_physical(invert);
+    while (Serial2.available())
+        (void)Serial2.read();
+    crsfSerial.resetRxParser();
+    crsfSerial.begin(baud);
+    crsfSerial.onDeviceInfo = onCrsfDeviceInfo;
+    crsfSerial.onExtendedFrame = onCrsfExtendedFrame;
+    crsfSerial.onParameterEntry = onCrsfParameterEntry;
+    crsfSerial.onPacketLinkStatistics = onCrsfLinkStatistics;
+    crsfSerial.onPacketBattery = onCrsfBattery;
+    elrs_queue_device_ping_variants();
+    flush_crsf_tx_queue();
+
+    uint16_t neutralCh[8];
+    for (int i = 0; i < 8; i++) neutralCh[i] = RC_CHANNEL_MID;
+    const uint32_t spacingUs = (uint32_t)CRSFSerialConnector::SIMPLETX_FRAME_SPACING_US;
+    const uint16_t bootMax = CRSFSerialConnector::SIMPLETX_BOOT_CHANNEL_PACKETS;
+    uint32_t nextWarmupUs = micros();
+    uint16_t warmupSent = 0;
+
+    const unsigned long endMs = millis() + dwellMs;
+    while ((long)(millis() - endMs) < 0) {
+        crsfSerial.loop();
+        flush_crsf_tx_queue();
+
+        if (warmupSent < bootMax) {
+            const uint32_t now = micros();
+            if ((int32_t)(now - nextWarmupUs) >= 0) {
+                uint8_t frm[CRSFSerialConnector::CRSF_PACKET_RC_CHANNELS_FULL];
+                simpletx_crsf::prepareDataPacketFrom8Us(frm, neutralCh, (int16_t)simpletx_crsf::SIMPLETX_CHANNELS_DEFAULT_CENTER_US);
+                Serial2.write(frm, sizeof(frm));
+                warmupSent++;
+                nextWarmupUs += spacingUs;
+            }
+        }
+
+        if (tx_type == TX_TYPE_ELRS) {
+            s_handset_serial_baud = baud;
+            s_handset_serial_inverted = invert;
+            Serial.printf("[TX] CRSF UART lock: %lu baud invert=%u\n", (unsigned long)baud, (unsigned)(invert ? 1u : 0u));
+            return true;
+        }
+        delay(1);
+    }
+    return false;
+}
+
+static void flush_crsf_tx_queue(void) {
+#if defined(CRSF_CORE1_CHANNELS)
+    crsfSerial.flushOutboundQueue();
+#endif
+}
+
+/** SimpleTX phased SETTINGS_WRITE packets (bit-identical 8-byte frames from SimpleTxCrsf) */
+static void elrs_simpletx_settings_burst_tx(void) {
+    auto burst5 = [&](uint8_t cmd, uint8_t val) {
+        uint8_t frm[8];
+        simpletx_crsf::prepareCmdPacket(frm, cmd, val);
+        for (unsigned n = 0; n < 5; n++)
+            crsfSerial.queueCrsfRawTx(frm, sizeof(frm));
+    };
+    burst5(0x01, (uint8_t)RC_SIMPLETX_ELRS_PKT_RATE);
+    burst5(0x06, (uint8_t)RC_SIMPLETX_ELRS_POWER);
+    burst5(0x07, (uint8_t)RC_SIMPLETX_ELRS_DYNAMIC);
+    flush_crsf_tx_queue();
+}
+
+// kkbin505 SimpleTX crsf.h indices (handset SETTINGS_WRITE short packets to ELRS TX Lua)
+#if !defined(RC_SIMPLETX_ELRS_CMD_BIND)
+#define RC_SIMPLETX_ELRS_CMD_BIND 0x11
+#endif
+#if !defined(RC_SIMPLETX_ELRS_CMD_WIFI)
+#define RC_SIMPLETX_ELRS_CMD_WIFI 0x0F
+#endif
+#if !defined(RC_SIMPLETX_ELRS_CMD_START)
+#define RC_SIMPLETX_ELRS_CMD_START 0x04
+#endif
+
+static void elrs_simpletx_bind_burst(void) {
+    uint8_t frm[8];
+    simpletx_crsf::prepareCmdPacket(frm, RC_SIMPLETX_ELRS_CMD_BIND, RC_SIMPLETX_ELRS_CMD_START);
+    for (unsigned n = 0; n < 5; n++)
+        crsfSerial.queueCrsfRawTx(frm, sizeof(frm));
+    flush_crsf_tx_queue();
+}
+
+static void elrs_simpletx_wifi_burst(void) {
+    uint8_t frm[8];
+    simpletx_crsf::prepareCmdPacket(frm, RC_SIMPLETX_ELRS_CMD_WIFI, RC_SIMPLETX_ELRS_CMD_START);
+    for (unsigned n = 0; n < 5; n++)
+        crsfSerial.queueCrsfRawTx(frm, sizeof(frm));
+    flush_crsf_tx_queue();
+}
+
+/** CRSF COMMAND: RX bind subcommand (Lua: { EE, EA, 0x10, 0x01 } routing). */
+static void elrs_send_rx_bind_crsf_command(void) {
+    uint8_t pay[2] = { CRSF_COMMAND_SUBCMD_RX, CRSF_COMMAND_SUBCMD_RX_BIND };
+    crsfSerial.queueExtendedPacket(
+        CRSF_ADDRESS_CRSF_TRANSMITTER,
+        CRSF_ADDRESS_RADIO_TRANSMITTER,
+        CRSF_FRAMETYPE_COMMAND,
+        pay,
+        sizeof(pay));
+    flush_crsf_tx_queue();
 }
 
 static void run_tx_detection(void) {
@@ -1896,64 +2321,97 @@ static void run_tx_detection(void) {
     elrs_phrase_field_id = ELRS_PARAM_FIELD_NONE;
     elrs_bind_cmd_field_id = ELRS_PARAM_FIELD_NONE;
     elrs_wifi_cmd_field_id = ELRS_PARAM_FIELD_NONE;
+    elrs_rx_wifi_cmd_field_id = ELRS_PARAM_FIELD_NONE;
     elrs_binding_phrase[0] = '\0';
     lastElrsFrameReceived = 0;
+    telemetryValid = false;
+    s_elrs_link_stats_valid = false;
     memset(elrs_device_name, 0, sizeof(elrs_device_name));
+    memset(elrs_tx_module_serial, 0, sizeof(elrs_tx_module_serial));
+    elrs_tx_serial_valid = false;
+    memset(s_elrs_logged_device_name, 0, sizeof(s_elrs_logged_device_name));
     lastPongReceived = 0;
-    Serial.println("[TX] Detecting TX type...");
-    
-    // Phase 1: Custom PING
-    uartProto.sendPing();
-    lastPingSent = millis();
-    const unsigned long detectTimeout = 400;
-    unsigned long deadline = millis() + detectTimeout;
-    while (millis() < deadline) {
-        uartProto.loop();
-        if (lastPongReceived != 0) {
-            tx_type = TX_TYPE_CUSTOM;
-            Serial.println("[TX] Detected: Custom TX (PONG)");
-            detecting_tx = false;
-#if defined(CRSF_CORE1_CHANNELS)
-            s_core1_send_elrs_channels = false;
+    Serial.println("[TX] Detecting ELRS on CRSF uart...");
+
+    bool found = false;
+#if defined(RC_CRSF_DISABLE_UART_PROBE) && (RC_CRSF_DISABLE_UART_PROBE != 0)
+    const bool invFix =
+#if defined(RC_TX_MODULE_UART_INVERT) && (RC_TX_MODULE_UART_INVERT != 0)
+        true;
+#else
+        false;
 #endif
-            return;
+    found = attempt_handset_uart(CRSFSerialConnector::CRSF_BAUDRATE, invFix, 2800u);
+#else
+    {
+        const uint32_t candidates[] = {
+            CRSFSerialConnector::CRSF_BAUDRATE,
+            400000UL,
+            420000UL,
+            115200UL,
+            921600UL,
+            1870000UL,
+        };
+        uint32_t uniq[8];
+        unsigned nUniq = 0;
+        for (unsigned k = 0; k < sizeof(candidates) / sizeof(candidates[0]); k++) {
+            uint32_t b = candidates[k];
+            bool dup = false;
+            for (unsigned i = 0; i < nUniq; i++) {
+                if (uniq[i] == b) {
+                    dup = true;
+                    break;
+                }
+            }
+            if (!dup && nUniq < sizeof(uniq) / sizeof(uniq[0]))
+                uniq[nUniq++] = b;
         }
-        delay(2);
+        for (int invPass = 0; invPass < 2 && !found; invPass++) {
+            for (unsigned bi = 0; bi < nUniq && !found; bi++) {
+                found = attempt_handset_uart(uniq[bi], invPass != 0, (unsigned)RC_CRSF_UART_PROBE_DWELL_MS);
+            }
+        }
     }
-    
-    // Phase 2: CRSF DEVICE_PING to 0xEE
-    while (Serial2.available()) Serial2.read();
-    crsfSerial.begin(CRSFSerialConnector::CRSF_BAUDRATE);
-    crsfSerial.onDeviceInfo = onCrsfDeviceInfo;
-    crsfSerial.queueExtendedPacket(CRSF_ADDRESS_CRSF_TRANSMITTER, CRSF_ADDRESS_RADIO_TRANSMITTER, CRSF_FRAMETYPE_DEVICE_PING, nullptr, 0);
-    deadline = millis() + detectTimeout;
-    while (millis() < deadline) {
-        crsfSerial.loop();
-        if (tx_type == TX_TYPE_ELRS) {
-            if (elrs_device_info_received)
-                Serial.println("[TX] Detected: ELRS TX (DEVICE_INFO)");
-            else if (elrs_role == ELRS_ROLE_TX)
-                Serial.println("[TX] Detected: ELRS TX (CRSF traffic)");
-            else if (elrs_role == ELRS_ROLE_RX)
-                Serial.println("[TX] Detected: ELRS RX (CRSF traffic)");
-            else
-                Serial.println("[TX] Detected: ELRS device (CRSF traffic)");
-            // Register ourselves so the TX will accept PARAMETER_READ requests.
-            if (elrs_role == ELRS_ROLE_TX)
-                send_crsf_device_info();
-            detecting_tx = false;
-#if defined(CRSF_CORE1_CHANNELS)
-            s_core1_send_elrs_channels = (elrs_role == ELRS_ROLE_TX);
+    if (!found) {
+        Serial.println("[TX] CRSF probe exhausted; reopening compile-default UART (check wiring / ELRS handset baud in Lua).");
+        Serial2.end();
+        delay(3);
+#if defined(RC_TX_MODULE_UART_INVERT) && (RC_TX_MODULE_UART_INVERT != 0)
+        apply_handset_uart_physical(true);
+        s_handset_serial_inverted = true;
+#else
+        apply_handset_uart_physical(false);
+        s_handset_serial_inverted = false;
 #endif
-            return;
-        }
-        delay(2);
+        while (Serial2.available())
+            (void)Serial2.read();
+        crsfSerial.resetRxParser();
+        crsfSerial.begin(CRSFSerialConnector::CRSF_BAUDRATE);
+        crsfSerial.onDeviceInfo = onCrsfDeviceInfo;
+        crsfSerial.onExtendedFrame = onCrsfExtendedFrame;
+        crsfSerial.onParameterEntry = onCrsfParameterEntry;
+        crsfSerial.onPacketLinkStatistics = onCrsfLinkStatistics;
+        crsfSerial.onPacketBattery = onCrsfBattery;
+        s_handset_serial_baud = CRSFSerialConnector::CRSF_BAUDRATE;
     }
-    
-    Serial.println("[TX] Detection: No TX responded (Unknown)");
+#endif
+
+    if (found) {
+        if (elrs_device_info_received)
+            Serial.println("[TX] Detected: ELRS TX (DEVICE_INFO)");
+        else if (elrs_role == ELRS_ROLE_TX)
+            Serial.println("[TX] Detected: ELRS TX (CRSF traffic)");
+        else if (elrs_role == ELRS_ROLE_RX)
+            Serial.println("[TX] Detected: ELRS RX (CRSF traffic)");
+        else
+            Serial.println("[TX] Detected: ELRS device (CRSF traffic)");
+    } else {
+        Serial.println("[TX] Detection: No TX responded (Unknown)");
+    }
+
     detecting_tx = false;
 #if defined(CRSF_CORE1_CHANNELS)
-    s_core1_send_elrs_channels = false;
+    s_core1_send_elrs_channels = (found && tx_type == TX_TYPE_ELRS && elrs_role == ELRS_ROLE_TX);
 #endif
 }
 
@@ -2031,20 +2489,16 @@ static void rc_proto_get_state(int16_t* adc4, uint16_t* ch8, uint8_t* toggles4) 
 }
 
 static bool rc_proto_set_binding_phrase_rx(const char* phrase, uint8_t len) {
-    if (!tx_connected || !phrase || len == 0 || len > 32) return false;
-    bool sent = uartProto.sendCommandWithPayload(UART_MSG_CMD_SET_BIND_RX, (const uint8_t*)phrase, len);
-    if (sent) {
-        Serial.println("[RC] Forwarded RX binding phrase update command to TX");
-    } else {
-        Serial.println("[RC] Failed to forward RX binding phrase command to TX");
-    }
-    return sent;
+    (void)phrase;
+    (void)len;
+    Serial.println("[RC] RX binding phrase via custom UART not supported on CRSF handset build");
+    return false;
 }
 
 static bool rc_proto_set_binding_phrase_tx(const char* phrase, uint8_t len) {
     if (!phrase || len == 0 || len > 32) return false;
-    if (get_effective_tx_type() == TX_TYPE_ELRS && elrs_role == ELRS_ROLE_TX) {
-        if (elrs_phrase_field_id == ELRS_PARAM_FIELD_NONE && !elrs_discover_params(true, false, 1200))
+    if (tx_type == TX_TYPE_ELRS && elrs_role == ELRS_ROLE_TX) {
+        if (elrs_phrase_field_id == ELRS_PARAM_FIELD_NONE && !elrs_discover_params(true, false, false, RC_ELRS_PARAM_DISCOVERY_MS))
             return false;
         if (elrs_phrase_field_id == ELRS_PARAM_FIELD_NONE) return false;
         char buf[ELRS_PHRASE_MAX + 1];
@@ -2058,10 +2512,8 @@ static bool rc_proto_set_binding_phrase_tx(const char* phrase, uint8_t len) {
         }
         return sent;
     }
-    if (!tx_connected) return false;
-    bool sent = uartProto.sendCommandWithPayload(UART_MSG_CMD_SET_BIND_TX, (const uint8_t*)phrase, len);
-    if (sent) Serial.println("[RC] Forwarded TX binding phrase to custom TX");
-    return sent;
+    (void)tx_connected;
+    return false;
 }
 
 static void rc_proto_get_link_status(uint8_t* txConnected, uint8_t* txPaired, uint8_t* txState) {
@@ -2075,7 +2527,7 @@ static void rc_proto_get_link_status_ex(uint8_t* buf, uint8_t bufLen) {
     buf[0] = tx_connected ? 1 : 0;
     buf[1] = statusValid ? status.pairingState : 0;
     buf[2] = statusValid ? status.connectionState : 0xFF;
-    TxType eff = get_effective_tx_type();
+    TxType eff = tx_type;
     buf[3] = (uint8_t)eff;
     if (bufLen >= 6 && eff == TX_TYPE_ELRS) {
         buf[4] = (uint8_t)elrs_role;  // 1=TX, 2=RX
@@ -2096,7 +2548,7 @@ static void rc_proto_re_detect_tx(void) {
 }
 
 static bool rc_proto_get_elrs_binding_phrase(char* phrase, uint8_t maxLen) {
-    if (!phrase || maxLen == 0 || get_effective_tx_type() != TX_TYPE_ELRS || elrs_role != ELRS_ROLE_TX) return false;
+    if (!phrase || maxLen == 0 || tx_type != TX_TYPE_ELRS || elrs_role != ELRS_ROLE_TX) return false;
     if (elrs_binding_phrase[0]) {
         size_t n = strlen(elrs_binding_phrase);
         if (n >= maxLen) n = maxLen - 1;
@@ -2104,7 +2556,7 @@ static bool rc_proto_get_elrs_binding_phrase(char* phrase, uint8_t maxLen) {
         phrase[n] = '\0';
         return true;
     }
-    if (!elrs_discover_params(true, false, 1200))
+    if (!elrs_discover_params(true, false, false, RC_ELRS_PARAM_DISCOVERY_MS))
         return false;
     if (!elrs_binding_phrase[0]) return false;
     size_t n = strlen(elrs_binding_phrase);
@@ -2115,38 +2567,66 @@ static bool rc_proto_get_elrs_binding_phrase(char* phrase, uint8_t maxLen) {
 }
 
 static bool rc_proto_enter_pairing_mode(void) {
-    if (get_effective_tx_type() == TX_TYPE_ELRS && elrs_role == ELRS_ROLE_TX) {
-        if (elrs_bind_cmd_field_id == ELRS_PARAM_FIELD_NONE && !elrs_discover_params(false, true, 1200))
-            return false;
-        if (elrs_bind_cmd_field_id == ELRS_PARAM_FIELD_NONE) return false;
-        bool sent = elrs_write_param_byte(elrs_bind_cmd_field_id, 0x01);  // CLICK = start bind
-        if (sent) Serial.println("[RC] ELRS bind command sent (CRSF param)");
-        return sent;
+    if (tx_type != TX_TYPE_ELRS || elrs_role != ELRS_ROLE_TX)
+        return false;
+
+    if (elrs_bind_cmd_field_id == ELRS_PARAM_FIELD_NONE &&
+        !elrs_discover_params(false, true, false, RC_ELRS_PARAM_DISCOVERY_MS)) {
+        Serial.println("[RC] Failed to discover ELRS bind command");
+        return false;
     }
-    if (!tx_connected) return false;
-    bool sent = uartProto.sendCommand(UART_MSG_CMD_PAIR);
-    if (sent) Serial.println("[RC] Forwarded PAIR command to TX");
-    return sent;
+    if (elrs_bind_cmd_field_id == ELRS_PARAM_FIELD_NONE) {
+        Serial.println("[RC] ELRS bind command unavailable");
+        return false;
+    }
+
+    elrs_lua_session_begin(1000UL);
+    if (!elrs_write_param_byte(elrs_bind_cmd_field_id, 0x01)) {
+        elrs_lua_session_end();
+        Serial.println("[RC] Failed to send ELRS bind Lua command");
+        return false;
+    }
+    flush_crsf_tx_queue();
+    elrs_lua_session_end();
+    Serial.printf("[RC] ELRS bind Lua command sent (field=%u)\n", elrs_bind_cmd_field_id);
+    return true;
 }
 
 static bool rc_proto_enter_wifi_mode(void) {
-    if (get_effective_tx_type() != TX_TYPE_ELRS || elrs_role != ELRS_ROLE_TX) return false;
-    if (elrs_wifi_cmd_field_id == ELRS_PARAM_FIELD_NONE) {
-        // Scan for all params; WiFi typically appears before phrase/bind so
-        // the combined scan will cache it even if phrase/bind are the named goals.
-        elrs_discover_params(true, true, 2000);
-    }
-    if (elrs_wifi_cmd_field_id == ELRS_PARAM_FIELD_NONE) {
-        Serial.println("[RC] ELRS WiFi command param not found");
+    if (tx_type != TX_TYPE_ELRS || elrs_role != ELRS_ROLE_TX)
+        return false;
+
+    if (elrs_wifi_cmd_field_id == ELRS_PARAM_FIELD_NONE &&
+        !elrs_discover_params(false, false, true, RC_ELRS_PARAM_DISCOVERY_MS)) {
+        Serial.println("[RC] Failed to discover ELRS WiFi command");
         return false;
     }
-    bool sent = elrs_write_param_byte(elrs_wifi_cmd_field_id, 0x01);  // CLICK = enable WiFi
-    if (sent) Serial.println("[RC] ELRS WiFi mode command sent");
-    return sent;
+    if (elrs_wifi_cmd_field_id == ELRS_PARAM_FIELD_NONE) {
+        Serial.println("[RC] ELRS WiFi command unavailable");
+        return false;
+    }
+
+    elrs_lua_session_begin(1000UL);
+    if (!elrs_write_param_byte(elrs_wifi_cmd_field_id, 0x01)) {
+        elrs_lua_session_end();
+        Serial.println("[RC] Failed to send ELRS WiFi Lua command");
+        return false;
+    }
+    flush_crsf_tx_queue();
+    elrs_lua_session_end();
+    Serial.printf("[RC] ELRS WiFi Lua command sent (field=%u)\n", elrs_wifi_cmd_field_id);
+    return true;
 }
 
 static void rc_proto_enter_usb_uart_proxy(void) {
-    Serial2.begin(CRSFSerialConnector::CRSF_BAUDRATE);
+#if defined(CRSF_CORE1_CHANNELS) && defined(PICO_RP2350) && PICO_RP2350
+    s_core1_halt_request = true;
+    delay(30);
+#endif
+    Serial2.end();
+    delay(2);
+    apply_handset_uart_physical(s_handset_serial_inverted);
+    Serial2.begin(s_handset_serial_baud);
     while (Serial.available()) Serial.read();
     while (Serial2.available()) Serial2.read();
     Serial.flush();
@@ -2450,12 +2930,15 @@ static void update_tx_battery(void) {
 // Buzzer - Boot Jingle
 // ==========================================
 static void play_boot_jingle(void) {
-    // buzz the led thrice 
     for (int i = 0; i < 3; i++) {
         digitalWrite(BUZZER_PIN, HIGH);
         delay(500);
         digitalWrite(BUZZER_PIN, LOW);
         delay(500);
+    }
+    if (display_ok) {
+        resync_display_viewport();
+        display.display();
     }
     Serial.println("Boot jingle played");
 }

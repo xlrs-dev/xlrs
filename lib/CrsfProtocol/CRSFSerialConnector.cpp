@@ -1,6 +1,22 @@
 #include "CRSFSerialConnector.h"
+#include "SimpleTxCrsf.h"
 
 #include "../../include/debug_ndjson.h"
+
+// True when bytes [2],[3] look like CRSF parent + field type on the FIRST chunk only.
+// Continuation chunks are opaque — ASCII from option strings must not parse as fake types (e.g. 'D'=0x44).
+static bool crsfx_parameterEntryHasTypedFrontMatter(const uint8_t *p, uint8_t len)
+{
+    if (len < 6)
+        return false;
+    const uint8_t parent = p[2];
+    const uint8_t t = (uint8_t)(p[3] & 0x7Fu); // CRSF_FIELD_TYPE_MASK hides flags in bits 7-6 anyway
+    if (parent > 220u)
+        return false;
+    if (t > 15u && t != (uint8_t)CRSF_OUT_OF_RANGE)
+        return false;
+    return true;
+}
 
 #if defined(CRSF_CORE1_CHANNELS)
 mutex_t CRSFSerialConnector::s_queue_mutex;
@@ -21,6 +37,22 @@ CRSFSerialConnector::CRSFSerialConnector(HardwareSerial &port, uint32_t baud)
     crsfRouter.addConnector(this);
 }
 
+namespace {
+
+// The handset UI/config code uses internal logical order A,E,R,T.
+// SimpleTX/ELRS raw RC frames expect A,E,T,R on channels 0..3.
+static void reorderChannelsForSimpleTx(const uint16_t in[8], uint16_t out[8])
+{
+    out[0] = in[0]; // Aileron
+    out[1] = in[1]; // Elevator
+    out[2] = in[3]; // Throttle
+    out[3] = in[2]; // Rudder
+    for (int i = 4; i < 8; i++)
+        out[i] = in[i];
+}
+
+}
+
 void CRSFSerialConnector::setVerboseMode(bool enabled)
 {
     s_verbose_mode = enabled;
@@ -34,10 +66,43 @@ void CRSFSerialConnector::begin(uint32_t baud)
         _port.begin(_baud);
 }
 
+void CRSFSerialConnector::resetRxParser()
+{
+    _parser.Reset();
+}
+
+void CRSFSerialConnector::queueCrsfRawTx(const uint8_t *bytes, uint8_t len)
+{
+    if (!bytes || len == 0) return;
+#if defined(CRSF_CORE1_CHANNELS)
+    pushToQueue(bytes, len);
+#else
+    _port.write(bytes, len);
+#endif
+}
+
+void CRSFSerialConnector::queueSimpleTxRcChannelsPacked8(const uint16_t channels_us[8])
+{
+    uint16_t simpletxOrdered[8];
+    reorderChannelsForSimpleTx(channels_us, simpletxOrdered);
+    uint8_t pkt[CRSFSerialConnector::CRSF_PACKET_RC_CHANNELS_FULL];
+    simpletx_crsf::prepareDataPacketFrom8Us(pkt, simpletxOrdered,
+                                            (int16_t)simpletx_crsf::SIMPLETX_CHANNELS_DEFAULT_CENTER_US);
+    queueCrsfRawTx(pkt, CRSFSerialConnector::CRSF_PACKET_RC_CHANNELS_FULL);
+}
+
 #if defined(CRSF_CORE1_CHANNELS)
 void CRSFSerialConnector::initTxMutex()
 {
     mutex_init(&s_queue_mutex);
+}
+
+void CRSFSerialConnector::flushOutboundQueue()
+{
+    uint8_t buf[64];
+    uint8_t len;
+    while (popFromQueue(buf, &len))
+        _port.write(buf, len);
 }
 
 void CRSFSerialConnector::pushToQueue(const uint8_t* data, uint8_t len)
@@ -66,6 +131,10 @@ bool CRSFSerialConnector::popFromQueue(uint8_t* out, uint8_t* outLen)
     return has;
 }
 
+#endif
+
+#if defined(CRSF_CORE1_CHANNELS)
+
 void CRSFSerialConnector::core1_drainAndSendChannels(const uint16_t channels[8], bool sendChannels)
 {
     uint8_t buf[64];
@@ -74,27 +143,13 @@ void CRSFSerialConnector::core1_drainAndSendChannels(const uint16_t channels[8],
         _port.write(buf, len);
     }
     if (!sendChannels) return;
-    crsf_channels_t packed = {0};
-    auto usTo11 = [](uint16_t us) -> unsigned {
-        return (unsigned)constrain(map(us, 1000, 2000, CRSF_CHANNEL_VALUE_1000, CRSF_CHANNEL_VALUE_2000), CRSF_CHANNEL_VALUE_MIN, CRSF_CHANNEL_VALUE_MAX);
-    };
-    packed.ch0  = usTo11(channels[0]);
-    packed.ch1  = usTo11(channels[1]);
-    packed.ch2  = usTo11(channels[2]);
-    packed.ch3  = usTo11(channels[3]);
-    packed.ch4  = usTo11(channels[4]);
-    packed.ch5  = usTo11(channels[5]);
-    packed.ch6  = usTo11(channels[6]);
-    packed.ch7  = usTo11(channels[7]);
-    packed.ch8  = packed.ch9 = packed.ch10 = packed.ch11 = CRSF_CHANNEL_VALUE_MID;
-    packed.ch12 = packed.ch13 = packed.ch14 = packed.ch15 = CRSF_CHANNEL_VALUE_MID;
-    uint8_t pkt[32];
-    pkt[0] = CRSF_ADDRESS_CRSF_TRANSMITTER;
-    pkt[1] = CRSF_FRAME_RC_CHANNELS_PAYLOAD_SIZE + 2;
-    pkt[2] = CRSF_FRAMETYPE_RC_CHANNELS_PACKED;
-    memcpy(&pkt[3], &packed, CRSF_FRAME_RC_CHANNELS_PAYLOAD_SIZE);
-    pkt[3 + CRSF_FRAME_RC_CHANNELS_PAYLOAD_SIZE] = crsfRouter.crsf_crc.calc(&pkt[2], CRSF_FRAME_RC_CHANNELS_PAYLOAD_SIZE + 1);
-    _port.write(pkt, 4 + CRSF_FRAME_RC_CHANNELS_PAYLOAD_SIZE);
+
+    uint16_t simpletxOrdered[8];
+    reorderChannelsForSimpleTx(channels, simpletxOrdered);
+    uint8_t pkt26[CRSFSerialConnector::CRSF_PACKET_RC_CHANNELS_FULL];
+    simpletx_crsf::prepareDataPacketFrom8Us(pkt26, simpletxOrdered,
+                                              (int16_t)simpletx_crsf::SIMPLETX_CHANNELS_DEFAULT_CENTER_US);
+    _port.write(pkt26, sizeof(pkt26));
 }
 #endif
 
@@ -161,11 +216,11 @@ void CRSFSerialConnector::queuePacket(uint8_t addr, uint8_t type, const void *pa
 #endif
 }
 
-void CRSFSerialConnector::queueExtendedPacket(crsf_addr_e dest, crsf_addr_e origin, uint8_t type, const void *payload, uint8_t len)
+void CRSFSerialConnector::queueExtendedPacketRaw(crsf_addr_e sync, crsf_addr_e dest, crsf_addr_e origin, uint8_t type, const void *payload, uint8_t len)
 {
     uint8_t buf[CRSF_MAX_PACKET_LEN];
     crsf_ext_header_t *ext = (crsf_ext_header_t *)buf;
-    ext->device_addr = dest;
+    ext->device_addr = sync;
     ext->frame_size = CRSF_EXT_FRAME_SIZE(len);
     ext->type = (crsf_frame_type_e)type;
     ext->dest_addr = dest;
@@ -200,6 +255,11 @@ void CRSFSerialConnector::queueExtendedPacket(crsf_addr_e dest, crsf_addr_e orig
 #else
     _port.write(buf, 2 + ext->frame_size);
 #endif
+}
+
+void CRSFSerialConnector::queueExtendedPacket(crsf_addr_e dest, crsf_addr_e origin, uint8_t type, const void *payload, uint8_t len)
+{
+    queueExtendedPacketRaw(dest, dest, origin, type, payload, len);
 }
 
 void CRSFSerialConnector::handlePacket(const crsf_header_t *msg)
@@ -309,21 +369,28 @@ void CRSFSerialConnector::handlePacket(const crsf_header_t *msg)
         // Extended frame: actual payload starts at ext->payload (offset 5), not msg->payload (offset 3).
         const uint8_t *extPayload = ext->payload;
         const uint8_t extPayloadLen = ext->frame_size >= 4 ? (uint8_t)(ext->frame_size - 4) : 0;
-        if (ext->orig_addr == CRSF_ADDRESS_CRSF_TRANSMITTER && extPayloadLen >= 5)
+        if (ext->orig_addr == CRSF_ADDRESS_CRSF_TRANSMITTER && extPayloadLen >= 2 && onParameterEntry)
         {
-            uint8_t fieldId = extPayload[0];
-            uint8_t chunksRemaining = extPayload[1];
-            uint8_t paramType = extPayload[3] & 0x7F;
-            const char *label = (const char *)&extPayload[4];
-            size_t labelMax = extPayloadLen - 4;
+            const uint8_t fieldId = extPayload[0];
+            const uint8_t chunksRemaining = extPayload[1];
+            const bool typedFirstChunk = crsfx_parameterEntryHasTypedFrontMatter(extPayload, extPayloadLen);
+            // First chunk: FieldId, ChunksRemain, parent (1), type (1), NUL-terminated label, then value blob.
+            // Continuation chunks: FieldId + ChunksRemain only, then opaque bytes — see CRSFEndpoint::sendParameter.
+            size_t labelMax = extPayloadLen > 4 ? (size_t)(extPayloadLen - 4) : 0;
+            const char *label = labelMax ? (const char *)&extPayload[4] : "";
+            uint8_t paramType = extPayloadLen > 3 ? (uint8_t)(extPayload[3] & 0x7F) : 0;
             size_t labelLen = 0;
-            while (labelLen < labelMax && label[labelLen] != '\0')
-                labelLen++;
-            if (labelLen < labelMax && onParameterEntry)
-            {
+            if (typedFirstChunk && labelMax > 0) {
+                while (labelLen < labelMax && label[labelLen] != '\0')
+                    labelLen++;
+            }
+            if (typedFirstChunk && extPayloadLen >= 6 && labelMax > 0 && labelLen < labelMax) {
                 const uint8_t *value = (const uint8_t *)&label[labelLen + 1];
                 uint8_t valueLen = extPayloadLen - 4 - (uint8_t)labelLen - 1;
                 onParameterEntry(fieldId, paramType, chunksRemaining, label, value, valueLen);
+            } else {
+                uint8_t contLen = (uint8_t)(extPayloadLen > 2 ? extPayloadLen - 2 : 0);
+                onParameterEntry(fieldId, 0, chunksRemaining, "", contLen ? &extPayload[2] : nullptr, contLen);
             }
         }
         break;

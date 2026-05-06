@@ -20,21 +20,49 @@ class CRSFSerialConnector : public CRSFConnector
 public:
     static const unsigned int CRSF_PACKET_TIMEOUT_MS = 100;
     static const unsigned int CRSF_FAILSAFE_STAGE1_MS = 300;
+#if defined(RC_TX_MODULE_UART_BAUD)
+    static const uint32_t CRSF_BAUDRATE = RC_TX_MODULE_UART_BAUD;
+#else
     static const uint32_t CRSF_BAUDRATE = 420000;
+#endif
+/** Min spacing between handset RC_CHANNELS frames (µs). Default to 4 ms to match upstream SimpleTX 250 Hz cadence. */
+#if !defined(RC_CRSF_SIMPLETX_FRAME_US)
+#define RC_CRSF_SIMPLETX_FRAME_US 4000u
+#endif
+#if !defined(RC_SIMPLETX_BOOT_CHANNEL_PACKETS)
+#define RC_SIMPLETX_BOOT_CHANNEL_PACKETS 500u
+#endif
+    static const uint16_t SIMPLETX_FRAME_SPACING_US = (uint16_t)RC_CRSF_SIMPLETX_FRAME_US;
+    static const uint16_t SIMPLETX_BOOT_CHANNEL_PACKETS = (uint16_t)RC_SIMPLETX_BOOT_CHANNEL_PACKETS;
+
     static const uint8_t CRSF_FRAME_RC_CHANNELS_PAYLOAD_SIZE = 22;
     static const uint8_t CRSF_MAX_PAYLOAD_LEN = CRSF_PAYLOAD_SIZE_MAX;
+    /** Full CRSF RC_CHANNELS_PACKED frame (SimpleTX CRSF_PACKET_SIZE = 26), for boot warmup / tooling */
+    static const uint8_t CRSF_PACKET_RC_CHANNELS_FULL = 26;
 
     explicit CRSFSerialConnector(HardwareSerial &port, uint32_t baud = CRSF_BAUDRATE);
 
     void begin(uint32_t baud = 0);
+    /** Clear parser state (call after Serial2.end/begin or baud changes). */
+    void resetRxParser();
     void loop();
 #if defined(CRSF_CORE1_CHANNELS)
     void initTxMutex();  // Call from setup() before Core 1 starts
+    /** Pop and transmit all queued outbound frames immediately (call from Core 0 during setup when Core 1 is not draining yet). */
+    void flushOutboundQueue();
 #endif
+    /**
+     * Transmit a complete pre-built CRSF frame (e.g. SimpleTX 26-byte RC or 8-byte cmd).
+     * With CRSF_CORE1_CHANNELS: enqueued for Core 1. Otherwise: immediate write.
+     */
+    void queueCrsfRawTx(const uint8_t *bytes, uint8_t len);
+    /** Calls queueCrsfRawTx with SimpleTX RC_CHANNELS 26-byte packing (GPL SimpleTxCrsf). */
+    void queueSimpleTxRcChannelsPacked8(const uint16_t channels_us[8]);
 
     void forwardMessage(const crsf_header_t *message) override;
 
     void queuePacket(uint8_t addr, uint8_t type, const void *payload, uint8_t len);
+    void queueExtendedPacketRaw(crsf_addr_e sync, crsf_addr_e dest, crsf_addr_e origin, uint8_t type, const void *payload, uint8_t len);
     void queueExtendedPacket(crsf_addr_e dest, crsf_addr_e origin, uint8_t type, const void *payload, uint8_t len);
 #if defined(CRSF_CORE1_CHANNELS)
     // Core 1 calls this: drains pending packets from Core 0, then optionally sends channel packet. Core 1 is sole Serial2 writer.
@@ -82,7 +110,7 @@ private:
     void checkLinkDown();
 #if defined(CRSF_CORE1_CHANNELS)
     static mutex_t s_queue_mutex;
-    static const unsigned int CORE1_QUEUE_SIZE = 8;
+    static const unsigned int CORE1_QUEUE_SIZE = 48;
     static uint8_t s_queue_len[CORE1_QUEUE_SIZE];
     static uint8_t s_queue_data[CORE1_QUEUE_SIZE][64];
     static volatile unsigned int s_queue_head;

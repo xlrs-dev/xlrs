@@ -24,7 +24,11 @@ enum UARTMsgType : uint8_t {
 #define UART_PROTOCOL_SYNC_BYTE 0xA5
 #define UART_PROTOCOL_MAX_PAYLOAD 60
 #define UART_PROTOCOL_MAX_FRAME_SIZE (1 + 1 + 1 + UART_PROTOCOL_MAX_PAYLOAD + 1)  // SYNC + LEN + TYPE + PAYLOAD + CRC
+#if defined(RC_TX_MODULE_UART_BAUD)
+#define UART_PROTOCOL_BAUDRATE RC_TX_MODULE_UART_BAUD
+#else
 #define UART_PROTOCOL_BAUDRATE 420000
+#endif
 
 // Data structures
 struct ChannelData {

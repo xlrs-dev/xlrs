@@ -9,6 +9,7 @@
 #include "Security.h"
 #include "crsfSerial.h"
 #include "crsf_protocol.h"
+#include "crc8.h"
 #include "SX128xLink.h"
 #include "pairing.h"
 #include "PacketHandler.h"
@@ -33,6 +34,7 @@ static_assert(sizeof(crsf_channels_t) == CRSF_FRAME_RC_CHANNELS_PAYLOAD_SIZE,
 // Link timeout
 const unsigned long TIMEOUT_MS = 1000;
 const unsigned long CONNECTION_TIMEOUT_MS = 2000;  // Connection lost detection
+static const unsigned long CRSF_CHANNEL_INTERVAL_MS = 6;  // Match radio channel cadence (~167Hz)
 
 // Application state
 CrsfSerial crsf(Serial2, CRSF_BAUDRATE);
@@ -101,6 +103,60 @@ static bool rx_proto_set_binding_phrase_unsupported(const char* phrase, uint8_t 
 static bool rx_proto_enter_pairing_mode(void);
 
 static RCConfigProtocol g_rx_proto;
+static Crc8 g_crsfWireCrc(0xd5);
+
+static uint16_t usToCrsf(uint16_t us) {
+    return (uint16_t)constrain(
+        map((long)constrain(us, (uint16_t)1000, (uint16_t)2000),
+            1000, 2000,
+            CRSF_CHANNEL_VALUE_1000, CRSF_CHANNEL_VALUE_2000),
+        (long)CRSF_CHANNEL_VALUE_1000,
+        (long)CRSF_CHANNEL_VALUE_2000);
+}
+
+static void packCrsfChannelsPayload(uint8_t payload[CRSF_FRAME_RC_CHANNELS_PAYLOAD_SIZE],
+                                    const uint16_t crsfChannels[16]) {
+    payload[0]  = (uint8_t)(crsfChannels[0] & 0x07FF);
+    payload[1]  = (uint8_t)(((crsfChannels[0] & 0x07FF) >> 8) | ((crsfChannels[1] & 0x07FF) << 3));
+    payload[2]  = (uint8_t)(((crsfChannels[1] & 0x07FF) >> 5) | ((crsfChannels[2] & 0x07FF) << 6));
+    payload[3]  = (uint8_t)((crsfChannels[2] & 0x07FF) >> 2);
+    payload[4]  = (uint8_t)(((crsfChannels[2] & 0x07FF) >> 10) | ((crsfChannels[3] & 0x07FF) << 1));
+    payload[5]  = (uint8_t)(((crsfChannels[3] & 0x07FF) >> 7) | ((crsfChannels[4] & 0x07FF) << 4));
+    payload[6]  = (uint8_t)(((crsfChannels[4] & 0x07FF) >> 4) | ((crsfChannels[5] & 0x07FF) << 7));
+    payload[7]  = (uint8_t)((crsfChannels[5] & 0x07FF) >> 1);
+    payload[8]  = (uint8_t)(((crsfChannels[5] & 0x07FF) >> 9) | ((crsfChannels[6] & 0x07FF) << 2));
+    payload[9]  = (uint8_t)(((crsfChannels[6] & 0x07FF) >> 6) | ((crsfChannels[7] & 0x07FF) << 5));
+    payload[10] = (uint8_t)((crsfChannels[7] & 0x07FF) >> 3);
+    payload[11] = (uint8_t)(crsfChannels[8] & 0x07FF);
+    payload[12] = (uint8_t)(((crsfChannels[8] & 0x07FF) >> 8) | ((crsfChannels[9] & 0x07FF) << 3));
+    payload[13] = (uint8_t)(((crsfChannels[9] & 0x07FF) >> 5) | ((crsfChannels[10] & 0x07FF) << 6));
+    payload[14] = (uint8_t)((crsfChannels[10] & 0x07FF) >> 2);
+    payload[15] = (uint8_t)(((crsfChannels[10] & 0x07FF) >> 10) | ((crsfChannels[11] & 0x07FF) << 1));
+    payload[16] = (uint8_t)(((crsfChannels[11] & 0x07FF) >> 7) | ((crsfChannels[12] & 0x07FF) << 4));
+    payload[17] = (uint8_t)(((crsfChannels[12] & 0x07FF) >> 4) | ((crsfChannels[13] & 0x07FF) << 7));
+    payload[18] = (uint8_t)((crsfChannels[13] & 0x07FF) >> 1);
+    payload[19] = (uint8_t)(((crsfChannels[13] & 0x07FF) >> 9) | ((crsfChannels[14] & 0x07FF) << 2));
+    payload[20] = (uint8_t)(((crsfChannels[14] & 0x07FF) >> 6) | ((crsfChannels[15] & 0x07FF) << 5));
+    payload[21] = (uint8_t)((crsfChannels[15] & 0x07FF) >> 3);
+}
+
+static void sendCrsfChannelsToFlightController(const uint16_t channelsUs[8]) {
+    uint16_t crsfChannels[16];
+    for (int i = 0; i < 8; i++) {
+        crsfChannels[i] = usToCrsf(channelsUs[i]);
+    }
+    for (int i = 8; i < 16; i++) {
+        crsfChannels[i] = CRSF_CHANNEL_VALUE_MID;
+    }
+
+    uint8_t frame[CRSF_FRAME_RC_CHANNELS_PAYLOAD_SIZE + 4];
+    frame[0] = CRSF_ADDRESS_FLIGHT_CONTROLLER;
+    frame[1] = CRSF_FRAME_RC_CHANNELS_PAYLOAD_SIZE + 2;
+    frame[2] = CRSF_FRAMETYPE_RC_CHANNELS_PACKED;
+    packCrsfChannelsPayload(&frame[3], crsfChannels);
+    frame[sizeof(frame) - 1] = g_crsfWireCrc.calc(&frame[2], CRSF_FRAME_RC_CHANNELS_PAYLOAD_SIZE + 1);
+    crsf.write(frame, sizeof(frame));
+}
 
 // ============================================================
 // Battery / link callbacks from CRSF
@@ -422,42 +478,20 @@ void loop() {
                                          batteryRemaining, batteryDataValid,
                                          &lastBatteryTxTime);
 
-    // Send CRSF at 50Hz
+    // Send RC channels to the flight controller at the radio cadence.
     static unsigned long lastCRSF = 0;
-    if (millis() - lastCRSF >= 20) {
+    if (millis() - lastCRSF >= CRSF_CHANNEL_INTERVAL_MS) {
         lastCRSF = millis();
-
-        crsf_channels_t crsfChannels = {0};
-        crsfChannels.ch0 = map(channels[0], 1000, 2000, CRSF_CHANNEL_VALUE_1000, CRSF_CHANNEL_VALUE_2000);  // Aileron
-        crsfChannels.ch1 = map(channels[1], 1000, 2000, CRSF_CHANNEL_VALUE_1000, CRSF_CHANNEL_VALUE_2000);  // Elevator
-        crsfChannels.ch2 = map(channels[2], 1000, 2000, CRSF_CHANNEL_VALUE_1000, CRSF_CHANNEL_VALUE_2000);  // Rudder
-        crsfChannels.ch3 = map(channels[3], 1000, 2000, CRSF_CHANNEL_VALUE_1000, CRSF_CHANNEL_VALUE_2000);  // Throttle
-        crsfChannels.ch4 = map(channels[4], 1000, 2000, CRSF_CHANNEL_VALUE_1000, CRSF_CHANNEL_VALUE_2000);  // Aux1
-        crsfChannels.ch5 = map(channels[5], 1000, 2000, CRSF_CHANNEL_VALUE_1000, CRSF_CHANNEL_VALUE_2000);  // Aux2
-        crsfChannels.ch6 = map(channels[6], 1000, 2000, CRSF_CHANNEL_VALUE_1000, CRSF_CHANNEL_VALUE_2000);  // Aux3
-        crsfChannels.ch7 = map(channels[7], 1000, 2000, CRSF_CHANNEL_VALUE_1000, CRSF_CHANNEL_VALUE_2000);  // Aux4
-
-        uint16_t center = CRSF_CHANNEL_VALUE_MID;
-        crsfChannels.ch8 = center;
-        crsfChannels.ch9 = center;
-        crsfChannels.ch10 = center;
-        crsfChannels.ch11 = center;
-        crsfChannels.ch12 = center;
-        crsfChannels.ch13 = center;
-        crsfChannels.ch14 = center;
-        crsfChannels.ch15 = center;
-
-        crsf.queuePacket(
-            CRSF_ADDRESS_FLIGHT_CONTROLLER,
-            CRSF_FRAMETYPE_RC_CHANNELS_PACKED,
-            &crsfChannels,
-            CRSF_FRAME_RC_CHANNELS_PAYLOAD_SIZE
-        );
+        if (isConnectionReady()) {
+            sendCrsfChannelsToFlightController(channels);
+        }
 
         // Debug: confirm we're actually writing CRSF frames out the UART.
         static uint32_t crsfTxCount = 0;
         static unsigned long lastCrsfLog = 0;
-        crsfTxCount++;
+        if (isConnectionReady()) {
+            crsfTxCount++;
+        }
         if (millis() - lastCrsfLog > 2000) {
             lastCrsfLog = millis();
             Serial.print("[CRSF OUT] sent RC frame #");
@@ -466,6 +500,8 @@ void loop() {
             Serial.print(channels[0]);
             Serial.print(" ch1=");
             Serial.print(channels[1]);
+            Serial.print(" ready=");
+            Serial.print(isConnectionReady() ? "Y" : "N");
             Serial.print(" txPin=GP");
             Serial.print(CRSF_TX_PIN);
             Serial.print(" rxPin=GP");
@@ -708,6 +744,5 @@ void updateLED() {
         lastLedLog = millis();
     }
 }
-
 
 

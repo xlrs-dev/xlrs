@@ -196,6 +196,76 @@ F7.) The SX1280 sits on the separate TX/RX modules, not the RC board.
 
 ---
 
+## IC datasheet validation (SX1280 radio, TX/RX modules)
+
+`lib/SX128xLink` wraps **RadioLib** (mature) in **FLRC** mode, so low-level
+command/register sequencing and BUSY/DIO1 handling are library-managed. Config runs
+header defaults (no `platformio.ini` overrides): 2420 MHz, 1.3 Mb/s, CR 1/2, +10 dBm,
+16-bit preamble, GFSK BT=0.5 shaping, fixed 33-byte packets.
+
+> Method/limit: Semtech/DigiKey/Mouser SX1280 PDFs all return HTTP 403 to the fetch
+> tool. Parameter ranges are validated against TI/Semtech *indexed* datasheet content
+> **and validated-by-construction**: `beginFLRC()` returns `RADIOLIB_ERR_INVALID_*`
+> for illegal freq/bitrate/coding-rate and the code checks the return
+> (`SX128xLink.cpp:108`), so an out-of-spec value would fail init, not run silently.
+> **Conclusion: the radio *parameters* are within SX1280 spec — the transient issues
+> are real-time/firmware behavior and the single-channel design, not illegal config.**
+
+Parameter check (all within datasheet limits):
+- Frequency 2420 MHz ∈ [2400, 2500] MHz ✓
+- Output power +10 dBm ∈ [-18, +13] dBm ✓
+- Bitrate 1.3 Mb/s ↔ 1.2 MHz bandwidth (datasheet-paired) ✓
+- FLRC coding rate 1/2 (valid options 1/2, 3/4, 1) ✓
+- Preamble 16 bits (FLRC supports 4–32 in steps of 4) ✓ — AGC preamble minimum
+  (datasheet Table 14-34) not re-read from PDF; fine at 16, confirm before going lower.
+
+### F17 — Per-packet Serial logging in the radio hot path · HIGH · OPEN
+- **Where:** `SX128xLink::send()` logs unconditionally on every transmit
+  (`SX128xLink.cpp:181-200`, ~87 prints in the file); TX sends channel data at
+  `DATA_INTERVAL_MS = 6` ms → **~167 Hz** (`PacketHandler.h:12`).
+- **Problem:** ~2–3 `Serial.print` calls × 167 Hz = ~350–500 formatted prints/sec on
+  the TX. That steals CPU from the 6 ms budget and can block on a full USB-CDC TX
+  buffer, adding large/variable latency. The sync-ACK listen window is only **10 ms**
+  (`tx_main_sx128x.cpp:39`), so jitter here makes the TX miss SYNC_ACKs →
+  `syncAckMisses` climbs → connection state flaps → **transient disconnects**.
+  (`PacketHandler` logging is rate-limited; `SX128xLink::send()` is not.)
+- **Fix:** Remove the per-packet prints or gate them behind a debug macro
+  (`#if SX128X_DEBUG`). Strongest single SX-side transient fix.
+
+### F18 — Single fixed RF channel, no frequency hopping · MED · OPEN
+- **Where:** `SX128X_FREQ_MHZ 2420.0f` (`SX128xLink.h:37`); no channel-hopping logic
+  anywhere.
+- **Problem:** A static 2.4 GHz channel sits in the middle of WiFi/BT/microwave
+  traffic. Without FHSS, a single interferer on/near 2420 MHz causes intermittent
+  dropouts that look exactly like "transient RC issues," even at short range.
+  (ELRS-class links hop across the band for this reason.)
+- **Fix:** Implement FHSS (hop sequence seeded by the binding UID, synced via the
+  existing sync packets), or at minimum make the channel configurable and pick a
+  quiet one. FHSS is the larger, higher-value change.
+
+### F19 — Blocking `transmit()` in the TX loop · MED · OPEN
+- **Where:** `SX128xLink::send()` uses RadioLib's blocking `radio->transmit()`
+  (`SX128xLink.cpp:189`), then `startReceive()`.
+- **Problem:** The loop stalls for the full TX duration (mode switch + airtime +
+  BUSY waits) every packet, adding latency/jitter and capping the achievable rate.
+- **Fix:** Use async `startTransmit()` + DIO1 TX-done interrupt; return to RX in the
+  ISR/handler.
+
+### F20 — SPI clock far below device capability · LOW · OPEN
+- **Where:** `SPISettings spiSettings(2000000, ...)` = 2 MHz (`SX128xLink.cpp:54`);
+  SX1280 supports up to ~18 MHz.
+- **Problem:** Every command/FIFO transfer is ~9× slower than necessary, compounding
+  F19's latency.
+- **Fix:** Raise to ~8–16 MHz after confirming wiring/length; keep a margin.
+
+### F21 — `getSNR()` used in FLRC mode · LOW · OPEN
+- **Where:** `SX128xLink::receive()` reads/reports `radio->getSNR()`
+  (`SX128xLink.cpp:229`).
+- **Problem:** SNR is a LoRa-only metric; in FLRC/GFSK it's undefined → misleading
+  telemetry/logs. Harmless to the link. **Fix:** drop SNR for FLRC, rely on RSSI.
+
+---
+
 ## Notes
 - `test/` is empty — none of the above (especially the concurrency items) is covered
   by CI. A host-side unit test of the config-snapshot / validate logic and a

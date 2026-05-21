@@ -138,6 +138,64 @@ Severity: `HIGH` (can affect flight / crash) · `MED` · `LOW` (quality/maintain
 
 ---
 
+## IC datasheet validation (BQ2562x charger)
+
+Validated the one hand-written driver in the RC (`src/bq2562x.*`) against TI's
+BQ25620/BQ25622 family documentation. (OLED `SH110X` and `ADS1115` use mature
+Adafruit libraries — lower config risk; the RP2350 internal-ADC resolution issue is
+F7.) The SX1280 sits on the separate TX/RX modules, not the RC board.
+
+> Method/limit: TI/Mouser/TI-E2E PDFs return HTTP 403 to the fetch tool, so these
+> are validated against TI's indexed datasheet/forum content and the driver's own
+> register map — not a fresh read of the exact PDF. F15/F16 need a hardware I2C scan
+> or a local copy of the datasheet to fully close.
+
+### F14 — Charger I2C watchdog never disabled or serviced · MED · OPEN
+- **Where:** `bq2562x_init()` (`src/bq2562x.cpp:94`) calls
+  `bq2562x_reset_watchdog_timer()` exactly once. `bq2562x_set_watchdog_timer()` is
+  defined but **never called**; the main loop's `update_tx_battery()`
+  (`rc_crsf_main.cpp:2125`) only reads.
+- **Datasheet behavior (BQ2562x family):** "If the watchdog timer expires without a
+  reset from the I2C interface, **all charger parameter registers are reset to
+  default values**." Host must either write `WD_RST=1` before timeout or disable the
+  watchdog with `WATCHDOG=00`.
+- **Impact:** Charger periodically reverts to defaults. Benign today only because the
+  firmware never programs custom charge current/voltage/input limits — but any such
+  setting will silently revert ~tens of seconds later, and charge-status/telemetry
+  can fluctuate. Latent foot-gun.
+- **Fix:** After `bq2562x_init()`, either disable the watchdog (`WATCHDOG=00` via
+  `bq2562x_set_watchdog_timer`) for this read-mostly host, or pet it periodically
+  (`bq2562x_reset_watchdog_timer()` in the battery-update cadence).
+
+### F15 — Charger I2C address changed from datasheet value · MED · NEEDS-VERIFY
+- **Where:** `src/bq2562x.h` — `#define BQ2562X_I2C_ADDR 0x6A  // ... (was 0x6B in
+  original)`.
+- **Problem:** The ported (original) driver and TI's BQ2562x use 7-bit `0x6B`; this
+  was changed to `0x6A` to "match existing codebase" with no justification. (Note:
+  `0x6A` is the address of the *different* BQ25180 part — a likely mix-up.) If the
+  silicon is at `0x6B`, `bq2562x_init()`'s `Wire.endTransmission()` probe fails →
+  returns -1 → charger never initialized → battery telemetry/status silently
+  disabled.
+- **Verify:** I2C bus scan on hardware to see which of `0x6A`/`0x6B` ACKs; confirm
+  against the part's datasheet.
+
+### F16 — ICHG (REG0x02) scaling vs known datasheet erratum · LOW · NEEDS-VERIFY
+- **Where:** `src/bq2562x.h` — charge-current macros use 80 mA/LSB, no offset, mask
+  bits 11:6 (`0b0000111111000000`).
+- **Status:** Bit range (11:6, 6-bit ICHG) matches TI docs. **But** there is a known
+  TI E2E thread "BQ25620/BQ25622 Datasheet Error REG0x02 ICHG" — cross-check the LSB
+  step/offset against the latest datasheet/erratum before relying on programmed
+  charge current. Also validate the VBAT ADC scaling (`(raw & 0x1FFE) >> 1` ×
+  `BQ2562X_VBAT_ADC_LSB_MV` in `bq2562x.cpp:287-288`) against the ADC register spec.
+
+### (Open) SX1280 radio driver — not yet validated
+- The SX1280 (on TX/RX modules, `lib/SX128xLink`) is the project's other
+  custom-driver IC. Not part of the RC board, so out of scope for "RC transient
+  issues," but worth a separate datasheet pass (RF regs, BUSY/DIO1 timing, SPI
+  command sequencing) if RX-side glitches are also in play.
+
+---
+
 ## Notes
 - `test/` is empty — none of the above (especially the concurrency items) is covered
   by CI. A host-side unit test of the config-snapshot / validate logic and a

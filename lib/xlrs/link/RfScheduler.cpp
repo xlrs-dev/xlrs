@@ -79,9 +79,11 @@ bool RfScheduler::begin(IRadioPhy* phy, Fhss* fhss, Link* link, uint8_t rateInde
     // In simulated/host test environments, invoke the callbacks directly and synchronously
     // because simulation has no background task runner, so direct execution is expected.
     if (_timer) {
+        // Match the hardware tiny-ISR pattern: the timer callback only bumps the event
+        // counter; poll() drains it into onTick()+service(). (Sim drives it via fireSimTimerTick.)
         _timer->begin(_rate.intervalUs, []() {
             if (s_activeScheduler) {
-                s_activeScheduler->onTick(s_activeScheduler->_tick + 1);
+                s_activeScheduler->_tickEvents.fetch_add(1, std::memory_order_acq_rel);
             }
         });
     }

@@ -544,6 +544,24 @@ static void test_scheduler_timing_pfd_lock() {
     TEST_ASSERT_INT_WITHIN(2, 4012, finalInterval);
 }
 
+// ---- M9: poll() drains hardware-timer tick events into onTick()+service() (the on-hardware path) ----
+static void test_scheduler_poll_drains_ticks() {
+    uint8_t uid[LINK_UID_SIZE]; linkUidFromPhrase("Kikobot-02", uid);
+    MockPhy phy; PhyConfig cfg{}; cfg.freqMHz = 2420.0f; phy.init(cfg);
+    Link link; link.begin(Role::Tx, uid, 2);
+    RfScheduler sched; sched.begin(&phy, nullptr, &link, 2);
+
+    for (int i = 0; i < 5; ++i) fireSimTimerTick();   // 5 hardware timer ISRs (tiny: counter++ only)
+    TEST_ASSERT_EQUAL_UINT32(5, sched.tickEvents());
+    TEST_ASSERT_EQUAL_UINT32(0, sched.processedTick());  // not yet drained
+
+    sched.poll();                                     // drains 5 events → 5× (onTick + service)
+    TEST_ASSERT_EQUAL_UINT32(5, sched.processedTick());
+
+    sched.poll();                                     // idempotent: nothing new to drain
+    TEST_ASSERT_EQUAL_UINT32(5, sched.processedTick());
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -575,5 +593,6 @@ int main(int, char**) {
     RUN_TEST(test_link_wrong_key);
     RUN_TEST(test_flash_boot_counter);
     RUN_TEST(test_scheduler_timing_pfd_lock);
+    RUN_TEST(test_scheduler_poll_drains_ticks);
     return UNITY_END();
 }

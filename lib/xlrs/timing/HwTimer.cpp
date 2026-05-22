@@ -90,6 +90,7 @@ namespace xlrs {
 
 static uint32_t s_simNowUs = 0;
 static uint32_t s_simIntervalUs = 4000;
+static TimerTickCallback s_simTimerCb = nullptr;
 
 void setSimulatedTimeUs(uint32_t us) {
     s_simNowUs = us;
@@ -99,11 +100,15 @@ uint32_t getSimulatedIntervalUs() {
     return s_simIntervalUs;
 }
 
+void fireSimTimerTick() {
+    if (s_simTimerCb) s_simTimerCb();
+}
+
 class DummyHwTimer : public HwTimer {
 public:
     bool begin(uint32_t intervalUs, TimerTickCallback onTick) override {
         s_simIntervalUs = intervalUs;
-        (void)onTick;
+        s_simTimerCb = onTick;          // sim test fires this via fireSimTimerTick()
         return true;
     }
     void setIntervalUs(uint32_t intervalUs) override {

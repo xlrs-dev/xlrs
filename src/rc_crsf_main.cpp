@@ -333,7 +333,12 @@ bool tx_connected = false;  // TX board connection status
 uint16_t channels[8] = {1500, 1500, 1500, 1500, 1500, 1500, 1500, 1500};
 #if defined(CRSF_CORE1_CHANNELS)
 bool core1_separate_stack = true;  // 8KB stack for Core 1
-static rc_config_data_t s_core1_config;  // Snapshot at boot; Core 1 uses this exclusively
+static rc_config_data_t s_core1_config;  // Core 1's working snapshot; read exclusively by Core 1
+// F1/F3: Core 0 must not write s_core1_config directly while Core 1 reads it field-by-field
+// (torn read). Instead Core 0 stages into s_core1_config_staging and raises s_core1_config_dirty;
+// Core 1 consumes it (copies into s_core1_config + resets its own filters) at a frame boundary.
+static rc_config_data_t s_core1_config_staging;  // Core 0 writes; handed off via dirty flag
+static volatile bool s_core1_config_dirty = false;  // Core 0 sets, Core 1 clears
 static volatile uint16_t s_core1_channels[8];  // Core 1 writes; Core 0 reads for display
 static volatile bool s_core1_send_elrs_channels = false;  // Set in setup() after TX detection
 static volatile bool s_multicore_ready = false;  // Set by setup() after init
@@ -715,10 +720,20 @@ void loop1() {
     if (millis() - lastSend < 4) return;  // 250 Hz
     lastSend = millis();
 
+    // F1/F3: pick up a newly-staged config at this safe point between frames. Copying
+    // the whole struct here (rather than letting Core 0 write s_core1_config live) makes
+    // the snapshot atomic from Core 1's view and lets Core 1 reset its own stick filter.
+    if (s_core1_config_dirty) {
+        memcpy(&s_core1_config, &s_core1_config_staging, sizeof(s_core1_config));
+        __dmb();
+        s_core1_config_dirty = false;
+        internal_adc_reset_stick_filter();  // filter masks are owned by this core
+    }
+
     const rc_config_data_t* cfg = &s_core1_config;
     int16_t axis_adc[4] = {RC_ADC_CENTER, RC_ADC_CENTER, RC_ADC_CENTER, RC_ADC_CENTER};
 
-    internal_read_sticks_filtered(axis_adc, &s_core1_config);
+    internal_read_sticks_filtered(axis_adc, cfg);
     for (int i = 0; i < 4; i++) {
         s_core1_stick_filtered[i] = axis_adc[i];
     }
@@ -1710,10 +1725,13 @@ static void rc_sync_runtime_from_g_rc_config(void) {
         calib.center[i] = g_rc_config.calib_center[i];
     }
 #if defined(CRSF_CORE1_CHANNELS)
-    memcpy(&s_core1_config, &g_rc_config, sizeof(s_core1_config));
+    // F1/F3: hand the new config to Core 1 via a staging buffer + dirty flag. Core 1 copies
+    // it and resets its own stick filter at a frame boundary. Do NOT write s_core1_config or
+    // the filter masks from here — both are owned by Core 1 (cross-core race otherwise).
+    memcpy(&s_core1_config_staging, &g_rc_config, sizeof(s_core1_config_staging));
     __dmb();
-#endif
-#if defined(INTERNAL_ADC)
+    s_core1_config_dirty = true;
+#elif defined(INTERNAL_ADC)
     internal_adc_reset_stick_filter();
 #endif
     hpf_initialized = false;

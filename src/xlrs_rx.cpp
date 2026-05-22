@@ -34,6 +34,7 @@ struct RfToAppData {
     xlrs::LinkStats stats;
     uint16_t channels[8];
     bool outputActive;
+    bool hardwareError;
 };
 
 xlrs::LatestValue<RfToAppData> g_rfToApp;
@@ -63,11 +64,35 @@ static const unsigned long LINK_STATS_INTERVAL_MS = 500; // CRSF LINK_STATISTICS
 // Local channels array (fallback to center/disarm values)
 uint16_t localChannels[8] = {1500, 1500, 1500, 1000, 1500, 1500, 1500, 1500}; // Ail, Ele, Rud center; Thr low; aux center
 
-void updateLED(xlrs::LinkState state, bool outputActive) {
+// Config fault warning state
+bool g_configFault = false;
+
+void updateLED(xlrs::LinkState state, bool outputActive, bool hardwareError) {
     if (millis() - lastLedUpdate < LED_UPDATE_INTERVAL_MS) return;
     lastLedUpdate = millis();
     
-    if (state == xlrs::LinkState::Connected && outputActive) {
+    static uint32_t msCounter = 0;
+    msCounter += LED_UPDATE_INTERVAL_MS;
+
+    if (g_configFault) {
+        // Bad Config: solid Red
+        leds[0] = CRGB(50, 0, 0);
+    } else if (hardwareError) {
+        // Radio Hardware Fault: fast double-blinking Red (rapid flash-flash, pause)
+        uint16_t phase = (msCounter % 1000);
+        if (phase < 100 || (phase >= 200 && phase < 300)) {
+            leds[0] = CRGB(60, 0, 0);
+        } else {
+            leds[0] = CRGB::Black;
+        }
+    } else if (state == xlrs::LinkState::Binding) {
+        // Binding/Pairing: fast blinking Blue (10Hz)
+        if ((msCounter % 100) < 50) {
+            leds[0] = CRGB(0, 0, 50);
+        } else {
+            leds[0] = CRGB::Black;
+        }
+    } else if (state == xlrs::LinkState::Connected && outputActive) {
         // Connected: solid Green
         leds[0] = CRGB(0, 40, 0);
     } else if (state == xlrs::LinkState::Connecting) {
@@ -75,12 +100,14 @@ void updateLED(xlrs::LinkState state, bool outputActive) {
         static float angle = 0;
         uint8_t val = (uint8_t)(15.0f + 15.0f * sin(angle));
         leds[0] = CRGB(val * 2, val, 0);
-        angle += 0.1f;
+        angle += 0.05f; // slower breathing
     } else {
-        // Disconnected or Failsafe: blinking Red
-        static bool blink = false;
-        leds[0] = blink ? CRGB(40, 0, 0) : CRGB::Black;
-        blink = !blink;
+        // Disconnected or Failsafe: slow blinking Red (1Hz)
+        if ((msCounter % 1000) < 500) {
+            leds[0] = CRGB(40, 0, 0);
+        } else {
+            leds[0] = CRGB::Black;
+        }
     }
     FastLED.show();
 }
@@ -106,6 +133,7 @@ void setup() {
         Serial.println("RF Configuration loaded from EEPROM.");
     } else {
         Serial.println("No valid RF Configuration found. Storing default values...");
+        g_configFault = true; // Flag configuration fault warning
         xlrs::RfConfig::setDefaults(g_rfConfig);
         xlrs::RfConfig::save(g_rfConfig);
     }
@@ -230,7 +258,7 @@ void loop() {
     }
     
     // Update WS2812 status LED
-    updateLED(state, outputActive);
+    updateLED(state, outputActive, rfData.hardwareError);
     
     // Let CRSF run its background tasks
     crsf.loop();
@@ -266,12 +294,18 @@ void setup1() {
 
     if (!g_phy.init(phyCfg)) {
         Serial.println("[ERROR] Radio PHY initialization failed!");
+        RfToAppData rfData{};
+        rfData.hardwareError = true;
+        g_rfToApp.store(rfData);
         while (true) {
             delay(100);
         }
     }
     if (!g_scheduler.begin(&g_phy, &g_fhss, &g_link, g_rfConfig.defaultRate)) {
         Serial.println("[ERROR] Scheduler initialization failed!");
+        RfToAppData rfData{};
+        rfData.hardwareError = true;
+        g_rfToApp.store(rfData);
         while (true) {
             delay(100);
         }
@@ -288,12 +322,13 @@ void loop1() {
     if (currentTick > lastServiceTick) {
         lastServiceTick = currentTick;
         
-        // Publish link state, stats, channels and outputActive flag to Core 0
+        // Publish link state, stats, channels, outputActive, and hardware health to Core 0
         RfToAppData rfData;
         rfData.state = g_link.state();
         rfData.stats = g_link.stats();
         g_link.getChannels(rfData.channels, 8);
         rfData.outputActive = g_link.outputActive();
+        rfData.hardwareError = !g_phy.healthy();
         
         g_rfToApp.store(rfData);
     }

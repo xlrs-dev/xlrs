@@ -178,7 +178,17 @@ void loop() {
             lastStatusSent = now;
             
             StatusData status{};
-            status.connectionState = (rfData.state == xlrs::LinkState::Connected) ? 3 : 0; // Connected vs Disconnected
+            // Map xlrs::LinkState to handset state (0=Disconn, 1=Pairing, 2=Conn_ing, 3=Conn_ed, 4=Lost)
+            uint8_t connState = 0;
+            switch (rfData.state) {
+                case xlrs::LinkState::Disconnected: connState = 0; break;
+                case xlrs::LinkState::Binding:      connState = 1; break;
+                case xlrs::LinkState::Connecting:   connState = 2; break;
+                case xlrs::LinkState::Connected:    connState = 3; break;
+                case xlrs::LinkState::Failsafe:     connState = 4; break;
+                default:                            connState = 0; break;
+            }
+            status.connectionState = connState;
             status.pairingState = 1; // Always paired/ready
             status.packetsReceived = 0;
             status.packetsLost = rfData.stats.missedDeadlines;

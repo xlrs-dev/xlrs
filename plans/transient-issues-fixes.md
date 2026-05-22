@@ -6,7 +6,9 @@ Tracking doc for the intermittent ("transient") issues seen on the RC board
 shares mutable state across cores, and recent feature commits widened that
 shared surface without matching synchronization.
 
-Status legend: `OPEN` / `IN PROGRESS` / `FIXED` / `WONTFIX` / `NEEDS-VERIFY`
+Status legend: `OPEN` / `IN PROGRESS` / `FIXED` / `WONTFIX` / `NEEDS-VERIFY` /
+`CONFIRMED` (validated against source/datasheet, fix not yet landed) / `RESOLVED`
+(investigated and found correct / not-a-bug)
 Severity: `HIGH` (can affect flight / crash) · `MED` · `LOW` (quality/maintainability)
 
 ---
@@ -145,48 +147,68 @@ BQ25620/BQ25622 family documentation. (OLED `SH110X` and `ADS1115` use mature
 Adafruit libraries — lower config risk; the RP2350 internal-ADC resolution issue is
 F7.) The SX1280 sits on the separate TX/RX modules, not the RC board.
 
-> Method/limit: TI/Mouser/TI-E2E PDFs return HTTP 403 to the fetch tool, so these
-> are validated against TI's indexed datasheet/forum content and the driver's own
-> register map — not a fresh read of the exact PDF. F15/F16 need a hardware I2C scan
-> or a local copy of the datasheet to fully close.
+> Method update (2026-05-21): the exact TI PDF was retrieved and read directly
+> (`curl` with a browser User-Agent — the 403 was only a User-Agent block on
+> `ti.com/lit`; the actual datasheet at `https://www.ti.com/lit/ds/symlink/bq25622.pdf`
+> serves a static PDF, and TI ships one combined BQ25620/BQ25622 doc). Findings below
+> are now validated against the datasheet text, not indexed snippets. F14 and F16 are
+> closed against the datasheet; F15's address is confirmed wrong vs the datasheet but
+> still wants a hardware I2C scan before the silicon address is flipped. See
+> `datasheets/` for the archived PDF and `scripts/fetch-datasheets.sh` for re-pulling.
 
-### F14 — Charger I2C watchdog never disabled or serviced · MED · OPEN
+### F14 — Charger I2C watchdog never disabled or serviced · MED · CONFIRMED
 - **Where:** `bq2562x_init()` (`src/bq2562x.cpp:94`) calls
   `bq2562x_reset_watchdog_timer()` exactly once. `bq2562x_set_watchdog_timer()` is
   defined but **never called**; the main loop's `update_tx_battery()`
   (`rc_crsf_main.cpp:2125`) only reads.
-- **Datasheet behavior (BQ2562x family):** "If the watchdog timer expires without a
-  reset from the I2C interface, **all charger parameter registers are reset to
-  default values**." Host must either write `WD_RST=1` before timeout or disable the
-  watchdog with `WATCHDOG=00`.
+- **Datasheet behavior — CONFIRMED** (TI BQ25620/BQ25622 combined datasheet, §8.3.x
+  Digital Clock and Watchdog + Table 8-17 REG0x16; `WATCHDOG` defaults to enabled,
+  `1b`): a write to any register moves the part from default mode to host mode and
+  starts the watchdog. On expiry the part returns to default mode — **`ICHG` is halved
+  (rounded down)**, a set of fields reset to their POR defaults, and `WD_STAT`/
+  `WD_FLAG` are set. Host must write `WD_RST=1` before timeout, or disable it with
+  `WATCHDOG=00`.
 - **Impact:** Charger periodically reverts to defaults. Benign today only because the
   firmware never programs custom charge current/voltage/input limits — but any such
   setting will silently revert ~tens of seconds later, and charge-status/telemetry
-  can fluctuate. Latent foot-gun.
+  can fluctuate. (The ICHG-halving on expiry also directly couples to F16's ICHG
+  field.) Latent foot-gun.
 - **Fix:** After `bq2562x_init()`, either disable the watchdog (`WATCHDOG=00` via
   `bq2562x_set_watchdog_timer`) for this read-mostly host, or pet it periodically
   (`bq2562x_reset_watchdog_timer()` in the battery-update cadence).
 
-### F15 — Charger I2C address changed from datasheet value · MED · NEEDS-VERIFY
-- **Where:** `src/bq2562x.h` — `#define BQ2562X_I2C_ADDR 0x6A  // ... (was 0x6B in
-  original)`.
-- **Problem:** The ported (original) driver and TI's BQ2562x use 7-bit `0x6B`; this
-  was changed to `0x6A` to "match existing codebase" with no justification. (Note:
-  `0x6A` is the address of the *different* BQ25180 part — a likely mix-up.) If the
-  silicon is at `0x6B`, `bq2562x_init()`'s `Wire.endTransmission()` probe fails →
-  returns -1 → charger never initialized → battery telemetry/status silently
-  disabled.
-- **Verify:** I2C bus scan on hardware to see which of `0x6A`/`0x6B` ACKs; confirm
-  against the part's datasheet.
+### F15 — Charger I2C address does not match datasheet · MED → HIGH · CONFIRMED (datasheet); HW scan still needed
+- **Where:** `src/bq2562x.h:17` — `#define BQ2562X_I2C_ADDR 0x6A  // Match existing
+  codebase (was 0x6B in original)`.
+- **Datasheet — CONFIRMED WRONG:** the BQ25620/BQ25622 datasheet states the 7-bit
+  address in three places (§8.5.1 I2C interface, §8.5.1.5 Target Address, and the
+  device-address summary): the 7-bit address is `1101011b` = **`0x6B`**. The code's
+  `0x6A` does not match the part. (`0x6A` is the BQ25180's address — the suspected
+  mix-up.)
+- **Problem:** If the silicon is at `0x6B`, `bq2562x_init()`'s `Wire.endTransmission()`
+  probe NACKs → returns -1 → charger never initialized → battery telemetry/status
+  silently disabled.
+- **Verify (still required before flipping):** an I2C bus scan on hardware to confirm
+  which address actually ACKs. Per datasheet the fix is `0x6A → 0x6B`, but do not flip
+  blind — if a board is somehow working today, confirm the silicon's address first.
 
-### F16 — ICHG (REG0x02) scaling vs known datasheet erratum · LOW · NEEDS-VERIFY
+### F16 — ICHG (REG0x02) + VBAT ADC scaling · LOW · RESOLVED (scaling correct)
 - **Where:** `src/bq2562x.h` — charge-current macros use 80 mA/LSB, no offset, mask
-  bits 11:6 (`0b0000111111000000`).
-- **Status:** Bit range (11:6, 6-bit ICHG) matches TI docs. **But** there is a known
-  TI E2E thread "BQ25620/BQ25622 Datasheet Error REG0x02 ICHG" — cross-check the LSB
-  step/offset against the latest datasheet/erratum before relying on programmed
-  charge current. Also validate the VBAT ADC scaling (`(raw & 0x1FFE) >> 1` ×
-  `BQ2562X_VBAT_ADC_LSB_MV` in `bq2562x.cpp:287-288`) against the ADC register spec.
+  bits 11:6 (`0b0000111111000000`); VBAT ADC `(raw & 0x1FFE) >> 1` ×
+  `BQ2562X_VBAT_ADC_LSB_MV` (= `1.99f`).
+- **Datasheet — CONFIRMED CORRECT** (BQ25620/BQ25622 combined datasheet):
+  - ICHG (Table 8-9, REG0x02): field is bits **11:6**, **Bit Step 80 mA**, no offset,
+    range 80–3520 mA (1h–2Ch), POR 1040 mA (Dh) → code's `(reg & mask)>>6 * 80`
+    matches exactly. The "TI E2E erratum" worry does **not** apply to this revision.
+  - VBAT ADC (Electrical Characteristics ADC table + Table 8-42, REG0x30): field is
+    bits **12:1**, **LSB 1.99 mV** → `(raw & 0x1FFE) >> 1` extracts bits 12:1 and
+    `× 1.99` matches. (The 3.97 mV figure is the **VBUS/VPMID** ADC LSB, not VBAT —
+    no mismatch.)
+- **Remaining nit (LOW):** ICHG is physically split across REG0x02[7:6] and
+  REG0x03[3:0] (little-endian per the datasheet note). The driver reads a 16-bit word
+  and masks 11:6 contiguously — fine **iff** the word read assembles bytes in that
+  order; worth one glance at `bq2562x_read_word()` byte order, but not a transient
+  suspect.
 
 ### (Open) SX1280 radio driver — not yet validated
 - The SX1280 (on TX/RX modules, `lib/SX128xLink`) is the project's other
@@ -203,11 +225,15 @@ command/register sequencing and BUSY/DIO1 handling are library-managed. Config r
 header defaults (no `platformio.ini` overrides): 2420 MHz, 1.3 Mb/s, CR 1/2, +10 dBm,
 16-bit preamble, GFSK BT=0.5 shaping, fixed 33-byte packets.
 
-> Method/limit: Semtech/DigiKey/Mouser SX1280 PDFs all return HTTP 403 to the fetch
-> tool. Parameter ranges are validated against TI/Semtech *indexed* datasheet content
-> **and validated-by-construction**: `beginFLRC()` returns `RADIOLIB_ERR_INVALID_*`
-> for illegal freq/bitrate/coding-rate and the code checks the return
-> (`SX128xLink.cpp:108`), so an out-of-spec value would fail init, not run silently.
+> Method update (2026-05-21): the official Semtech SX1280/SX1281 datasheet is now
+> archived locally (`datasheets/sx1280-sx1281-semtech.pdf`, retrieved via the
+> Salesforce session flow in `scripts/fetch-datasheets.sh` — the fetch-tool 403 was a
+> User-Agent block plus a JS/session gate, not a true block). The parameter findings
+> below remain **validated-by-construction**: `beginFLRC()` returns
+> `RADIOLIB_ERR_INVALID_*` for illegal freq/bitrate/coding-rate and the code checks
+> the return (`SX128xLink.cpp:108`), so an out-of-spec value would fail init, not run
+> silently. A deeper register-level pass against the now-archived PDF (RF regs,
+> BUSY/DIO1 timing, AGC preamble minimum) is still open but not a transient suspect.
 > **Conclusion: the radio *parameters* are within SX1280 spec — the transient issues
 > are real-time/firmware behavior and the single-channel design, not illegal config.**
 

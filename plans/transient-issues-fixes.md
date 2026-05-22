@@ -27,6 +27,10 @@ Severity: `HIGH` (can affect flight / crash) · `MED` · `LOW` (quality/maintain
   config + sets `volatile bool s_core1_config_dirty`; Core 1 copies into its own
   struct **once at the top of `loop1()`** (safe point between frames). Or guard the
   copy on both sides with a `critical_section_t` (pico/mutex.h already linked).
+  Note: `loop1()` reads `s_core1_config` from **two** sites — the `cfg` pointer
+  (`:718`) *and* the `&s_core1_config` arg passed to
+  `internal_read_sticks_filtered()` (`:721`). The local-snapshot fix must redirect
+  **both** to the per-frame copy, or it's only half-fixed.
 
 ### F2 — Proxy passthrough fights Core 1 for the UART · HIGH · OPEN
 - **Where:** `rc_proto_enter_usb_uart_proxy` sets `proxy_mode_enabled` (`:1896`);
@@ -34,8 +38,14 @@ Severity: `HIGH` (can affect flight / crash) · `MED` · `LOW` (quality/maintain
   the flag and keeps writing CRSF frames to `Serial2` at 250 Hz.
 - **Problem:** Two cores write the same UART → interleaved bytes → corrupted
   ELRS/EdgeTX passthrough (exactly the case where Core 1 is sending channels).
-- **Fix:** In `loop1()`, skip the UART write (early return) while
-  `proxy_mode_enabled` is true.
+  Two adjacent hazards in the same path: (1) `proxy_mode_enabled` is set `true`
+  (`:1896`) but **never reset to `false`** anywhere — entering proxy is a one-way
+  latch until reboot. (2) `rc_proto_enter_usb_uart_proxy()` re-calls
+  `Serial2.begin()` (`:1891`) *while Core 1 is actively writing `Serial2` at
+  250 Hz* — that re-init is itself a race, separate from the byte interleaving.
+- **Fix:** (a) In `loop1()`, skip the UART write (early return) while
+  `proxy_mode_enabled` is true; (b) add an exit path that clears the flag; and
+  (c) park/quiesce Core 1 before the `Serial2.begin()` re-init in proxy entry.
 
 ### F6 — Flash write (EEPROM.commit) with no multicore lockout · HIGH · NEEDS-VERIFY
 - **Where:** `rc_config_save()` → `EEPROM.commit()` (`lib/RCConfig/RCConfig.cpp:132`)
@@ -118,8 +128,11 @@ Severity: `HIGH` (can affect flight / crash) · `MED` · `LOW` (quality/maintain
 ### F11 — Structure / dead code · LOW · OPEN
 - `src/rc_crsf_main.cpp` is ~2200 lines with ~200 file-scope globals (god file).
 - Frame/protocol logic duplicated across `*_ble.cpp` and `*_sx128x.cpp` variants.
-- Commit `d960813` ("remove obsolete Bluetooth/BLE files") yet `rx_main_ble.cpp` /
-  `tx_main_ble.cpp` still exist and are still built (`[env:rx-ble]`, `[env:tx-ble]`).
+- Commit `d960813` ("remove obsolete Bluetooth and BLE implementation files")
+  actually only deleted BLE *docs* and the Flutter app (`BLE_IMPLEMENTATION.md`,
+  `BLUETOOTH_IMPLEMENTATION.md`, `fpv_rx_config/…`) — **no `*_ble.cpp` was removed**,
+  so the message is misleading. `rx_main_ble.cpp` / `tx_main_ble.cpp` still exist and
+  are still built (`[env:rx-ble]` `platformio.ini:13`, `[env:tx-ble]` `:23`).
   Clarify whether BLE is supported or remove the envs/files.
 
 ### F12 — Config-size assert placement / WebUI coupling · LOW · OPEN
@@ -183,8 +196,9 @@ F7.) The SX1280 sits on the separate TX/RX modules, not the RC board.
 - **Datasheet — CONFIRMED WRONG:** the BQ25620/BQ25622 datasheet states the 7-bit
   address in three places (§8.5.1 I2C interface, §8.5.1.5 Target Address, and the
   device-address summary): the 7-bit address is `1101011b` = **`0x6B`**. The code's
-  `0x6A` does not match the part. (`0x6A` is the BQ25180's address — the suspected
-  mix-up.)
+  `0x6A` does not match the part. (`0x6A` is believed to be the BQ25180's address —
+  the suspected mix-up — but this attribution is background knowledge, *not*
+  confirmed from an archived datasheet (no BQ25180 PDF is in `datasheets/`).)
 - **Problem:** If the silicon is at `0x6B`, `bq2562x_init()`'s `Wire.endTransmission()`
   probe NACKs → returns -1 → charger never initialized → battery telemetry/status
   silently disabled.
@@ -246,8 +260,10 @@ Parameter check (all within datasheet limits):
   (datasheet Table 14-34) not re-read from PDF; fine at 16, confirm before going lower.
 
 ### F17 — Per-packet Serial logging in the radio hot path · HIGH · OPEN
-- **Where:** `SX128xLink::send()` logs unconditionally on every transmit
-  (`SX128xLink.cpp:181-200`, ~87 prints in the file); TX sends channel data at
+- **Where:** `SX128xLink::send()` logs unconditionally on every transmit — the
+  blocking `transmit()` result is logged at `SX128xLink.cpp:189-200`, and a separate
+  pre-transmit "Calling transmit()" log fires at `:181-188` (87 `Serial.print*` calls
+  in the file total, none rate-limited); TX sends channel data at
   `DATA_INTERVAL_MS = 6` ms → **~167 Hz** (`PacketHandler.h:12`).
 - **Problem:** ~2–3 `Serial.print` calls × 167 Hz = ~350–500 formatted prints/sec on
   the TX. That steals CPU from the 6 ms budget and can block on a full USB-CDC TX

@@ -409,7 +409,12 @@ bool tx_connected = false;  // TX board connection status
 uint16_t channels[8] = {1500, 1500, 1500, 1500, 1500, 1500, 1500, 1500};
 #if defined(CRSF_CORE1_CHANNELS)
 bool core1_separate_stack = true;  // 8KB stack for Core 1
-static rc_config_data_t s_core1_config;  // Snapshot at boot; Core 1 uses this exclusively
+static rc_config_data_t s_core1_config;  // Core 1's working snapshot; read exclusively by Core 1
+// F1/F3: Core 0 must not write s_core1_config directly while Core 1 reads it field-by-field
+// (torn read). Instead Core 0 stages into s_core1_config_staging and raises s_core1_config_dirty;
+// Core 1 consumes it (copies into s_core1_config + resets its own filters) at a frame boundary.
+static rc_config_data_t s_core1_config_staging;  // Core 0 writes; handed off via dirty flag
+static volatile bool s_core1_config_dirty = false;  // Core 0 sets, Core 1 clears
 static volatile uint16_t s_core1_channels[8];  // Core 1 writes; Core 0 reads for display
 static volatile bool s_core1_send_elrs_channels = false;  // Set in setup() after TX detection
 static volatile bool s_core1_suppress_rc_during_elrs_lua = false;  // quieter UART during ELRS param scan
@@ -549,6 +554,7 @@ static bool rc_proto_get_elrs_binding_phrase(char* phrase, uint8_t maxLen);
 static bool rc_proto_enter_pairing_mode(void);
 static bool rc_proto_enter_wifi_mode(void);
 static void rc_proto_enter_usb_uart_proxy(void);
+static void rc_proto_exit_usb_uart_proxy(void);
 
 #if defined(PICO_RP2350) && PICO_RP2350
 // Splash / logo: large centered wordmark in a rounded frame + subtitle + bar.
@@ -1032,6 +1038,15 @@ void loop() {
     s_loopStartMs = millis();
 #endif
     if (proxy_mode_enabled) {
+        // F2: exit the bridge when the USB host closes the port (CDC DTR deasserted), so the RC
+        // resumes normal operation without a power cycle. There is no in-band escape because the
+        // protocol poll is bypassed while bridging. NOTE: relies on the USB-CDC operator bool()
+        // tracking DTR on this core — verify on hardware. If it never deasserts, behaviour is
+        // unchanged from before (reboot to exit); a spurious deassert just drops the bridge.
+        if (!Serial) {
+            rc_proto_exit_usb_uart_proxy();
+            return;
+        }
         // Raw USB <-> UART passthrough: browser talks directly to TX module (ELRS/EdgeTX)
         while (Serial.available()) {
             Serial2.write(Serial.read());
@@ -1110,16 +1125,30 @@ void loop1() {
         }
     }
 #endif
+    // F2: while Core 0 is bridging USB<->Serial2, Core 1 must not write Serial2 (interleaved
+    // bytes corrupt the ELRS/EdgeTX passthrough). Skip the whole frame, including the UART send.
+    if (proxy_mode_enabled) return;
+
     static uint32_t lastSendUs = 0;
     const uint32_t nowUs = micros();
     if ((uint32_t)(nowUs - lastSendUs) < (uint32_t)CRSFSerialConnector::SIMPLETX_FRAME_SPACING_US)
         return;
     lastSendUs = nowUs;
 
+    // F1/F3: pick up a newly-staged config at this safe point between frames. Copying
+    // the whole struct here (rather than letting Core 0 write s_core1_config live) makes
+    // the snapshot atomic from Core 1's view and lets Core 1 reset its own stick filter.
+    if (s_core1_config_dirty) {
+        memcpy(&s_core1_config, &s_core1_config_staging, sizeof(s_core1_config));
+        __dmb();
+        s_core1_config_dirty = false;
+        internal_adc_reset_stick_filter();  // filter masks are owned by this core
+    }
+
     const rc_config_data_t* cfg = &s_core1_config;
     int16_t axis_adc[4] = {RC_ADC_CENTER, RC_ADC_CENTER, RC_ADC_CENTER, RC_ADC_CENTER};
 
-    internal_read_sticks_filtered(axis_adc, &s_core1_config);
+    internal_read_sticks_filtered(axis_adc, cfg);
     for (int i = 0; i < 4; i++) {
         s_core1_stick_filtered[i] = axis_adc[i];
     }
@@ -2426,10 +2455,13 @@ static void rc_sync_runtime_from_g_rc_config(void) {
         calib.center[i] = g_rc_config.calib_center[i];
     }
 #if defined(CRSF_CORE1_CHANNELS)
-    memcpy(&s_core1_config, &g_rc_config, sizeof(s_core1_config));
+    // F1/F3: hand the new config to Core 1 via a staging buffer + dirty flag. Core 1 copies
+    // it and resets its own stick filter at a frame boundary. Do NOT write s_core1_config or
+    // the filter masks from here — both are owned by Core 1 (cross-core race otherwise).
+    memcpy(&s_core1_config_staging, &g_rc_config, sizeof(s_core1_config_staging));
     __dmb();
-#endif
-#if defined(INTERNAL_ADC)
+    s_core1_config_dirty = true;
+#elif defined(INTERNAL_ADC)
     internal_adc_reset_stick_filter();
 #endif
     hpf_initialized = false;
@@ -2619,9 +2651,13 @@ static bool rc_proto_enter_wifi_mode(void) {
 }
 
 static void rc_proto_enter_usb_uart_proxy(void) {
-#if defined(CRSF_CORE1_CHANNELS) && defined(PICO_RP2350) && PICO_RP2350
-    s_core1_halt_request = true;
+    // F2: raise the flag first so Core 1 stops writing Serial2, then wait long enough for it to
+    // observe the flag and finish any in-flight frame before we re-init the UART.
+    proxy_mode_enabled = true;
+#if defined(CRSF_CORE1_CHANNELS) && defined(INTERNAL_ADC)
     delay(30);
+#elif defined(CRSF_CORE1_CHANNELS)
+    delay(10);
 #endif
     Serial2.end();
     delay(2);
@@ -2631,7 +2667,14 @@ static void rc_proto_enter_usb_uart_proxy(void) {
     while (Serial2.available()) Serial2.read();
     Serial.flush();
     Serial2.flush();
-    proxy_mode_enabled = true;
+}
+
+static void rc_proto_exit_usb_uart_proxy(void) {
+    // Leave bridge mode and drain both directions so leftover passthrough bytes don't leak into
+    // normal CRSF parsing on Serial2. Core 1 resumes channel sends once the flag clears.
+    while (Serial.available()) Serial.read();
+    while (Serial2.available()) Serial2.read();
+    proxy_mode_enabled = false;
 }
 
 // ============================================================

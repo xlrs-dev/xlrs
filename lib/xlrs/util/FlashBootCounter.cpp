@@ -6,16 +6,13 @@
 #include <hardware/flash.h>
 #include <hardware/sync.h>
 #include <hardware/address_mapped.h>
-#else
-#ifndef FLASH_SECTOR_SIZE
-#define FLASH_SECTOR_SIZE 4096
-#endif
-#ifndef FLASH_PAGE_SIZE
-#define FLASH_PAGE_SIZE 256
-#endif
 #endif
 
 namespace xlrs {
+
+#if defined(XLRS_PICO_SDK) || defined(PICO_BOARD)
+// Flash geometry and layout for the wear-leveled implementation below. The host
+// fallback keeps its count in RAM, so none of this applies to the native build.
 
 // 1.5 MB mark, safely beyond typical app size (<250KB) and below EEPROM at the end of 2MB flash.
 static constexpr uint32_t BOOT_COUNTER_FLASH_OFFSET = 1536 * 1024;
@@ -28,6 +25,7 @@ struct BootEntry {
 
 static constexpr int ENTRIES_PER_SECTOR = FLASH_SECTOR_SIZE / sizeof(BootEntry); // 4096 / 8 = 512
 static constexpr int ENTRIES_PER_PAGE = FLASH_PAGE_SIZE / sizeof(BootEntry);     // 256 / 8 = 32
+#endif
 
 #if !defined(XLRS_PICO_SDK) && !defined(PICO_BOARD)
 // Host-native in-memory fallback.

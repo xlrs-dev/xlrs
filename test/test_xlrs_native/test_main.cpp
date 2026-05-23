@@ -712,6 +712,76 @@ static void test_scheduler_poll_drains_ticks() {
     TEST_ASSERT_EQUAL_UINT32(5, sched.processedTick());
 }
 
+// ---- Soak: link stays locked and accurate over thousands of healthy slots ----
+static void test_link_long_soak() {
+    uint8_t uid[LINK_UID_SIZE]; linkUidFromPhrase("Kikobot-02", uid);
+    SimEnvironment env;
+    env.setup(uid, 2);
+
+    uint16_t ch[4] = {250, 1250, 1750, 800}; env.tx.setChannels(ch, 4);
+
+    for (uint32_t t = 1; t <= 300; ++t) simTick(env, t);          // acquire
+    TEST_ASSERT_TRUE(env.rx.state() == LinkState::Connected);
+
+    for (uint32_t t = 301; t <= 8000; ++t) simTick(env, t);       // long healthy soak
+
+    TEST_ASSERT_TRUE(env.rx.state() == LinkState::Connected);     // never spuriously dropped
+    TEST_ASSERT_TRUE(env.rx.outputActive());
+    TEST_ASSERT_TRUE(env.rx.stats().lqUp >= 95);                  // sustained high LQ
+    TEST_ASSERT_EQUAL_UINT16(0, env.rx.stats().rxQueueDrops);     // no overflow over the soak
+    uint16_t out[4]; env.rx.getChannels(out, 4);
+    for (int i = 0; i < 4; ++i) TEST_ASSERT_EQUAL_UINT16(ch[i], out[i]);   // channels still exact
+}
+
+// ---- Corrupt uplink RC frames are rejected (CRC/AEAD): no garbage out, LQ reflects loss ----
+static void test_link_corrupt_rc_rejected() {
+    uint8_t uid[LINK_UID_SIZE]; linkUidFromPhrase("Kikobot-02", uid);
+    SimEnvironment env;
+    env.setup(uid, 2);
+
+    uint16_t ch[4] = {400, 1600, 2000, 100}; env.tx.setChannels(ch, 4);
+    for (uint32_t t = 1; t <= 200; ++t) simTick(env, t);
+    TEST_ASSERT_TRUE(env.rx.state() == LinkState::Connected);
+    TEST_ASSERT_TRUE(env.rx.stats().lqUp >= 90);
+
+    uint16_t before[4]; env.rx.getChannels(before, 4);
+    for (int i = 0; i < 4; ++i) TEST_ASSERT_EQUAL_UINT16(ch[i], before[i]);   // last known-good
+
+    // Flip a byte on every uplink frame the RX hears for a stretch.
+    env.rxPhy.corruptNextDeliveries(1000000);
+    for (uint32_t t = 201; t <= 260; ++t) simTick(env, t);
+
+    // Corrupt frames are treated as loss, never accepted: the link drops to failsafe and
+    // stops emitting, and the RC channels are never overwritten with garbage.
+    TEST_ASSERT_TRUE(env.rx.state() == LinkState::Failsafe);
+    TEST_ASSERT_FALSE(env.rx.outputActive());
+    uint16_t during[4]; env.rx.getChannels(during, 4);
+    for (int i = 0; i < 4; ++i) TEST_ASSERT_EQUAL_UINT16(ch[i], during[i]);   // last good held, no garbage
+
+    // Stop corrupting → the link re-acquires and LQ recovers.
+    env.rxPhy.corruptNextDeliveries(0);
+    for (uint32_t t = 261; t <= 700; ++t) simTick(env, t);
+    TEST_ASSERT_TRUE(env.rx.state() == LinkState::Connected);
+    TEST_ASSERT_TRUE(env.rx.stats().lqUp >= 90);
+}
+
+// ---- M9: PHY recovery that fails several times is counted, then eventually succeeds ----
+static void test_scheduler_phy_recovery_failure() {
+    uint8_t uid[LINK_UID_SIZE]; linkUidFromPhrase("Kikobot-02", uid);
+    SimEnvironment env;
+    env.setup(uid, 2);
+
+    env.rxPhy.setRecoveryFailures(3);    // recover() fails 3× before it takes
+    env.rxPhy.forceFault();
+    TEST_ASSERT_FALSE(env.rxPhy.healthy());
+
+    for (int i = 0; i < 6 && !env.rxPhy.healthy(); ++i) env.rxSched.poll();
+
+    TEST_ASSERT_TRUE(env.rxPhy.healthy());                       // recovered after retries
+    TEST_ASSERT_EQUAL_UINT16(3, env.rx.stats().phyRecoveryFailures);
+    TEST_ASSERT_EQUAL_UINT16(1, env.rx.stats().phyRecoveries);
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -749,5 +819,8 @@ int main(int, char**) {
     RUN_TEST(test_flash_boot_counter);
     RUN_TEST(test_scheduler_timing_pfd_lock);
     RUN_TEST(test_scheduler_poll_drains_ticks);
+    RUN_TEST(test_link_long_soak);
+    RUN_TEST(test_link_corrupt_rc_rejected);
+    RUN_TEST(test_scheduler_phy_recovery_failure);
     return UNITY_END();
 }

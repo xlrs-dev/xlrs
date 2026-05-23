@@ -41,7 +41,10 @@ public:
     void reconfigure(const PhyConfig& cfg) override { _cfg = cfg; }
     uint32_t txLatencyUs() const override { return 0; }
     bool healthy() const override { return !_forceFault; }
-    bool recover() override { _forceFault = false; _listening = false; _hasRx = false; return true; }
+    bool recover() override {
+        if (_recoverFailsRemaining > 0) { --_recoverFailsRemaining; return false; }  // models a radio that needs retries
+        _forceFault = false; _listening = false; _hasRx = false; return true;
+    }
     void setOnTxDone(PhyIsrCallback cb) override { _onTxDone = cb; }
     void setOnRxDone(PhyIsrCallback cb) override { _onRxDone = cb; }
 
@@ -51,6 +54,8 @@ public:
     void setRssi(int16_t r)      { _rssiDbm = r; }
     void setSnr(int8_t s)        { _snr = s; }
     void forceFault()            { _forceFault = true; }
+    void setRecoveryFailures(int n) { _recoverFailsRemaining = n; }  // recover() fails n times, then succeeds
+    void corruptNextDeliveries(int n) { _corruptRemaining = n; }     // flip a byte on the next n incoming frames (on-air bit errors)
     bool listening() const       { return _listening; }
     int8_t outputPowerDbm() const { return _cfg.powerDbm; }   // observe dynamic-power output
 
@@ -58,6 +63,10 @@ private:
     void deliver(const uint8_t* d, uint8_t len, int16_t rssi, int8_t snr, uint32_t ts) {
         _rx.len = len > sizeof(_rx.data) ? (uint8_t)sizeof(_rx.data) : len;
         memcpy(_rx.data, d, _rx.len);
+        if (_corruptRemaining > 0 && _rx.len > 0) {
+            _rx.data[0] ^= 0xFF;                     // simulate an on-air bit error → CRC/AEAD must reject
+            --_corruptRemaining;
+        }
         _rx.rssiDbm = rssi;
         _rx.snr = snr;
         _rx.timestampUs = ts;
@@ -71,6 +80,8 @@ private:
     bool      _listening = false;
     bool      _hasRx = false;
     bool      _forceFault = false;
+    int       _recoverFailsRemaining = 0;
+    int       _corruptRemaining = 0;
     float     _rxFreq = 0.0f;
     uint32_t  _clockUs = 0;
     int16_t   _rssiDbm = -50;

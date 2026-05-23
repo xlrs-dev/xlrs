@@ -4,6 +4,7 @@
 
 #include <hardware/gpio.h>
 #include <hardware/uart.h>
+#include <pico/flash.h>
 #include <pico/multicore.h>
 #include <pico/stdlib.h>
 
@@ -182,6 +183,10 @@ static void app_core_loop() {
 }
 
 static void rf_core_main() {
+    if (flash_safe_execute_core_init()) {
+        xlrs::hal::FlashStore::setMulticoreSafetyEnabled(true);
+    }
+
     xlrs::hal::FlashStore::begin();
     g_bindingStore.begin();
     if (!xlrs::RfConfig::load(g_rfConfig)) {
@@ -239,6 +244,7 @@ static void rf_core_main() {
 
 int main() {
     stdio_init_all();
+    flash_safe_execute_core_init();
     xlrs::hal::sleepMs(1000);
     setup_app_core();
     multicore_launch_core1(rf_core_main);

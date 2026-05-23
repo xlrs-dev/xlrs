@@ -202,6 +202,7 @@ lib/xlrs/
 apps/
   tx/main.cpp   rx/main.cpp
 test/
+  CMakeLists.txt               (standalone host CMake/CTest project)
   test_xlrs_native/            (Unity tests for pure logic)
 ```
 Production role mains are `apps/tx/main.cpp` and `apps/rx/main.cpp`.
@@ -211,7 +212,7 @@ Production role mains are `apps/tx/main.cpp` and `apps/rx/main.cpp`.
 ## 6. Build & test
 
 - Pico SDK CMake builds `xlrs_tx` and `xlrs_rx`.
-- Host tests are kept as pure-logic coverage and should move to a CMake/CTest runner.
+- Host tests run off-device via a standalone CMake/CTest project under `test/` (`scripts/test.sh`); the `lib/xlrs` sources compile with their native fallbacks against a simulated clock, in-RAM flash, and `MockPhy`.
 - Hardware soak tooling should watch RX serial for dropouts over long runs.
 
 ---

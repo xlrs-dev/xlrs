@@ -68,11 +68,11 @@ if [[ -n "${sdk_path}" ]]; then
     fail "${sdk_path} does not look like a Pico SDK checkout."
   fi
 
-  for submodule in lib/tinyusb lib/mbedtls lib/lwip lib/btstack lib/cyw43-driver; do
+  for submodule in lib/tinyusb; do
     if [[ -d "${sdk_path}/${submodule}" ]]; then
       ok "Pico SDK submodule present: ${submodule}"
     else
-      warn "Pico SDK submodule missing: ${submodule}. Run: git -C \"${sdk_path}\" submodule update --init --recursive"
+      fail "Pico SDK submodule missing: ${submodule}. Run: git -C \"${sdk_path}\" submodule update --init --recursive"
     fi
   done
 fi

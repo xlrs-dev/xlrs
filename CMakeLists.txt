@@ -50,6 +50,7 @@ target_compile_definitions(xlrs_core PUBLIC
 target_link_libraries(xlrs_core PUBLIC
     pico_stdlib
     pico_multicore
+    pico_flash
     hardware_flash
     hardware_irq
     hardware_spi

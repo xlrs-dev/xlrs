@@ -90,6 +90,29 @@ cmake --build build --target xlrs_tx xlrs_rx
 
 Build outputs are written under `build/`, including `xlrs_tx.uf2` and `xlrs_rx.uf2`.
 
+## Test
+
+The pure-logic layers (UID/FHSS, OTA packing, AEAD crypto, PFD timing, the link
+state machine, scheduler, and telemetry transport) have a host-native test suite
+that runs off-device — no Pico SDK or hardware required:
+
+```bash
+scripts/test.sh
+```
+
+This configures the standalone project in `test/`, fetches the Unity framework,
+builds `xlrs_native_tests`, and runs it under CTest. To do it by hand:
+
+```bash
+cmake -S test -B build-tests
+cmake --build build-tests
+ctest --test-dir build-tests --output-on-failure
+```
+
+The suite compiles the `lib/xlrs` sources with their native fallbacks selected
+(neither `XLRS_PICO_SDK` nor `PICO_BOARD` defined), so the link logic runs
+against a simulated clock, in-RAM flash, and a `MockPhy` two-node radio sim.
+
 ## Binding
 
 TX and RX must use the same binding phrase. The phrase is hashed into a Link UID used for FHSS seeding, SX1280 sync-word configuration, and sync-frame UID checks.

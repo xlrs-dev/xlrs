@@ -76,6 +76,7 @@ Requirements:
 - CMake
 - Ninja
 - Python 3
+- clang-tidy, available from LLVM (`brew install llvm` on macOS)
 - Arm embedded GCC (`arm-none-eabi-gcc`)
 - Raspberry Pi Pico SDK
 - Optional for flashing: a USB-capable `picotool`
@@ -214,6 +215,21 @@ that runs off-device, with no Pico SDK or hardware required:
 ```bash
 scripts/test.sh
 ```
+
+Run clang-tidy against the host-native compile database:
+
+```bash
+scripts/lint.sh
+```
+
+If `clang-tidy` is not on `PATH`, point the helper at it:
+
+```bash
+CLANG_TIDY=/path/to/clang-tidy scripts/lint.sh
+```
+
+On Apple Silicon Homebrew installs LLVM as keg-only; the helper auto-detects
+`/opt/homebrew/opt/llvm/bin/clang-tidy`.
 
 This configures the standalone project in `test/`, fetches the Unity framework,
 builds `xlrs_native_tests`, and runs it under CTest. To do it by hand:

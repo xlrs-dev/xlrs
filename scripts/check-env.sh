@@ -51,6 +51,21 @@ else
   fail "python3 is not installed or not on PATH."
 fi
 
+clang_tidy_path=""
+if have_command clang-tidy; then
+  clang_tidy_path="$(command -v clang-tidy)"
+elif [[ -x /opt/homebrew/opt/llvm/bin/clang-tidy ]]; then
+  clang_tidy_path="/opt/homebrew/opt/llvm/bin/clang-tidy"
+elif [[ -x /usr/local/opt/llvm/bin/clang-tidy ]]; then
+  clang_tidy_path="/usr/local/opt/llvm/bin/clang-tidy"
+fi
+
+if [[ -n "${clang_tidy_path}" ]]; then
+  ok "clang-tidy found: ${clang_tidy_path} ($("${clang_tidy_path}" --version | head -n 1))"
+else
+  warn "clang-tidy is not installed or not on PATH. Install LLVM for scripts/lint.sh (macOS: brew install llvm)."
+fi
+
 sdk_path="${PICO_SDK_PATH:-}"
 if [[ -z "${sdk_path}" && -d "${default_sdk}" ]]; then
   sdk_path="${default_sdk}"

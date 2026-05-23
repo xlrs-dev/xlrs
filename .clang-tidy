@@ -1,0 +1,25 @@
+Checks: >
+  -*,
+  clang-analyzer-*,
+  bugprone-*,
+  performance-*,
+  portability-*,
+  misc-unused-parameters,
+  modernize-use-nullptr,
+  modernize-use-override,
+  modernize-deprecated-headers,
+  readability-braces-around-statements,
+  readability-duplicate-include,
+  readability-inconsistent-declaration-parameter-name,
+  readability-misleading-indentation,
+  readability-redundant-control-flow,
+  readability-simplify-boolean-expr
+
+WarningsAsErrors: ''
+HeaderFilterRegex: '^.*/(lib|apps|test)/'
+SystemHeaders: false
+FormatStyle: file
+
+CheckOptions:
+  - key: readability-braces-around-statements.ShortStatementLines
+    value: '1'

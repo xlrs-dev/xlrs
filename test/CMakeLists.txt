@@ -41,6 +41,7 @@ function(add_xlrs_test suite)
     add_executable(xlrs_${suite}_tests
         ${suite}_tests.cpp
         ${XLRS_TEST_LIB_SOURCES}
+        ${ARGN}
     )
     target_include_directories(xlrs_${suite}_tests PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}
@@ -58,3 +59,8 @@ endfunction()
 foreach(suite core timing scheduler link telemetry power crypto app flash)
     add_xlrs_test(${suite})
 endforeach()
+
+add_xlrs_test(crsf
+    ${XLRS_LIB_DIR}/crsfSerial/crsfSerial.cpp
+    ${XLRS_LIB_DIR}/crc8/crc8.cpp
+)

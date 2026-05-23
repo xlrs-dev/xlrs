@@ -176,6 +176,7 @@ void CrsfSerial::checkLinkDown()
 
 void CrsfSerial::processPacketIn(uint8_t len)
 {
+    (void)len;
     const crsf_header_t *hdr = (crsf_header_t *)_rxBuf;
     if (hdr->type >= CRSF_FRAMETYPE_DEVICE_PING && hdr->type <= CRSF_FRAMETYPE_COMMAND)
     {
@@ -223,7 +224,7 @@ void CrsfSerial::packetExtendedHeader(const crsf_header_t *p)
     uint8_t payloadLen = p->frame_size >= CRSF_FRAME_LENGTH_EXT_TYPE_CRC
         ? (uint8_t)(p->frame_size - CRSF_FRAME_LENGTH_EXT_TYPE_CRC)
         : 0;
-    if (p->frame_size < CRSF_FRAME_LENGTH_EXT_TYPE_CRC || !p->data) return;
+    if (p->frame_size < CRSF_FRAME_LENGTH_EXT_TYPE_CRC) return;
 
     uint8_t destination = p->data[0];
     uint8_t origin = p->data[1];
@@ -324,7 +325,7 @@ void CrsfSerial::packetDeviceInfo(const crsf_header_t *p)
     uint8_t payloadLen = p->frame_size >= (uint8_t)(CRSF_FRAME_LENGTH_TYPE_CRC + payloadOffset)
         ? (uint8_t)(p->frame_size - CRSF_FRAME_LENGTH_TYPE_CRC - payloadOffset)
         : 0;
-    if (payloadLen < 15 || !p->data) return;
+    if (payloadLen < 15) return;
 
     const uint8_t *payload = &p->data[payloadOffset];
     const char *name = (const char *)payload;
@@ -343,7 +344,7 @@ void CrsfSerial::packetParameterEntry(const crsf_header_t *p)
     uint8_t payloadLen = p->frame_size >= (uint8_t)(CRSF_FRAME_LENGTH_TYPE_CRC + payloadOffset)
         ? (uint8_t)(p->frame_size - CRSF_FRAME_LENGTH_TYPE_CRC - payloadOffset)
         : 0;
-    if (payloadLen < 5 || !p->data) return;
+    if (payloadLen < 5) return;
 
     const uint8_t *payload = &p->data[payloadOffset];
     uint8_t fieldId = payload[0];

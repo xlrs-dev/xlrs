@@ -63,6 +63,8 @@ static std::atomic<uint32_t> g_rfHeartbeat{0};
 static constexpr uint32_t WATCHDOG_TIMEOUT_MS    = 1000; // HW reboots if not fed within this
 static constexpr uint32_t RF_STALL_MS            = 500;  // stop feeding if RF core stalls this long
 static constexpr uint32_t WATCHDOG_BOOT_GRACE_MS = 3000; // feed unconditionally until RF core is up
+static constexpr uint32_t BIND_SCAN_NORMAL_WINDOW_MS = 4000;
+static constexpr uint32_t BIND_SCAN_WINDOW_MS = 1500;
 
 xlrs::Link g_link;
 xlrs::RfScheduler g_scheduler;
@@ -322,6 +324,8 @@ static void rf_core_main() {
     }
 
     while (true) {
+        static bool bindScanning = false;
+        static uint32_t nextBindScanSwitchMs = xlrs::hal::nowMs() + BIND_SCAN_NORMAL_WINDOW_MS;
         static bool telemetryPending = false;
         static xlrs::AppTelemetryMessage pendingTelemetryMessage{};
         xlrs::AppTelemetryMessage telemetryMessage{};
@@ -336,12 +340,41 @@ static void rf_core_main() {
             }
         }
 
+        const uint32_t now = xlrs::hal::nowMs();
+        if (g_link.state() == xlrs::LinkState::Connected) {
+            if (bindScanning) {
+                g_link.setLinkUid(uid);
+                g_phy.setSyncWord(g_link.syncWord());
+                bindScanning = false;
+            }
+            nextBindScanSwitchMs = now + BIND_SCAN_NORMAL_WINDOW_MS;
+        } else if ((int32_t)(now - nextBindScanSwitchMs) >= 0) {
+            if (bindScanning) {
+                g_link.setLinkUid(uid);
+                g_phy.setSyncWord(g_link.syncWord());
+                bindScanning = false;
+                nextBindScanSwitchMs = now + BIND_SCAN_NORMAL_WINDOW_MS;
+            } else {
+                g_link.startBindScan();
+                g_phy.setSyncWord(g_link.syncWord());
+                bindScanning = true;
+                nextBindScanSwitchMs = now + BIND_SCAN_WINDOW_MS;
+            }
+        }
+
         g_scheduler.poll();
 
         static uint32_t lastServiceTick = 0;
         uint32_t currentTick = g_scheduler.processedTick();
         if (currentTick > lastServiceTick) {
             lastServiceTick = currentTick;
+
+            uint8_t receivedBindUid[xlrs::LINK_UID_SIZE] = {};
+            xlrs::AppTelemetryMessage bindMessage{};
+            if (g_link.takeReceivedBindUid(receivedBindUid) &&
+                xlrs::makeBindUidMessage(receivedBindUid, bindMessage)) {
+                g_rfTelemetryToApp.push(bindMessage);
+            }
 
             RfToAppData rfData;
             rfData.state = g_link.state();

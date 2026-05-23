@@ -42,8 +42,10 @@ Current limitations:
   `XLRS_TX_CONTROLLER_PROTOCOL=CRSF` is selected at configure time.
 - CRSF parameter writes persist config to flash on both modules. RF
   rate/region/power/failsafe changes are applied after reboot.
-- Bind RX sends the TX module's current binding identity over the already
-  connected link. It does not discover or bind an unconnected RX.
+- Bind RX puts the TX module into a temporary OTA bind-transmit window. An
+  unconnected RX periodically scans the shared XLRS bind identity, accepts a
+  valid bind frame, persists the offered Link UID, and reboots back to normal
+  operation.
 - A dedicated XLRS Lua script is not implemented yet.
 - XLRS currently carries 8 OTA `rc_channel` values. CRSF channels 9-16 are parsed
   by the CRSF decoder but are not transmitted over the XLRS uplink.

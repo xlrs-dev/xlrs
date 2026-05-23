@@ -46,8 +46,8 @@ with `-DXLRS_TX_CONTROLLER_PROTOCOL=CRSF` to use controller-facing CRSF instead.
 
 ## Binding
 
-Binding is phrase-based. There is no implemented over-the-air pairing exchange
-where TX and RX trade hardware IDs.
+Binding is Link-UID based. A Link UID can be derived from a local binding phrase
+or learned through the OTA bind workflow.
 
 Both modules must have the same binding phrase. On boot each module:
 
@@ -61,6 +61,20 @@ Both modules must have the same binding phrase. On boot each module:
 
 If the phrases differ, the modules use different sync words and FHSS sequences,
 and the RX rejects sync frames whose UID CRC does not match.
+
+### OTA Bind
+
+When the controller-facing CRSF Bind RX command is triggered, TX temporarily
+switches to a shared XLRS bind identity for about 30 seconds and transmits a
+bind frame containing its current Link UID. An unconnected RX periodically
+alternates between normal acquisition and short bind-scan windows on that shared
+bind identity. If it receives a valid bind frame while scanning, it persists the
+offered Link UID and reboots.
+
+The RX does not check the normal binding phrase during bind scan; doing so would
+prevent first-time pairing. It only accepts bind frames while explicitly in
+bind-scan mode on the shared bind identity. This is discovery/pairing, not a
+cryptographic ownership proof.
 
 ### Compile-Time Binding
 
@@ -291,15 +305,15 @@ Implemented today:
   `XLRS_TX_CONTROLLER_PROTOCOL=CRSF` is selected.
 - TX-mediated RX RF config persistence and RX-to-TX CRSF telemetry bridge.
 - TX runtime binding phrase update.
+- CRSF Bind RX for an unconnected RX using temporary OTA bind scan/transmit.
 - RX CRSF RC and link-statistics output.
 - Flash-backed RF config with validated defaults.
 - Flash-backed binding UID with validated defaults.
 
 Reserved or incomplete:
 
-- Binding an RX that is not already connected with a compatible identity.
 - Runtime RF config application without reboot.
-- True pair/bond workflow.
+- Cryptographic pair/bond ownership proof.
 - Dedicated EdgeTX/OpenTX Lua script.
 - CRSF bind phrase commands.
 - External MSP/config passthrough API.

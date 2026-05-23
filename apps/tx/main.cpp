@@ -58,6 +58,7 @@ static std::atomic<uint32_t> g_rfHeartbeat{0};
 static constexpr uint32_t WATCHDOG_TIMEOUT_MS    = 1000; // HW reboots if not fed within this
 static constexpr uint32_t RF_STALL_MS            = 500;  // stop feeding if RF core stalls this long
 static constexpr uint32_t WATCHDOG_BOOT_GRACE_MS = 3000; // feed unconditionally until RF core is up
+static constexpr uint32_t BIND_TRANSMIT_WINDOW_MS = 30000;
 
 xlrs::Link g_link;
 xlrs::RfScheduler g_scheduler;
@@ -322,7 +323,7 @@ void onCrsfParameterWrite(uint8_t parameterNumber, const uint8_t* value, uint8_t
             if (valueLen >= 1 && value[0] == CRSF_COMMAND_START) {
                 uint8_t uid[xlrs::LINK_UID_SIZE] = {};
                 xlrs::AppTelemetryMessage message{};
-                if (g_bindingStore.getBindingUid(uid) && xlrs::makeBindUidMessage(uid, message)) {
+                if (g_bindingStore.getBindingUid(uid) && xlrs::makeStartBindMessage(uid, message)) {
                     g_appTelemetryToRf.push(message);
                 }
                 sendCrsfParameter(origin, parameterNumber);
@@ -565,18 +566,42 @@ static void rf_core_main() {
     }
 
     while (true) {
+        static uint32_t bindTransmitUntilMs = 0;
         static bool telemetryPending = false;
         static xlrs::AppTelemetryMessage pendingTelemetryMessage{};
         xlrs::AppTelemetryMessage telemetryMessage{};
+        uint8_t bindUid[xlrs::LINK_UID_SIZE] = {};
+        if (telemetryPending &&
+            xlrs::parseStartBindMessage(pendingTelemetryMessage.data,
+                                        pendingTelemetryMessage.len,
+                                        bindUid)) {
+            g_link.startBindTransmit(bindUid);
+            g_phy.setSyncWord(g_link.syncWord());
+            bindTransmitUntilMs = xlrs::hal::nowMs() + BIND_TRANSMIT_WINDOW_MS;
+            telemetryPending = false;
+        }
         if (telemetryPending) {
             telemetryPending = !g_link.queueTelemetry(pendingTelemetryMessage.data,
                                                       pendingTelemetryMessage.len);
         }
         if (!telemetryPending && g_appTelemetryToRf.pop(telemetryMessage)) {
-            telemetryPending = !g_link.queueTelemetry(telemetryMessage.data, telemetryMessage.len);
-            if (telemetryPending) {
-                pendingTelemetryMessage = telemetryMessage;
+            if (xlrs::parseStartBindMessage(telemetryMessage.data, telemetryMessage.len, bindUid)) {
+                g_link.startBindTransmit(bindUid);
+                g_phy.setSyncWord(g_link.syncWord());
+                bindTransmitUntilMs = xlrs::hal::nowMs() + BIND_TRANSMIT_WINDOW_MS;
+            } else {
+                telemetryPending = !g_link.queueTelemetry(telemetryMessage.data, telemetryMessage.len);
+                if (telemetryPending) {
+                    pendingTelemetryMessage = telemetryMessage;
+                }
             }
+        }
+
+        if (g_link.bindTransmitActive() && bindTransmitUntilMs != 0 &&
+            (int32_t)(xlrs::hal::nowMs() - bindTransmitUntilMs) >= 0) {
+            g_link.setLinkUid(uid);
+            g_phy.setSyncWord(g_link.syncWord());
+            bindTransmitUntilMs = 0;
         }
 
         AppToRfData appData;

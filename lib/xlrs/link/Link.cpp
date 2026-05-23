@@ -19,6 +19,8 @@
 namespace xlrs {
 
 static NullCipher s_nullCipher;   // default when no cipher is set (plaintext, integrity = PHY CRC)
+static constexpr uint8_t BIND_FRAME_MAGIC[3] = {'X', 'B', 1};
+static constexpr uint8_t BIND_FRAME_LEN = 1 + sizeof(BIND_FRAME_MAGIC) + LINK_UID_SIZE + 1;
 
 static uint8_t uidCrc8(const uint8_t uid[8]) {
     uint8_t crc = 0xA5;
@@ -31,6 +33,33 @@ static uint8_t uidCrc8(const uint8_t uid[8]) {
     return crc;
 }
 
+void Link::configureIdentity(const uint8_t uid[LINK_UID_SIZE]) {
+    _syncWord = syncWordFromUid(uid);
+    _uidCrc = uidCrc8(uid);
+    _fhss.generate(fhssSeedFromUid(uid), kNumFhssChannels2g4, kNumFhssChannels2g4);
+}
+
+void Link::resetAcquisition(LinkState state) {
+    _state = state;
+    _locked = false;
+    _syncSeen = false;
+    _rxPos = 0;
+    _lastRxTick = 0;
+    _everRx = false;
+    _consecutiveMissedUplinks = 0;
+    _consecutiveMissedTelemetry = 0;
+    _gotRcThisTick = false;
+    _gotSyncThisTick = false;
+    _gotTlmThisTick = false;
+    _gotValidUplinkThisTick = false;
+    _gotValidTelemetryThisTick = false;
+    _lq.reset();
+    _lqDown.reset();
+    _stats.lqUp = 0;
+    _stats.lqDown = 0;
+    _stats.fhssIndex = 0;
+}
+
 void Link::begin(Role role, const uint8_t uid[8], uint8_t rateIndex, int8_t maxPowerDbm, bool useDynamicPower) {
     _role     = role;
     if (rateIndex >= kNumRates) rateIndex = 0;
@@ -40,26 +69,18 @@ void Link::begin(Role role, const uint8_t uid[8], uint8_t rateIndex, int8_t maxP
     _switchCyclesRemaining = 0;
     _tick = 0;
     _rate     = kRates[rateIndex];
-    _syncWord = syncWordFromUid(uid);
-    _uidCrc   = uidCrc8(uid);
-    _fhss.generate(fhssSeedFromUid(uid), kNumFhssChannels2g4, kNumFhssChannels2g4);
+    configureIdentity(uid);
     _fsMode   = FailsafeMode::NoPulses;
-    _state    = LinkState::Connecting;
-    _locked   = false;
-    _syncSeen = false;
-    _rxPos    = 0;
-    _lastRxTick = 0;
-    _everRx     = false;
+    resetAcquisition(LinkState::Connecting);
     _txCounter  = 0;
-    _consecutiveMissedUplinks = 0;
-    _consecutiveMissedTelemetry = 0;
-    _lq.reset();
-    _lqDown.reset();
     _stats = LinkStats{};
     _stats.rateIndex = _rateIndex;
     for (uint8_t i = 0; i < RC_CHANNELS; ++i) _ch[i] = 1024;   // mid (11-bit)
     _txUseCompact = false;
     _auxCenteredFrames = 0;
+    _bindTransmitActive = false;
+    _bindScanActive = false;
+    _receivedBindUidReady = false;
     _txPowerDbm = maxPowerDbm;
     _stats.txPowerDbm = _txPowerDbm;
     if (_role == Role::Tx) {
@@ -69,6 +90,44 @@ void Link::begin(Role role, const uint8_t uid[8], uint8_t rateIndex, int8_t maxP
             _power.begin(maxPowerDbm, maxPowerDbm, maxPowerDbm);            // static power at max
         }
     }
+}
+
+void Link::setLinkUid(const uint8_t uid[LINK_UID_SIZE]) {
+    if (!uid) return;
+    configureIdentity(uid);
+    _bindTransmitActive = false;
+    _bindScanActive = false;
+    _receivedBindUidReady = false;
+    resetAcquisition(LinkState::Connecting);
+}
+
+void Link::startBindTransmit(const uint8_t targetUid[LINK_UID_SIZE]) {
+    if (_role != Role::Tx || !targetUid) return;
+    uint8_t bindUid[LINK_UID_SIZE];
+    bindModeUid(bindUid);
+    configureIdentity(bindUid);
+    memcpy(_bindTargetUid, targetUid, LINK_UID_SIZE);
+    _bindTransmitActive = true;
+    _bindScanActive = false;
+    resetAcquisition(LinkState::Binding);
+}
+
+void Link::startBindScan() {
+    if (_role != Role::Rx) return;
+    uint8_t bindUid[LINK_UID_SIZE];
+    bindModeUid(bindUid);
+    configureIdentity(bindUid);
+    _bindTransmitActive = false;
+    _bindScanActive = true;
+    _receivedBindUidReady = false;
+    resetAcquisition(LinkState::Binding);
+}
+
+bool Link::takeReceivedBindUid(uint8_t uid[LINK_UID_SIZE]) {
+    if (!uid || !_receivedBindUidReady) return false;
+    memcpy(uid, _receivedBindUid, LINK_UID_SIZE);
+    _receivedBindUidReady = false;
+    return true;
 }
 
 void Link::requestRate(uint8_t rateIndex) {
@@ -158,6 +217,18 @@ Slot Link::slotForTick(uint32_t tick) const {
 bool Link::getTxPayload(uint32_t tick, uint16_t pos, uint8_t* outBuf, uint8_t& outLen) {
     if (_role == Role::Tx) {
         SlotKind k = slotKind(tick, pos);
+        if (_bindTransmitActive) {
+            if (k == SlotKind::Sync || k == SlotKind::Uplink) {
+                outBuf[0] = otaMakeHeader(OtaType::Bind);
+                memcpy(outBuf + 1, BIND_FRAME_MAGIC, sizeof(BIND_FRAME_MAGIC));
+                memcpy(outBuf + 1 + sizeof(BIND_FRAME_MAGIC), _bindTargetUid, LINK_UID_SIZE);
+                outBuf[BIND_FRAME_LEN - 1] = uidCrc8(_bindTargetUid);
+                outLen = BIND_FRAME_LEN;
+                ++_txCounter;
+                return true;
+            }
+            return false;
+        }
         if (k == SlotKind::Sync) {
             SyncPayload s{};
             s.fhssIndex     = (uint8_t)pos;
@@ -253,9 +324,27 @@ bool Link::getTxPayload(uint32_t tick, uint16_t pos, uint8_t* outBuf, uint8_t& o
 }
 
 bool Link::processRxPayload(uint32_t tick, uint16_t pos, const uint8_t* data, uint8_t len, int16_t rssi, int8_t snr) {
+    if (!data || len == 0) return false;
+
     SyncPayload s{};
     uint16_t rxch[RC_CHANNELS];
     uint8_t  upLq;  int16_t upRssi;  int8_t upSnr;
+
+    if (_role == Role::Rx && _bindScanActive && len >= BIND_FRAME_LEN &&
+        otaVersion(data[0]) == OTA_VERSION && otaType(data[0]) == OtaType::Bind) {
+        if (memcmp(data + 1, BIND_FRAME_MAGIC, sizeof(BIND_FRAME_MAGIC)) != 0) return false;
+        const uint8_t* offeredUid = data + 1 + sizeof(BIND_FRAME_MAGIC);
+        if (data[BIND_FRAME_LEN - 1] != uidCrc8(offeredUid)) return false;
+        memcpy(_receivedBindUid, offeredUid, LINK_UID_SIZE);
+        _receivedBindUidReady = true;
+        _gotValidUplinkThisTick = true;
+        _lastRxTick = tick;
+        _everRx = true;
+        _stats.rssiDbm = rssi;
+        _stats.snr = snr;
+        _state = LinkState::Binding;
+        return true;
+    }
 
     if (otaDecodeSync(data, len, s)) {
         if (s.uidCrc != _uidCrc) return false;

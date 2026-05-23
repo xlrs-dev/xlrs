@@ -22,6 +22,7 @@ enum class AppTelemetryType : uint8_t {
     BindUid = 2,
     CrsfFrame = 3,
     Reboot = 4,
+    StartBind = 5,
 };
 
 inline bool appTelemetryHasPrefix(const uint8_t* payload, size_t len, AppTelemetryType type) {
@@ -68,6 +69,26 @@ inline bool makeBindUidMessage(const uint8_t uid[LINK_UID_SIZE], AppTelemetryMes
 
 inline bool parseBindUidMessage(const uint8_t* payload, size_t len, uint8_t uid[LINK_UID_SIZE]) {
     if (!uid || !appTelemetryHasPrefix(payload, len, AppTelemetryType::BindUid) ||
+        len < 4 + LINK_UID_SIZE) {
+        return false;
+    }
+    memcpy(uid, &payload[4], LINK_UID_SIZE);
+    return true;
+}
+
+inline bool makeStartBindMessage(const uint8_t uid[LINK_UID_SIZE], AppTelemetryMessage& out) {
+    if (!uid) return false;
+    out.len = 4 + LINK_UID_SIZE;
+    out.data[0] = 'X';
+    out.data[1] = 'L';
+    out.data[2] = 1;
+    out.data[3] = (uint8_t)AppTelemetryType::StartBind;
+    memcpy(&out.data[4], uid, LINK_UID_SIZE);
+    return true;
+}
+
+inline bool parseStartBindMessage(const uint8_t* payload, size_t len, uint8_t uid[LINK_UID_SIZE]) {
+    if (!uid || !appTelemetryHasPrefix(payload, len, AppTelemetryType::StartBind) ||
         len < 4 + LINK_UID_SIZE) {
         return false;
     }

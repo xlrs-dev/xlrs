@@ -87,6 +87,12 @@ public:
     void requestRate(uint8_t rateIndex);   // TX: switch rate (conveyed to RX via the Sync beacon)
     void setCipher(ICipher* c) { _cipher = c; }              // opt-in AEAD over the RC payload
     void setSessionSalt(uint32_t salt) { _sessionSalt = salt; }  // negotiated at Connect (real); fixed in sim
+    void setLinkUid(const uint8_t uid[LINK_UID_SIZE]);
+    void startBindTransmit(const uint8_t targetUid[LINK_UID_SIZE]);
+    void startBindScan();
+    bool bindTransmitActive() const { return _bindTransmitActive; }
+    bool bindScanActive() const { return _bindScanActive; }
+    bool takeReceivedBindUid(uint8_t uid[LINK_UID_SIZE]);
 
     void onTick(uint32_t tick);
     float freqForTick(uint32_t tick) const;
@@ -121,6 +127,8 @@ private:
     uint16_t hopInterval() const;
     SlotKind slotKind(uint32_t tick, uint16_t pos) const;
     float    freqForPos(uint16_t pos) const;
+    void     configureIdentity(const uint8_t uid[LINK_UID_SIZE]);
+    void     resetAcquisition(LinkState state);
 
     Role         _role      = Role::Rx;
     RateConfig   _rate{};
@@ -162,6 +170,11 @@ private:
     uint8_t          _localAckSeq = 0;
     bool             _txUseCompact = false;     // compact-frame hysteresis state (TX)
     uint16_t         _auxCenteredFrames = 0;    // consecutive RC frames eligible for compact pack
+    bool             _bindTransmitActive = false;
+    bool             _bindScanActive = false;
+    uint8_t          _bindTargetUid[LINK_UID_SIZE] = {};
+    uint8_t          _receivedBindUid[LINK_UID_SIZE] = {};
+    bool             _receivedBindUidReady = false;
 };
 
 } // namespace xlrs

@@ -84,6 +84,11 @@ static void test_app_telemetry_messages() {
     TEST_ASSERT_TRUE(makeBindUidMessage(uid, message));
     TEST_ASSERT_TRUE(parseBindUidMessage(message.data, message.len, parsedUid));
     TEST_ASSERT_EQUAL_UINT8_ARRAY(uid, parsedUid, LINK_UID_SIZE);
+
+    memset(parsedUid, 0, sizeof(parsedUid));
+    TEST_ASSERT_TRUE(makeStartBindMessage(uid, message));
+    TEST_ASSERT_TRUE(parseStartBindMessage(message.data, message.len, parsedUid));
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(uid, parsedUid, LINK_UID_SIZE);
 }
 
 void setUp() {}

@@ -390,33 +390,33 @@ static void rf_core_main() {
             }
         }
 
-        const uint32_t now = xlrs::hal::nowMs();
-        if (g_link.state() == xlrs::LinkState::Connected) {
-            normalLinkSeen = true;
+        // Bind-scan windowing only matters before the first link of this power cycle. Once
+        // connected, normalLinkSeen latches and the RX never re-enters bind scan, so the window
+        // timer — and its per-iteration nowMs() (a 64-bit divide on the RF-core spin loop) — is
+        // skipped in the steady-state hot path. processedTick() free-runs off the hardware timer
+        // regardless of link state, so the scan windows still toggle while disconnected.
+        const xlrs::LinkState linkState = g_link.state();
+        if (linkState == xlrs::LinkState::Connected || normalLinkSeen) {
+            if (linkState == xlrs::LinkState::Connected) normalLinkSeen = true;
             if (bindScanning) {
                 g_link.setLinkUid(uid);
                 g_phy.setSyncWord(g_link.syncWord());
                 bindScanning = false;
             }
-            nextBindScanSwitchMs = now + BIND_SCAN_NORMAL_WINDOW_MS;
-        } else if (normalLinkSeen) {
-            if (bindScanning) {
-                g_link.setLinkUid(uid);
-                g_phy.setSyncWord(g_link.syncWord());
-                bindScanning = false;
-            }
-            nextBindScanSwitchMs = now + BIND_SCAN_NORMAL_WINDOW_MS;
-        } else if ((int32_t)(now - nextBindScanSwitchMs) >= 0) {
-            if (bindScanning) {
-                g_link.setLinkUid(uid);
-                g_phy.setSyncWord(g_link.syncWord());
-                bindScanning = false;
-                nextBindScanSwitchMs = now + BIND_SCAN_NORMAL_WINDOW_MS;
-            } else {
-                g_link.startBindScan();
-                g_phy.setSyncWord(g_link.syncWord());
-                bindScanning = true;
-                nextBindScanSwitchMs = now + BIND_SCAN_WINDOW_MS;
+        } else {
+            const uint32_t now = xlrs::hal::nowMs();
+            if ((int32_t)(now - nextBindScanSwitchMs) >= 0) {
+                if (bindScanning) {
+                    g_link.setLinkUid(uid);
+                    g_phy.setSyncWord(g_link.syncWord());
+                    bindScanning = false;
+                    nextBindScanSwitchMs = now + BIND_SCAN_NORMAL_WINDOW_MS;
+                } else {
+                    g_link.startBindScan();
+                    g_phy.setSyncWord(g_link.syncWord());
+                    bindScanning = true;
+                    nextBindScanSwitchMs = now + BIND_SCAN_WINDOW_MS;
+                }
             }
         }
 

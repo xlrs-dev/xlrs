@@ -672,15 +672,8 @@ static void rf_core_main() {
         static xlrs::AppTelemetryMessage pendingTelemetryMessage{};
         xlrs::AppTelemetryMessage telemetryMessage{};
         uint8_t bindUid[xlrs::LINK_UID_SIZE] = {};
-        if (telemetryPending &&
-            xlrs::parseStartBindMessage(pendingTelemetryMessage.data,
-                                        pendingTelemetryMessage.len,
-                                        bindUid)) {
-            g_link.startBindTransmit(bindUid);
-            g_phy.setSyncWord(g_link.syncWord());
-            bindTransmitUntilMs = xlrs::hal::nowMs() + BIND_TRANSMIT_WINDOW_MS;
-            telemetryPending = false;
-        }
+        // pendingTelemetryMessage only ever holds a message that failed to queue, and StartBind is
+        // consumed directly below (never queued/stashed), so a pending message is never a StartBind.
         if (telemetryPending) {
             telemetryPending = !g_link.queueTelemetry(pendingTelemetryMessage.data,
                                                       pendingTelemetryMessage.len);

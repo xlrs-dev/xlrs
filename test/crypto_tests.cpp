@@ -1,5 +1,5 @@
 #include <unity.h>
-#include <string.h>
+#include <cstring>
 
 #include "crypto/AeadCipher.h"
 #include "crypto/Chacha20Poly1305.h"
@@ -15,7 +15,7 @@ static void test_chacha20poly1305_rfc8439() {
                      "one tip for the future, sunscreen would be it.";
     size_t len = strlen(pt);
     uint8_t buf[128];
-    memcpy(buf, pt, len);
+    memcpy(buf, pt, len); // NOLINT(bugprone-not-null-terminated-result): AEAD test buffer is binary plaintext.
     uint8_t tag[16];
     cc20p1305::seal(key, nonce, aad, 12, buf, len, tag);
     static const uint8_t expect_tag[16] =

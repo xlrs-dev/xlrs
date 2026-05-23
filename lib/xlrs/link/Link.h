@@ -44,15 +44,25 @@ struct LinkStats {
 template <uint8_t Window = 100>
 class LqTracker {
 public:
-    void reset() { for (uint8_t i = 0; i < Window; ++i) _hist[i] = false; _pos = _count = _filled = 0; }
+    void reset() {
+        for (uint8_t i = 0; i < Window; ++i) {
+            _hist[i] = false;
+        }
+        _pos = _count = _filled = 0;
+    }
 
     // Call once per expected slot; `received` = a valid packet arrived in that slot.
     void update(bool received) {
-        if (_hist[_pos] && !received) _count--;
-        else if (!_hist[_pos] && received) _count++;
+        if (_hist[_pos] && !received) {
+            _count--;
+        } else if (!_hist[_pos] && received) {
+            _count++;
+        }
         _hist[_pos] = received;
         _pos = (uint8_t)((_pos + 1) % Window);
-        if (_filled < Window) _filled++;
+        if (_filled < Window) {
+            _filled++;
+        }
     }
 
     uint8_t lq() const { return _filled ? (uint8_t)((uint16_t)_count * 100 / _filled) : 0; }

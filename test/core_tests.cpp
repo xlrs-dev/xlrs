@@ -1,5 +1,5 @@
 #include <unity.h>
-#include <string.h>
+#include <cstring>
 
 #include "app/CrsfLinkStats.h"
 #include "fhss/Fhss.h"

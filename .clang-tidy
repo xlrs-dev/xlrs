@@ -4,6 +4,7 @@ Checks: >
   bugprone-*,
   performance-*,
   portability-*,
+  -portability-avoid-pragma-once,
   misc-unused-parameters,
   modernize-use-nullptr,
   modernize-use-override,

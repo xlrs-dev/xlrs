@@ -74,7 +74,7 @@ inline bool otaDecodeTlmDown(const uint8_t* in, uint8_t len,
     if (otaVersion(in[0]) != OTA_VERSION)   return false;
     if (otaType(in[0]) != OtaType::TlmDown) return false;
     *upLq      = in[1];
-    *upRssiDbm = -(int16_t)in[2];
+    *upRssiDbm = (int16_t)(0 - (int16_t)in[2]);
     *upSnr     = (int8_t)in[3];
     return true;
 }

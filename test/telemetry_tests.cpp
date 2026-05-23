@@ -1,5 +1,5 @@
 #include <unity.h>
-#include <string.h>
+#include <cstring>
 
 #include "link/StubbornTelemetry.h"
 #include "link/Uid.h"

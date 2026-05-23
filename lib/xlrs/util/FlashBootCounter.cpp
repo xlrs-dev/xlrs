@@ -1,6 +1,6 @@
 // FlashBootCounter implementation.
 #include "util/FlashBootCounter.h"
-#include <string.h>
+#include <cstring>
 
 #if defined(XLRS_PICO_SDK) || defined(PICO_BOARD)
 #include <hardware/flash.h>

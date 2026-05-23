@@ -14,7 +14,7 @@
 #include "link/Uid.h"
 #include "ota/OtaCodec.h"
 #include "ota/OtaFrameShrink.h"
-#include <string.h>
+#include <cstring>
 
 namespace xlrs {
 

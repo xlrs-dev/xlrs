@@ -16,29 +16,29 @@ static inline void store32le(uint8_t* p, uint32_t v) {
     p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24);
 }
 
-#define XLRS_QR(a,b,c,d) \
-    a += b; d ^= a; d = rotl32(d,16); \
-    c += d; b ^= c; b = rotl32(b,12); \
-    a += b; d ^= a; d = rotl32(d, 8); \
+inline void quarterRound(uint32_t& a, uint32_t& b, uint32_t& c, uint32_t& d) {
+    a += b; d ^= a; d = rotl32(d, 16);
+    c += d; b ^= c; b = rotl32(b, 12);
+    a += b; d ^= a; d = rotl32(d, 8);
     c += d; b ^= c; b = rotl32(b, 7);
+}
 
 inline void chacha20_block(const uint8_t key[32], uint32_t counter,
                            const uint8_t nonce[12], uint8_t out[64]) {
     uint32_t s[16];
     s[0]=0x61707865; s[1]=0x3320646e; s[2]=0x79622d32; s[3]=0x6b206574;
-    for (int i = 0; i < 8; ++i) s[4+i] = load32le(key + 4*i);
+    for (size_t i = 0; i < 8; ++i) s[4+i] = load32le(key + 4*i);
     s[12] = counter;
     s[13] = load32le(nonce + 0); s[14] = load32le(nonce + 4); s[15] = load32le(nonce + 8);
     uint32_t x[16]; for (int i = 0; i < 16; ++i) x[i] = s[i];
     for (int i = 0; i < 10; ++i) {
-        XLRS_QR(x[0],x[4],x[8], x[12]); XLRS_QR(x[1],x[5],x[9], x[13]);
-        XLRS_QR(x[2],x[6],x[10],x[14]); XLRS_QR(x[3],x[7],x[11],x[15]);
-        XLRS_QR(x[0],x[5],x[10],x[15]); XLRS_QR(x[1],x[6],x[11],x[12]);
-        XLRS_QR(x[2],x[7],x[8], x[13]); XLRS_QR(x[3],x[4],x[9], x[14]);
+        quarterRound(x[0],x[4],x[8], x[12]); quarterRound(x[1],x[5],x[9], x[13]);
+        quarterRound(x[2],x[6],x[10],x[14]); quarterRound(x[3],x[7],x[11],x[15]);
+        quarterRound(x[0],x[5],x[10],x[15]); quarterRound(x[1],x[6],x[11],x[12]);
+        quarterRound(x[2],x[7],x[8], x[13]); quarterRound(x[3],x[4],x[9], x[14]);
     }
-    for (int i = 0; i < 16; ++i) store32le(out + 4*i, x[i] + s[i]);
+    for (size_t i = 0; i < 16; ++i) store32le(out + 4*i, x[i] + s[i]);
 }
-#undef XLRS_QR
 
 inline void chacha20_xor(const uint8_t key[32], uint32_t counter, const uint8_t nonce[12],
                          const uint8_t* in, uint8_t* out, size_t len) {

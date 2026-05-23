@@ -87,9 +87,6 @@ public:
                 _ready = true;
             }
             return true;
-        } else if (in.seq == (uint8_t)(_expectedSeq - 1)) {
-            outAckSeq = _expectedSeq;
-            return false;
         } else {
             outAckSeq = _expectedSeq;
             return false;

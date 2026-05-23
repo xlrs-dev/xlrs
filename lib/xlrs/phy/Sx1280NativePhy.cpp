@@ -43,10 +43,23 @@ Sx1280NativePhy* Sx1280NativePhy::s_self = nullptr;
 namespace {
 static spi_inst_t* kRadioSpi = spi0;
 
+// BUSY-line wait bound. The SX1280 holds BUSY for at most a few ms after any command
+// (datasheet §10.3); 10 ms is a generous ceiling that still bounds a wedged-chip stall to a
+// handful of slots instead of the previous 100 ms (tens of slots at the faster rates).
+static constexpr uint32_t BUSY_TIMEOUT_US = 10000;
+
 static uint8_t spiTransfer(uint8_t value) {
     uint8_t rx = 0;
     spi_write_read_blocking(kRadioSpi, &value, &rx, 1);
     return rx;
+}
+
+// frf = freqMHz * 2^18 / F_XTAL. Computed in 64-bit integer math (no soft-float multiply per
+// hop on the FPU-less RP2040). FHSS channel centres are integer MHz (channels_2g4.h), so the
+// conversion is exact.
+static uint32_t freqToReg(float freqMHz) {
+    uint32_t mhz = (uint32_t)(freqMHz + 0.5f);
+    return (uint32_t)(((uint64_t)mhz * SX1280_FREQ_DIV) / SX1280_XTAL_MHZ);
 }
 
 // SetTxParams power byte: Pout = -18 + power, valid register range 0..31 (-18..+13 dBm).
@@ -62,7 +75,8 @@ static uint8_t txPowerReg(int8_t dbm) {
 bool Sx1280NativePhy::waitBusy() {
     uint32_t start = hal::nowUs();
     while (gpio_get(SX128X_SPI_BUSY)) {
-        if (hal::nowUs() - start > 100000) { // 100ms timeout
+        if (hal::nowUs() - start > BUSY_TIMEOUT_US) {
+            _spiTimeouts.fetch_add(1, std::memory_order_relaxed);
             return false;
         }
         hal::sleepUs(1);
@@ -73,6 +87,7 @@ bool Sx1280NativePhy::waitBusy() {
 void Sx1280NativePhy::spiCommand(uint8_t opcode, const uint8_t* params, uint8_t len) {
     if (!waitBusy()) {
         _hardwareError.store(true, std::memory_order_release);
+        _lastFailOpcode.store(opcode, std::memory_order_relaxed);
         return;
     }
     gpio_put(SX128X_SPI_CS, false);
@@ -85,6 +100,73 @@ void Sx1280NativePhy::spiCommand(uint8_t opcode, const uint8_t* params, uint8_t 
     hal::sleepUs(2);
     if (!waitBusy()) {
         _hardwareError.store(true, std::memory_order_release);
+        _lastFailOpcode.store(opcode, std::memory_order_relaxed);
+    }
+}
+
+// GET-status reads share one shape: opcode, one dummy status byte, then `len` payload bytes.
+// Any BUSY timeout aborts the whole read (returns false) so a caller never interprets bytes
+// clocked out of a wedged chip.
+bool Sx1280NativePhy::readCommand(uint8_t opcode, uint8_t* out, uint8_t len) {
+    if (!waitBusy()) {
+        _hardwareError.store(true, std::memory_order_release);
+        _lastFailOpcode.store(opcode, std::memory_order_relaxed);
+        return false;
+    }
+    gpio_put(SX128X_SPI_CS, false);
+    hal::sleepUs(2);
+    spiTransfer(opcode);
+    spiTransfer(0x00); // dummy status byte
+    for (uint8_t i = 0; i < len; i++) {
+        out[i] = spiTransfer(0x00);
+    }
+    gpio_put(SX128X_SPI_CS, true);
+    hal::sleepUs(2);
+    if (!waitBusy()) {
+        _hardwareError.store(true, std::memory_order_release);
+        _lastFailOpcode.store(opcode, std::memory_order_relaxed);
+        return false;
+    }
+    return true;
+}
+
+void Sx1280NativePhy::clearIrqStatus() {
+    uint8_t clearParams[2] = { 0xFF, 0xFF };
+    spiCommand(SX1280_OP_CLEAR_IRQ_STATUS, clearParams, 2);
+}
+
+void Sx1280NativePhy::buildModParams(uint8_t out[3]) const {
+    if (_cfg.modulation == Modulation::Lora) {
+        out[0] = (uint8_t)(_cfg.sf << 4);
+        if (_cfg.bwKHz > 1200.0f)      out[1] = SX1280_LORA_BW_1600;
+        else if (_cfg.bwKHz > 600.0f)  out[1] = SX1280_LORA_BW_800;
+        else if (_cfg.bwKHz > 300.0f)  out[1] = SX1280_LORA_BW_400;
+        else                           out[1] = SX1280_LORA_BW_200;
+        out[2] = (uint8_t)(_cfg.cr - 4);
+    } else { // FLRC
+        out[0] = (_cfg.flrcBitrateKbps < 800) ? SX1280_FLRC_BR_0_650 : SX1280_FLRC_BR_1_300;
+        out[1] = (uint8_t)((_cfg.cr - 2) * 2);
+        out[2] = SX1280_FLRC_BT_0_5;
+    }
+}
+
+void Sx1280NativePhy::buildPacketParams(uint8_t out[7], uint8_t payloadLen) const {
+    if (_cfg.modulation == Modulation::Lora) {
+        out[0] = SX1280_LORA_PREAMBLE_12;
+        out[1] = SX1280_LORA_HEADER_IMPLICIT;
+        out[2] = payloadLen;
+        out[3] = SX1280_LORA_CRC_ON;
+        out[4] = SX1280_LORA_IQ_STD;
+        out[5] = 0x00;
+        out[6] = 0x00;
+    } else { // FLRC — sync-match/CRC selectors aligned with SWDR005
+        out[0] = SX1280_FLRC_PREAMBLE_16_BITS;
+        out[1] = SX1280_FLRC_SYNC_WORD_4_BYTES;
+        out[2] = SX1280_FLRC_SYNC_MATCH_1;
+        out[3] = SX1280_FLRC_PACKET_FIXED;
+        out[4] = payloadLen;
+        out[5] = SX1280_FLRC_CRC_2_BYTE;
+        out[6] = SX1280_FLRC_WHITENING_OFF;
     }
 }
 
@@ -247,10 +329,7 @@ bool Sx1280NativePhy::init(const PhyConfig& cfg) {
     spiCommand(SX1280_OP_SET_PACKET_TYPE, &packetType, 1);
 
     // 4. Set TX Params
-    uint8_t txParams[2] = {
-        txPowerReg(cfg.powerDbm),
-        0xE0 // RADIO_RAMP_20_US (Table 11-49)
-    };
+    uint8_t txParams[2] = { txPowerReg(cfg.powerDbm), SX1280_RAMP_20_US };
     spiCommand(SX1280_OP_SET_TX_PARAMS, txParams, 2);
 
     // 5. Set Buffer Base Address
@@ -259,40 +338,22 @@ bool Sx1280NativePhy::init(const PhyConfig& cfg) {
 
     // 6. Set modulation parameters
     uint8_t modParams[3];
-    if (cfg.modulation == Modulation::Lora) {
-        modParams[0] = cfg.sf << 4;
-        uint8_t bwByte = 0x18;
-        if (cfg.bwKHz > 1200.0f) bwByte = 0x0A;
-        else if (cfg.bwKHz > 600.0f) bwByte = 0x18;
-        else if (cfg.bwKHz > 300.0f) bwByte = 0x26;
-        else bwByte = 0x34;
-        modParams[1] = bwByte;
-        modParams[2] = cfg.cr - 4;
-    } else { // FLRC
-        uint8_t brBwByte = 0x45; // default 1.3 Mbps
-        if (cfg.flrcBitrateKbps < 800) {
-            brBwByte = 0x86; // FLRC_BR_0_650_BW_0_6 (Table 14-31)
-          }
-        modParams[0] = brBwByte;
-        modParams[1] = (cfg.cr - 2) * 2;
-        modParams[2] = 0x20; // BT 0.5
-    }
+    buildModParams(modParams);
     spiCommand(SX1280_OP_SET_MODULATION_PARAMS, modParams, 3);
 
     // 7. Set sync word (also sets packet parameters)
     setSyncWord(cfg.syncWord);
 
     // 7b. High-sensitivity front-end tuning.
-    // RxGain (0x0891) field [7:6] = 3 selects high-sensitivity mode (datasheet Table 13-1).
-    // Read/modify/write per the §13 note so the register's other live bits are preserved
-    // rather than clobbered.
+    // RxGain field [7:6] = 3 selects high-sensitivity mode (datasheet Table 13-1). Read/modify/
+    // write per the §13 note so the register's other live bits are preserved rather than clobbered.
     uint8_t rxGain = 0;
-    readRegister(0x0891, &rxGain, 1);
-    rxGain = (uint8_t)((rxGain & 0x3F) | 0xC0);
-    writeRegister(0x0891, &rxGain, 1);
+    readRegister(SX1280_REG_RX_GAIN, &rxGain, 1);
+    rxGain = (uint8_t)((rxGain & SX1280_RX_GAIN_KEEP_MASK) | SX1280_RX_GAIN_HIGH_SENS);
+    writeRegister(SX1280_REG_RX_GAIN, &rxGain, 1);
 
     uint8_t pllTune = 0x08;
-    writeRegister(0x0930, &pllTune, 1); // Vendor PLL tuning (register undocumented in the datasheet)
+    writeRegister(SX1280_REG_PLL_TUNE, &pllTune, 1); // vendor PLL tuning (undocumented register)
 
     // 7c. Enable AutoFS via the documented command (SetAutoFS, opcode 0x9E; 0x01 = enable).
     // Keeps the radio in FS between RX and TX instead of dropping to STDBY_RC, for faster
@@ -300,13 +361,17 @@ bool Sx1280NativePhy::init(const PhyConfig& cfg) {
     uint8_t autoFs = 0x01;
     spiCommand(SX1280_OP_SET_AUTO_FS, &autoFs, 1);
 
-    // 8. Set DIO IRQ Params
-    uint8_t dioParams[8] = { 0x40, 0x43, 0x40, 0x43, 0x00, 0x00, 0x00, 0x00 };
+    // 8. Set DIO IRQ Params: route the IRQ mask to DIO1 (IrqMask + Dio1Mask), nothing to DIO2/3.
+    uint8_t dioParams[8] = {
+        (uint8_t)(SX1280_IRQ_MASK >> 8), (uint8_t)(SX1280_IRQ_MASK & 0xFF), // IrqMask
+        (uint8_t)(SX1280_IRQ_MASK >> 8), (uint8_t)(SX1280_IRQ_MASK & 0xFF), // Dio1Mask
+        0x00, 0x00,                                                          // Dio2Mask
+        0x00, 0x00                                                           // Dio3Mask
+    };
     spiCommand(SX1280_OP_SET_DIO_IRQ_PARAMS, dioParams, 8);
 
     // 9. Clear any pending interrupts
-    uint8_t clearParams[2] = { 0xFF, 0xFF };
-    spiCommand(SX1280_OP_CLEAR_IRQ_STATUS, clearParams, 2);
+    clearIrqStatus();
 
     if (_hardwareError.load(std::memory_order_acquire)) return false;
 
@@ -329,7 +394,7 @@ void Sx1280NativePhy::startRx(float freqMHz) {
     setRfSwitch(Mode::Rx);
 
     // 3. Set Frequency
-    uint32_t frf = (uint32_t)(freqMHz * 5041.23076923f);
+    uint32_t frf = freqToReg(freqMHz);
     uint8_t freqParams[3] = {
         (uint8_t)((frf >> 16) & 0xFF),
         (uint8_t)((frf >> 8) & 0xFF),
@@ -338,8 +403,7 @@ void Sx1280NativePhy::startRx(float freqMHz) {
     spiCommand(SX1280_OP_SET_RF_FREQUENCY, freqParams, 3);
 
     // 4. Clear Interrupts
-    uint8_t clearParams[2] = { 0xFF, 0xFF };
-    spiCommand(SX1280_OP_CLEAR_IRQ_STATUS, clearParams, 2);
+    clearIrqStatus();
 
     // 5. Issue SetRx with continuous timeout (0x00, 0xFF, 0xFF)
     uint8_t rxParams[3] = { 0x00, 0xFF, 0xFF };
@@ -357,7 +421,7 @@ void Sx1280NativePhy::startTx(float freqMHz, const uint8_t* data, uint8_t len) {
     setRfSwitch(Mode::Tx);
 
     // 3. Set Frequency
-    uint32_t frf = (uint32_t)(freqMHz * 5041.23076923f);
+    uint32_t frf = freqToReg(freqMHz);
     uint8_t freqParams[3] = {
         (uint8_t)((frf >> 16) & 0xFF),
         (uint8_t)((frf >> 8) & 0xFF),
@@ -369,33 +433,12 @@ void Sx1280NativePhy::startTx(float freqMHz, const uint8_t* data, uint8_t len) {
     writeBuffer(0x00, data, len);
 
     // 5. Update Packet Params with the actual payload length
-    if (_cfg.modulation == Modulation::Lora) {
-        uint8_t packetParams[7] = {
-            0x16, // 12 symbols preamble
-            0x80, // implicit header type
-            len,  // updated length
-            0x20, // CRC ON
-            0x40, // standard IQ
-            0x00,
-            0x00
-        };
-        spiCommand(SX1280_OP_SET_PACKET_PARAMS, packetParams, 7);
-    } else { // FLRC
-        uint8_t packetParams[7] = {
-            SX1280_FLRC_PREAMBLE_16_BITS,
-            SX1280_FLRC_SYNC_WORD_4_BYTES,
-            SX1280_FLRC_SYNC_MATCH_1, // Aligned with SWDR005: 0x10 instead of 0x04
-            SX1280_FLRC_PACKET_FIXED,
-            len,  // updated length
-            SX1280_FLRC_CRC_2_BYTE,   // Aligned with SWDR005: 0x10 instead of 0x20
-            SX1280_FLRC_WHITENING_OFF
-        };
-        spiCommand(SX1280_OP_SET_PACKET_PARAMS, packetParams, 7);
-    }
+    uint8_t packetParams[7];
+    buildPacketParams(packetParams, len);
+    spiCommand(SX1280_OP_SET_PACKET_PARAMS, packetParams, 7);
 
     // 6. Clear Interrupts
-    uint8_t clearParams[2] = { 0xFF, 0xFF };
-    spiCommand(SX1280_OP_CLEAR_IRQ_STATUS, clearParams, 2);
+    clearIrqStatus();
 
     // 7. Issue SetTx (0x00, 0x00, 0x00)
     uint8_t txParams[3] = { 0x00, 0x00, 0x00 };
@@ -406,55 +449,25 @@ bool Sx1280NativePhy::readRx(RxPacket& out) {
     if (!_rxReady.load(std::memory_order_acquire)) return false;
     _rxReady.store(false, std::memory_order_release);
 
-    // 1. Get IRQ Status
+    // 1. Get IRQ Status. (Any SPI fault in these reads returns false — consistent contract.)
     uint8_t irqData[2] = {0, 0};
-    if (!waitBusy()) {
-        _hardwareError.store(true, std::memory_order_release);
-        return false;
-    }
-    gpio_put(SX128X_SPI_CS, false);
-    hal::sleepUs(2);
-    spiTransfer(SX1280_OP_GET_IRQ_STATUS);
-    spiTransfer(0x00); // dummy status
-    irqData[0] = spiTransfer(0x00);
-    irqData[1] = spiTransfer(0x00);
-    gpio_put(SX128X_SPI_CS, true);
-    hal::sleepUs(2);
-    if (!waitBusy()) {
-        _hardwareError.store(true, std::memory_order_release);
-    }
+    if (!readCommand(SX1280_OP_GET_IRQ_STATUS, irqData, 2)) return false;
     uint16_t irq = ((uint16_t)irqData[0] << 8) | irqData[1];
 
-    // Check for CRC Error (0x0040)
-    if (irq & 0x0040) {
-        // Clear IRQ status
-        uint8_t clearParams[2] = { 0xFF, 0xFF };
-        spiCommand(SX1280_OP_CLEAR_IRQ_STATUS, clearParams, 2);
+    if (irq & SX1280_IRQ_CRC_ERROR) {
+        _crcErrors.fetch_add(1, std::memory_order_relaxed);
+        clearIrqStatus();
         return false;
     }
 
-    // 2. Get Rx Buffer Status to find starting offset and length
+    // 2. Get Rx Buffer Status to find starting offset and length.
     uint8_t rxBufStatus[2] = {0, 0};
-    if (!waitBusy()) {
-        _hardwareError.store(true, std::memory_order_release);
-        return false;
-    }
-    gpio_put(SX128X_SPI_CS, false);
-    hal::sleepUs(2);
-    spiTransfer(SX1280_OP_GET_RX_BUFFER_STATUS);
-    spiTransfer(0x00); // dummy status
-    rxBufStatus[0] = spiTransfer(0x00); // payload length
-    rxBufStatus[1] = spiTransfer(0x00); // start buffer pointer offset
-    gpio_put(SX128X_SPI_CS, true);
-    hal::sleepUs(2);
-    if (!waitBusy()) {
-        _hardwareError.store(true, std::memory_order_release);
-    }
+    if (!readCommand(SX1280_OP_GET_RX_BUFFER_STATUS, rxBufStatus, 2)) return false;
 
     uint8_t rxLen = rxBufStatus[0];
     uint8_t rxOffset = rxBufStatus[1];
-    
-    // In LoRa implicit header mode, rxBufStatus[0] might be 0, so we fall back to configured payloadLen
+
+    // In LoRa implicit header mode, rxBufStatus[0] might be 0, so fall back to configured payloadLen.
     if (_cfg.modulation == Modulation::Lora || rxLen == 0) {
         rxLen = _cfg.payloadLen;
     }
@@ -463,61 +476,36 @@ bool Sx1280NativePhy::readRx(RxPacket& out) {
     }
     out.len = rxLen;
 
-    // 3. Read packet data from FIFO buffer
+    // 3. Read packet data from the FIFO buffer.
     readBuffer(rxOffset, out.data, rxLen);
 
-    // 4. Get Packet Status (RSSI and SNR)
+    // 4. Get Packet Status (RSSI and SNR). Conversion is integer-only (no soft-float on M0+).
     uint8_t packetStatus[5] = {0};
-    if (!waitBusy()) {
-        _hardwareError.store(true, std::memory_order_release);
-        return false;
-    }
-    gpio_put(SX128X_SPI_CS, false);
-    hal::sleepUs(2);
-    spiTransfer(SX1280_OP_GET_PACKET_STATUS);
-    spiTransfer(0x00); // dummy status
-    for (uint8_t i = 0; i < 5; i++) {
-        packetStatus[i] = spiTransfer(0x00);
-    }
-    gpio_put(SX128X_SPI_CS, true);
-    hal::sleepUs(2);
-    if (!waitBusy()) {
-        _hardwareError.store(true, std::memory_order_release);
-    }
+    if (!readCommand(SX1280_OP_GET_PACKET_STATUS, packetStatus, 5)) return false;
 
     if (_cfg.modulation == Modulation::Lora) {
         uint8_t rssiSync = packetStatus[0];
-        uint8_t snrRaw = packetStatus[1];
-        
-        float snrVal = (snrRaw < 128) ? (snrRaw / 4.0f) : ((snrRaw - 256) / 4.0f);
-        float rssiVal = -0.5f * rssiSync;
-        if (snrVal <= 0.0f) {
-            out.rssiDbm = (int16_t)(rssiVal - snrVal);
-        } else {
-            out.rssiDbm = (int16_t)(rssiVal);
-        }
-        out.snr = (int8_t)snrVal;
+        uint8_t snrRaw   = packetStatus[1];
+        int16_t snrQuarterDb = (snrRaw < 128) ? (int16_t)snrRaw : (int16_t)snrRaw - 256; // signed ¼ dB
+        int16_t snrDb   = (int16_t)(snrQuarterDb / 4);
+        int16_t rssiDbm = (int16_t)(-(int16_t)rssiSync / 2);  // -0.5 dB/LSB
+        // Negative SNR ⇒ packet sits below the noise floor; correct RSSI per datasheet §11.7.6.
+        out.rssiDbm = (snrQuarterDb <= 0) ? (int16_t)(rssiDbm - snrDb) : rssiDbm;
+        out.snr = (int8_t)snrDb;
     } else { // FLRC
-        uint8_t rssiSync = packetStatus[1];
-        out.rssiDbm = (int16_t)(-0.5f * rssiSync);
+        out.rssiDbm = (int16_t)(-(int16_t)packetStatus[1] / 2);
         out.snr = 0;
     }
 
     out.timestampUs = _lastIrqUs.load(std::memory_order_acquire);
 
-    // Clear IRQ status
-    uint8_t clearParams[2] = { 0xFF, 0xFF };
-    spiCommand(SX1280_OP_CLEAR_IRQ_STATUS, clearParams, 2);
-
+    clearIrqStatus();
     return !_hardwareError.load(std::memory_order_acquire);
 }
 
 void Sx1280NativePhy::setOutputPowerDbm(int8_t dbm) {
     _cfg.powerDbm = dbm;
-    uint8_t txParams[2] = {
-        txPowerReg(dbm),
-        0xE0 // RADIO_RAMP_20_US (Table 11-49)
-    };
+    uint8_t txParams[2] = { txPowerReg(dbm), SX1280_RAMP_20_US };
     spiCommand(SX1280_OP_SET_TX_PARAMS, txParams, 2);
 }
 
@@ -539,24 +527,14 @@ void Sx1280NativePhy::setSyncWord(uint16_t uidDerived) {
         // FLRC requires 4-byte write to 0x09CF (Table 14-42)
         writeRegister(SX1280_REG_FLRC_SYNC_WORD, sync, 4);
 
-        // Update packet params for FLRC with syncWordLen = 4, syncWordMatch = 1
-        uint8_t brBwByte = (_cfg.flrcBitrateKbps < 800) ? 0x86 : 0x45;
-        uint8_t modParams[3] = {
-            brBwByte,
-            (uint8_t)((_cfg.cr - 2) * 2),
-            0x20 // BT 0.5
-        };
+        // Re-apply modulation + packet params (syncWordLen = 4, syncWordMatch = 1) via the
+        // shared builders so the FLRC tuning lives in exactly one place.
+        uint8_t modParams[3];
+        buildModParams(modParams);
         spiCommand(SX1280_OP_SET_MODULATION_PARAMS, modParams, 3);
 
-        uint8_t packetParams[7] = {
-            SX1280_FLRC_PREAMBLE_16_BITS,
-            SX1280_FLRC_SYNC_WORD_4_BYTES,
-            SX1280_FLRC_SYNC_MATCH_1, // Aligned with SWDR005: 0x10 instead of 0x04
-            SX1280_FLRC_PACKET_FIXED,
-            _cfg.payloadLen,
-            SX1280_FLRC_CRC_2_BYTE,   // Aligned with SWDR005: 0x10 instead of 0x20
-            SX1280_FLRC_WHITENING_OFF
-        };
+        uint8_t packetParams[7];
+        buildPacketParams(packetParams, _cfg.payloadLen);
         spiCommand(SX1280_OP_SET_PACKET_PARAMS, packetParams, 7);
     } else {
         uint8_t syncWord = uidDerived & 0xFF;
@@ -567,16 +545,8 @@ void Sx1280NativePhy::setSyncWord(uint16_t uidDerived) {
         };
         writeRegister(SX1280_REG_LORA_SYNC_WORD, data, 2);
 
-        // Update packet params for LoRa
-        uint8_t packetParams[7] = {
-            0x16, // 12 symbols preamble
-            0x80, // implicit header type
-            _cfg.payloadLen,
-            0x20, // CRC ON
-            0x40, // standard IQ
-            0x00,
-            0x00
-        };
+        uint8_t packetParams[7];
+        buildPacketParams(packetParams, _cfg.payloadLen);
         spiCommand(SX1280_OP_SET_PACKET_PARAMS, packetParams, 7);
     }
 }
@@ -594,33 +564,15 @@ void Sx1280NativePhy::reconfigure(const PhyConfig& cfg) {
 
     // Set modulation parameters
     uint8_t modParams[3];
-    if (cfg.modulation == Modulation::Lora) {
-        modParams[0] = cfg.sf << 4;
-        uint8_t bwByte = 0x18;
-        if (cfg.bwKHz > 1200.0f) bwByte = 0x0A;
-        else if (cfg.bwKHz > 600.0f) bwByte = 0x18;
-        else if (cfg.bwKHz > 300.0f) bwByte = 0x26;
-        else bwByte = 0x34;
-        modParams[1] = bwByte;
-        modParams[2] = cfg.cr - 4;
-    } else { // FLRC
-        uint8_t brBwByte = 0x45; // default 1.3 Mbps
-        if (cfg.flrcBitrateKbps < 800) {
-            brBwByte = 0x86; // FLRC_BR_0_650_BW_0_6 (Table 14-31)
-        }
-        modParams[0] = brBwByte;
-        modParams[1] = (cfg.cr - 2) * 2;
-        modParams[2] = 0x20; // BT 0.5
-    }
+    buildModParams(modParams);
     spiCommand(SX1280_OP_SET_MODULATION_PARAMS, modParams, 3);
 
     // Set sync word and packet parameters
     setSyncWord(cfg.syncWord);
-    
+
     // Clear any pending interrupts
-    uint8_t clearParams[2] = { 0xFF, 0xFF };
-    spiCommand(SX1280_OP_CLEAR_IRQ_STATUS, clearParams, 2);
-    
+    clearIrqStatus();
+
     // Restart Rx at the new frequency
     startRx(cfg.freqMHz);
 }

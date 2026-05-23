@@ -1,4 +1,5 @@
 // XLRS transmitter firmware, Pico SDK entry point.
+#include <atomic>
 #include <stdio.h>
 #include <string.h>
 
@@ -35,10 +36,18 @@ struct AppToRfData {
 struct RfToAppData {
     xlrs::LinkState state;
     xlrs::LinkStats stats;
+    bool hardwareError;   // RF core: radio init failed or PHY unhealthy
 };
 
 xlrs::LatestValue<AppToRfData> g_appToRf;
 xlrs::LatestValue<RfToAppData> g_rfToApp;
+
+// Core 1 (RF) bumps this every loop; core 0 watches it to gate the hardware watchdog. A stall
+// in EITHER core stops the heartbeat-gated feed and lets the watchdog reboot the module.
+static std::atomic<uint32_t> g_rfHeartbeat{0};
+static constexpr uint32_t WATCHDOG_TIMEOUT_MS    = 1000; // HW reboots if not fed within this
+static constexpr uint32_t RF_STALL_MS            = 500;  // stop feeding if RF core stalls this long
+static constexpr uint32_t WATCHDOG_BOOT_GRACE_MS = 3000; // feed unconditionally until RF core is up
 
 xlrs::Link g_link;
 xlrs::RfScheduler g_scheduler;
@@ -106,6 +115,31 @@ void onCommandPayloadReceived(UARTMsgType cmd, const uint8_t* payload, uint8_t l
     }
 }
 
+// Print boot identity diagnostics ON CORE 0 (stdio is core-0 only — see rf_core_main). Lets the
+// bench operator confirm both ends derived the same UID/sync word before expecting a link.
+static void printIdentity(const uint8_t uid[8]) {
+    printf("[UID] Computed identity: 0x%02X%02X%02X%02X%02X%02X%02X%02X\n",
+           uid[0], uid[1], uid[2], uid[3], uid[4], uid[5], uid[6], uid[7]);
+    const uint8_t r = (g_rfConfig.defaultRate < xlrs::kNumRates) ? g_rfConfig.defaultRate : 0;
+    printf("[PHY] Mode: %s, Sync Word: 0x%04X\n",
+           xlrs::kRates[r].modulation == xlrs::Modulation::Lora ? "LoRa" : "FLRC",
+           (unsigned)xlrs::syncWordFromUid(uid));
+}
+
+// Feed the hardware watchdog only while the RF core's heartbeat keeps advancing. A bounded boot
+// grace lets core 1 finish radio init before liveness is enforced; after that, a hung RF core
+// (including the init-failure spin below) stops the feed and the watchdog reboots to retry.
+static void serviceWatchdog() {
+    static uint32_t lastBeat = 0, lastBeatMs = 0;
+    static bool seenBeat = false;
+    const uint32_t now = xlrs::hal::nowMs();
+    const uint32_t beat = g_rfHeartbeat.load(std::memory_order_acquire);
+    if (beat != lastBeat) { lastBeat = beat; lastBeatMs = now; seenBeat = true; }
+    const bool inGrace = now < WATCHDOG_BOOT_GRACE_MS;
+    const bool rfAlive = seenBeat && (now - lastBeatMs) < RF_STALL_MS;
+    if (inGrace || rfAlive) watchdog_update();
+}
+
 static void setup_app_core() {
     printf("=== XLRS Pico SDK Transmitter ===\n");
 
@@ -126,6 +160,11 @@ static void setup_app_core() {
 
     printf("RF Region: %s\n", g_rfConfig.region == 0 ? "US" : "EU");
     printf("Max Power Cap: %d dBm\n", (int)g_rfConfig.maxPowerDbm);
+
+    uint8_t uid[8];
+    if (g_bindingStore.getBindingUid(uid)) {
+        printIdentity(uid);
+    }
 
     uartProto.begin(UART_PROTOCOL_BAUDRATE);
     uartProto.setOnChannels(onChannelsReceived);
@@ -166,8 +205,24 @@ static void app_core_loop() {
             status.pairingState = 1;
             status.packetsLost = rfData.stats.missedDeadlines;
             uartProto.sendStatus(&status);
+
+            // Core-0 diagnostic: surface PHY fault counters so a wedged radio is visible on the
+            // bench console, not just an opaque healthy()=false (debugging.md §3).
+            printf("[TX STATUS] State: %d LQdown: %u%% RSSI: %d dBm | PHY timeouts: %lu CRC: %lu%s\n",
+                   (int)rfData.state, (unsigned)rfData.stats.lqDown, (int)rfData.stats.rssiDbm,
+                   (unsigned long)g_phy.spiTimeouts(), (unsigned long)g_phy.crcErrors(),
+                   rfData.hardwareError ? " [HW FAULT]" : "");
         }
     }
+}
+
+// RF core (core 1) does NOT touch stdio — printf over USB CDC is blocking and not multicore-safe,
+// and this core runs the µs-critical schedule. Fatal init faults are published to core 0 via the
+// mailbox (logged there); the spin afterwards stops the heartbeat so the watchdog reboots.
+static void publishRfFault() {
+    RfToAppData d{};
+    d.hardwareError = true;
+    g_rfToApp.store(d);
 }
 
 static void rf_core_main() {
@@ -182,10 +237,7 @@ static void rf_core_main() {
     }
 
     uint8_t uid[8];
-    if (g_bindingStore.getBindingUid(uid)) {
-        printf("[Core 1] Binding UID loaded from flash.\n");
-    } else {
-        printf("[Core 1] No binding UID found. Creating from default phrase...\n");
+    if (!g_bindingStore.getBindingUid(uid)) {
         g_bindingStore.setBindingPhrase(DEFAULT_BINDING_PHRASE);
         g_bindingStore.getBindingUid(uid);
     }
@@ -194,19 +246,16 @@ static void rf_core_main() {
     g_link.setRegion(g_rfConfig.region == (uint8_t)xlrs::RfRegion::EU ? xlrs::FhssRegion::EU_CE : xlrs::FhssRegion::US_FCC);
 
     xlrs::PhyConfig phyCfg = xlrs::makePhyConfig(xlrs::kRates[g_rfConfig.defaultRate], 2400.0f, g_rfConfig.maxPowerDbm, xlrs::syncWordFromUid(uid));
-    if (!g_phy.init(phyCfg)) {
-        printf("[ERROR] Radio PHY initialization failed.\n");
-        while (true) xlrs::hal::sleepMs(100);
-    }
-    if (!g_scheduler.begin(&g_phy, &g_fhss, &g_link, g_rfConfig.defaultRate)) {
-        printf("[ERROR] Scheduler initialization failed.\n");
-        while (true) xlrs::hal::sleepMs(100);
+    if (!g_phy.init(phyCfg) ||
+        !g_scheduler.begin(&g_phy, &g_fhss, &g_link, g_rfConfig.defaultRate)) {
+        publishRfFault();
+        while (true) xlrs::hal::sleepMs(100);  // heartbeat stops → watchdog reboots to retry
     }
 
     while (true) {
         AppToRfData appData;
         if (g_appToRf.load(appData)) {
-            g_link.setChannels(appData.channels, 8);
+            g_link.setChannels(appData.channels, xlrs::Link::RC_CHANNELS);
         }
 
         g_scheduler.poll();
@@ -218,8 +267,11 @@ static void rf_core_main() {
             RfToAppData rfData;
             rfData.state = g_link.state();
             rfData.stats = g_link.stats();
+            rfData.hardwareError = !g_phy.healthy();
             g_rfToApp.store(rfData);
         }
+
+        g_rfHeartbeat.fetch_add(1, std::memory_order_release);
         tight_loop_contents();
     }
 }
@@ -231,8 +283,13 @@ int main() {
     setup_app_core();
     multicore_launch_core1(rf_core_main);
 
+    // Arm the hardware watchdog AFTER boot setup; serviceWatchdog() then feeds it only while the
+    // RF core is alive, so a hang in either core reboots the module instead of bricking the link.
+    watchdog_enable(WATCHDOG_TIMEOUT_MS, true);
+
     while (true) {
         app_core_loop();
+        serviceWatchdog();
         tight_loop_contents();
     }
 }

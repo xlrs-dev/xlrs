@@ -32,6 +32,13 @@ public:
     void setOnTxDone(PhyIsrCallback cb) override { _onTxDone = cb; }
     void setOnRxDone(PhyIsrCallback cb) override { _onRxDone = cb; }
 
+    // Fault diagnostics (not on IRadioPhy — concrete extras for bring-up/telemetry). A sticky
+    // healthy()=false tells you the radio is wedged; these tell you WHY: how many BUSY-line
+    // timeouts and CRC drops have accumulated, and the opcode of the last SPI op that timed out.
+    uint32_t spiTimeouts()    const { return _spiTimeouts.load(std::memory_order_relaxed); }
+    uint32_t crcErrors()      const { return _crcErrors.load(std::memory_order_relaxed); }
+    uint8_t  lastFailOpcode() const { return _lastFailOpcode.load(std::memory_order_relaxed); }
+
 private:
     enum class Mode : uint8_t { Idle, Rx, Tx };
 
@@ -42,11 +49,17 @@ private:
     void resetRadio();
     bool waitBusy();
     void spiCommand(uint8_t opcode, const uint8_t* params, uint8_t len);
+    bool readCommand(uint8_t opcode, uint8_t* out, uint8_t len); // GET-status read (opcode+dummy+len)
+    void clearIrqStatus();
     void writeRegister(uint16_t addr, const uint8_t* data, uint8_t len);
     void readRegister(uint16_t addr, uint8_t* data, uint8_t len);
     void writeBuffer(uint8_t offset, const uint8_t* data, uint8_t len);
     void readBuffer(uint8_t offset, uint8_t* data, uint8_t len);
     void setRfSwitch(Mode mode);
+    // Single source of truth for the modulation/packet register blocks (used by
+    // init/reconfigure/setSyncWord/startTx) so tuning lives in one place.
+    void buildModParams(uint8_t out[3]) const;
+    void buildPacketParams(uint8_t out[7], uint8_t payloadLen) const;
 #endif
 
     PhyConfig _cfg{};
@@ -54,6 +67,9 @@ private:
     std::atomic<uint32_t> _lastIrqUs{0};  // HW arrival timestamp latched in the ISR
     std::atomic<bool>     _rxReady{false};
     std::atomic<bool>     _hardwareError{false};
+    std::atomic<uint32_t> _spiTimeouts{0};    // BUSY-line timeouts seen
+    std::atomic<uint32_t> _crcErrors{0};      // RX frames dropped on CRC mismatch
+    std::atomic<uint8_t>  _lastFailOpcode{0}; // opcode of the last SPI op that timed out
     PhyIsrCallback _onTxDone = nullptr;
     PhyIsrCallback _onRxDone = nullptr;
 };

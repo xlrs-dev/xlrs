@@ -85,6 +85,7 @@ public:
     bool processRxPayload(uint32_t tick, uint16_t pos, const uint8_t* data, uint8_t len, int16_t rssi, int8_t snr);
     void service(uint32_t tick);   // timing-independent timeout, LQ and state machine updater
     void notePhyRecovery(bool success);
+    void noteMissedDeadlines(uint16_t n);  // scheduler fell behind by n slots (saturating count)
 
     void    setChannels(const uint16_t* ch, uint8_t n);        // TX input (11-bit, 0..2047)
     uint8_t getChannels(uint16_t* ch, uint8_t maxN) const;     // RX output; returns count

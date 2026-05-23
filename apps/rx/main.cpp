@@ -356,6 +356,8 @@ static void rf_core_main() {
         static bool bindScanning = false;
         static uint32_t nextBindScanSwitchMs = xlrs::hal::nowMs() + BIND_SCAN_NORMAL_WINDOW_MS;
         static bool bindPacketReceived = false;
+        static bool pendingBindMessageReady = false;
+        static xlrs::AppTelemetryMessage pendingBindMessage{};
         static bool normalLinkSeen = false;
         static bool telemetryPending = false;
         static xlrs::AppTelemetryMessage pendingTelemetryMessage{};
@@ -377,11 +379,10 @@ static void rf_core_main() {
         // skipped in the steady-state hot path. processedTick() free-runs off the hardware timer
         // regardless of link state, so the scan windows still toggle while disconnected.
         const xlrs::LinkState linkState = g_link.state();
-        if (linkState == xlrs::LinkState::Connected || normalLinkSeen) {
+        if (linkState == xlrs::LinkState::Connected || normalLinkSeen || bindPacketReceived) {
             if (linkState == xlrs::LinkState::Connected) normalLinkSeen = true;
             if (bindScanning) {
                 g_link.setLinkUid(uid);
-                g_phy.setSyncWord(g_link.syncWord());
                 bindScanning = false;
             }
         } else {
@@ -389,12 +390,10 @@ static void rf_core_main() {
             if ((int32_t)(now - nextBindScanSwitchMs) >= 0) {
                 if (bindScanning) {
                     g_link.setLinkUid(uid);
-                    g_phy.setSyncWord(g_link.syncWord());
                     bindScanning = false;
                     nextBindScanSwitchMs = now + BIND_SCAN_NORMAL_WINDOW_MS;
                 } else {
                     g_link.startBindScan();
-                    g_phy.setSyncWord(g_link.syncWord());
                     bindScanning = true;
                     nextBindScanSwitchMs = now + BIND_SCAN_WINDOW_MS;
                 }
@@ -413,7 +412,15 @@ static void rf_core_main() {
             if (g_link.takeReceivedBindUid(receivedBindUid) &&
                 xlrs::makeBindUidMessage(receivedBindUid, bindMessage)) {
                 bindPacketReceived = true;
-                g_rfTelemetryToApp.push(bindMessage);
+                bindScanning = false;
+                g_link.setLinkUid(receivedBindUid);
+                if (!g_rfTelemetryToApp.push(bindMessage)) {
+                    pendingBindMessage = bindMessage;
+                    pendingBindMessageReady = true;
+                }
+            }
+            if (pendingBindMessageReady && g_rfTelemetryToApp.push(pendingBindMessage)) {
+                pendingBindMessageReady = false;
             }
 
             RfToAppData rfData;

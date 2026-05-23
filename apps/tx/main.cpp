@@ -681,7 +681,6 @@ static void rf_core_main() {
         if (!telemetryPending && g_appTelemetryToRf.pop(telemetryMessage)) {
             if (xlrs::parseStartBindMessage(telemetryMessage.data, telemetryMessage.len, bindUid)) {
                 g_link.startBindTransmit(bindUid);
-                g_phy.setSyncWord(g_link.syncWord());
                 bindTransmitUntilMs = xlrs::hal::nowMs() + BIND_TRANSMIT_WINDOW_MS;
             } else {
                 telemetryPending = !g_link.queueTelemetry(telemetryMessage.data, telemetryMessage.len);
@@ -694,7 +693,6 @@ static void rf_core_main() {
         if (g_link.bindTransmitActive() && bindTransmitUntilMs != 0 &&
             (int32_t)(xlrs::hal::nowMs() - bindTransmitUntilMs) >= 0) {
             g_link.setLinkUid(uid);
-            g_phy.setSyncWord(g_link.syncWord());
             bindTransmitUntilMs = 0;
         }
 

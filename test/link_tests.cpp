@@ -99,8 +99,6 @@ static void test_link_bind_scan_accepts_offered_uid() {
 
     env.tx.startBindTransmit(txUid);
     env.rx.startBindScan();
-    env.txPhy.setSyncWord(env.tx.syncWord());
-    env.rxPhy.setSyncWord(env.rx.syncWord());
 
     for (uint32_t t = 1; t <= 80; ++t) simTick(env, t);
 
@@ -129,8 +127,6 @@ static void test_link_bind_scan_accepts_offered_uid_with_tick_phase_offset() {
 
     env.tx.startBindTransmit(txUid);
     env.rx.startBindScan();
-    env.txPhy.setSyncWord(env.tx.syncWord());
-    env.rxPhy.setSyncWord(env.rx.syncWord());
 
     const uint32_t txPhaseOffset = 137;
     for (uint32_t t = 1; t <= 80; ++t) {
@@ -140,6 +136,30 @@ static void test_link_bind_scan_accepts_offered_uid_with_tick_phase_offset() {
     uint8_t receivedUid[LINK_UID_SIZE] = {};
     TEST_ASSERT_TRUE(env.rx.takeReceivedBindUid(receivedUid));
     TEST_ASSERT_EQUAL_UINT8_ARRAY(txUid, receivedUid, LINK_UID_SIZE);
+}
+
+static void test_link_bind_scan_rejects_padded_bind_frame() {
+    uint8_t txUid[LINK_UID_SIZE], rxUid[LINK_UID_SIZE];
+    linkUidFromPhrase("CraftA", txUid);
+    linkUidFromPhrase("CraftB", rxUid);
+
+    Link tx;
+    Link rx;
+    tx.begin(Role::Tx, txUid, 2);
+    rx.begin(Role::Rx, rxUid, 2);
+    tx.startBindTransmit(txUid);
+    rx.startBindScan();
+
+    uint8_t frame[OTA16_LEN + 1] = {};
+    uint8_t frameLen = 0;
+    const uint32_t tick = 1;
+    TEST_ASSERT_TRUE(tx.getTxPayload(tick, tx.txPos(tick), frame, frameLen));
+    TEST_ASSERT_TRUE(frameLen < sizeof(frame));
+    frame[frameLen] = 0xA5;
+
+    TEST_ASSERT_FALSE(rx.processRxPayload(tick, rx.rxPos(), frame, (uint8_t)(frameLen + 1), -50, 0));
+    uint8_t receivedUid[LINK_UID_SIZE] = {};
+    TEST_ASSERT_FALSE(rx.takeReceivedBindUid(receivedUid));
 }
 
 static void test_link_fhss_acquire_and_recover() {
@@ -330,6 +350,7 @@ int main() {
     RUN_TEST(test_link_mismatched_phrase_no_connect);
     RUN_TEST(test_link_bind_scan_accepts_offered_uid);
     RUN_TEST(test_link_bind_scan_accepts_offered_uid_with_tick_phase_offset);
+    RUN_TEST(test_link_bind_scan_rejects_padded_bind_frame);
     RUN_TEST(test_link_fhss_acquire_and_recover);
     RUN_TEST(test_link_telemetry_downlink);
     RUN_TEST(test_link_rate_switch_and_power);

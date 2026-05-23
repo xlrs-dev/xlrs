@@ -37,6 +37,7 @@ void Link::configureIdentity(const uint8_t uid[LINK_UID_SIZE]) {
     _syncWord = syncWordFromUid(uid);
     _uidCrc = uidCrc8(uid);
     _fhss.generate(fhssSeedFromUid(uid), kNumFhssChannels2g4, kNumFhssChannels2g4);
+    ++_identityRevision;
 }
 
 void Link::resetAcquisition(LinkState state) {
@@ -333,7 +334,7 @@ bool Link::processRxPayload(uint32_t tick, uint16_t pos, const uint8_t* data, ui
     uint16_t rxch[RC_CHANNELS];
     uint8_t  upLq;  int16_t upRssi;  int8_t upSnr;
 
-    if (_role == Role::Rx && _bindScanActive && len >= BIND_FRAME_LEN &&
+    if (_role == Role::Rx && _bindScanActive && len == BIND_FRAME_LEN &&
         otaVersion(data[0]) == OTA_VERSION && otaType(data[0]) == OtaType::Bind) {
         if (memcmp(data + 1, BIND_FRAME_MAGIC, sizeof(BIND_FRAME_MAGIC)) != 0) return false;
         const uint8_t* offeredUid = data + 1 + sizeof(BIND_FRAME_MAGIC);

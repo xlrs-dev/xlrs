@@ -118,6 +118,7 @@ public:
     uint8_t          tlmRatioDenom() const { return _rate.tlmRatioDenom; }
     uint16_t         syncEveryNTicks() const { return _fhss.count() * hopInterval(); }
     uint16_t         syncWord() const { return _syncWord; }
+    uint32_t         identityRevision() const { return _identityRevision; }
     int8_t           txPowerDbm() const { return _txPowerDbm; }
     Role             role() const { return _role; }
 
@@ -141,6 +142,7 @@ private:
     uint32_t     _tick = 0;
     DynamicPower _power;                // TX-side dynamic power
     uint16_t     _syncWord  = 0;
+    uint32_t     _identityRevision = 0;
     ICipher*     _cipher    = nullptr;  // null ⇒ NullCipher (plaintext); opt-in AEAD (M8)
     uint32_t     _sessionSalt = 0;      // nonce salt; negotiated at Connect on real hardware
     Fhss         _fhss;                 // UID-seeded hop sequence (M4)

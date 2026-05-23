@@ -10,6 +10,7 @@
 #include <pico/multicore.h>
 #include <pico/stdlib.h>
 
+#include "app/AppTelemetry.h"
 #include "app/CrsfLinkStats.h"
 #include "crsfSerial.h"
 #include "fhss/Fhss.h"
@@ -23,6 +24,7 @@
 #include "link/Uid.h"
 #include "phy/Sx1280NativePhy.h"
 #include "util/Mailbox.h"
+#include "util/RingBuffer.h"
 
 #ifndef CRSF_TX_PIN
 #define CRSF_TX_PIN 8
@@ -52,6 +54,8 @@ struct RfToAppData {
 };
 
 xlrs::LatestValue<RfToAppData> g_rfToApp;
+xlrs::SpscRing<xlrs::AppTelemetryMessage, 4> g_appTelemetryToRf;
+xlrs::SpscRing<xlrs::AppTelemetryMessage, 4> g_rfTelemetryToApp;
 
 // Core 1 (RF) bumps this every loop; core 0 watches it to gate the hardware watchdog. A stall in
 // EITHER core stops the heartbeat-gated feed and lets the watchdog reboot the module.
@@ -76,6 +80,46 @@ static uint16_t localChannels[RC_CHANNELS] = {
     RC_US_MID, RC_US_MID, RC_US_MID, RC_THROTTLE_FAILSAFE,
     RC_US_MID, RC_US_MID, RC_US_MID, RC_US_MID};
 static bool g_configFault = false;
+
+static void onCrsfFrameFromFlightController(const uint8_t *frame, uint8_t frameLen) {
+    if (!frame || frameLen < 3) return;
+    const uint8_t frameType = frame[2];
+    if (frameType == CRSF_FRAMETYPE_RC_CHANNELS_PACKED ||
+        frameType == CRSF_FRAMETYPE_LINK_STATISTICS) {
+        return;
+    }
+
+    xlrs::AppTelemetryMessage message{};
+    if (xlrs::makeCrsfFrameMessage(frame, frameLen, message)) {
+        g_appTelemetryToRf.push(message);
+    }
+}
+
+static void applyRxAppTelemetry(const xlrs::AppTelemetryMessage& message) {
+    xlrs::RfConfigData pendingConfig = g_rfConfig;
+    if (xlrs::parseRxConfigMessage(message.data, message.len, pendingConfig)) {
+        g_rfConfig = pendingConfig;
+        xlrs::RfConfig::save(g_rfConfig);
+        printf("[RX CONFIG] RF config updated from TX. Reboot both modules to apply.\n");
+        return;
+    }
+
+    uint8_t uid[xlrs::LINK_UID_SIZE] = {};
+    if (xlrs::parseBindUidMessage(message.data, message.len, uid)) {
+        if (g_bindingStore.setBindingUid(uid)) {
+            printf("[RX CONFIG] Binding identity updated from TX. Rebooting RX...\n");
+            xlrs::hal::sleepMs(100);
+            watchdog_reboot(0, 0, 0);
+        }
+        return;
+    }
+
+    if (xlrs::appTelemetryHasPrefix(message.data, message.len, xlrs::AppTelemetryType::Reboot)) {
+        printf("[RX CONFIG] Reboot command received from TX.\n");
+        xlrs::hal::sleepMs(100);
+        watchdog_reboot(0, 0, 0);
+    }
+}
 
 // Linear map with clamping: an out-of-range RC value must not extrapolate past the CRSF limits.
 static long mapRange(long value, long inMin, long inMax, long outMin, long outMax) {
@@ -159,6 +203,7 @@ static void setup_app_core() {
     }
 
     crsf.begin(CRSF_BAUDRATE);
+    crsf.onPacketRaw = onCrsfFrameFromFlightController;
 
     gpio_init(STATUS_LED_PIN);
     gpio_set_dir(STATUS_LED_PIN, GPIO_OUT);
@@ -232,6 +277,11 @@ static void app_core_loop() {
 
     updateLED(state, outputActive, rfData.hardwareError);
     crsf.loop();
+
+    xlrs::AppTelemetryMessage telemetryMessage{};
+    while (g_rfTelemetryToApp.pop(telemetryMessage)) {
+        applyRxAppTelemetry(telemetryMessage);
+    }
 }
 
 // RF core (core 1) does NOT touch stdio — printf over USB CDC is blocking and not multicore-safe,
@@ -272,6 +322,20 @@ static void rf_core_main() {
     }
 
     while (true) {
+        static bool telemetryPending = false;
+        static xlrs::AppTelemetryMessage pendingTelemetryMessage{};
+        xlrs::AppTelemetryMessage telemetryMessage{};
+        if (telemetryPending) {
+            telemetryPending = !g_link.queueTelemetry(pendingTelemetryMessage.data,
+                                                      pendingTelemetryMessage.len);
+        }
+        if (!telemetryPending && g_appTelemetryToRf.pop(telemetryMessage)) {
+            telemetryPending = !g_link.queueTelemetry(telemetryMessage.data, telemetryMessage.len);
+            if (telemetryPending) {
+                pendingTelemetryMessage = telemetryMessage;
+            }
+        }
+
         g_scheduler.poll();
 
         static uint32_t lastServiceTick = 0;
@@ -286,6 +350,14 @@ static void rf_core_main() {
             rfData.outputActive = g_link.outputActive();
             rfData.hardwareError = !g_phy.healthy();
             g_rfToApp.store(rfData);
+
+            size_t telemetryLen = 0;
+            xlrs::AppTelemetryMessage uplinkMessage{};
+            if (g_link.getTelemetry(uplinkMessage.data, telemetryLen) &&
+                telemetryLen <= xlrs::APP_TELEMETRY_MAX_LEN) {
+                uplinkMessage.len = (uint8_t)telemetryLen;
+                g_rfTelemetryToApp.push(uplinkMessage);
+            }
         }
 
         g_rfHeartbeat.fetch_add(1, std::memory_order_release);

@@ -16,13 +16,15 @@ class StubbornSender {
 public:
     StubbornSender() = default;
 
-    void queuePayload(const uint8_t* payload, size_t len) {
+    bool queuePayload(const uint8_t* payload, size_t len) {
+        if (!idle()) return false;
         if (len > sizeof(_buf)) {
             len = sizeof(_buf); // truncate to buffer limit
         }
         memcpy(_buf, payload, len);
         _len = len;
         _offset = 0;
+        return true;
     }
 
     bool getNextChunk(TelemetryChunk& out) {

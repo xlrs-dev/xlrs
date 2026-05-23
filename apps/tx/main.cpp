@@ -10,6 +10,7 @@
 #include <hardware/watchdog.h>
 
 #include "UARTProtocol.h"
+#include "app/AppTelemetry.h"
 #include "app/CrsfLinkStats.h"
 #include "crsfSerial.h"
 #include "fhss/Fhss.h"
@@ -23,6 +24,7 @@
 #include "link/Uid.h"
 #include "phy/Sx1280NativePhy.h"
 #include "util/Mailbox.h"
+#include "util/RingBuffer.h"
 
 #ifndef XLRS_TX_CONTROLLER_CRSF
 #define XLRS_TX_CONTROLLER_CRSF 0
@@ -47,6 +49,8 @@ struct RfToAppData {
 
 xlrs::LatestValue<AppToRfData> g_appToRf;
 xlrs::LatestValue<RfToAppData> g_rfToApp;
+xlrs::SpscRing<xlrs::AppTelemetryMessage, 4> g_appTelemetryToRf;
+xlrs::SpscRing<xlrs::AppTelemetryMessage, 4> g_rfTelemetryToApp;
 
 // Core 1 (RF) bumps this every loop; core 0 watches it to gate the hardware watchdog. A stall
 // in EITHER core stops the heartbeat-gated feed and lets the watchdog reboot the module.
@@ -73,14 +77,15 @@ static uint32_t lastStatusSent = 0;
 static constexpr uint32_t STATUS_INTERVAL = 1000;
 
 #if XLRS_TX_CONTROLLER_CRSF
-static constexpr uint8_t CRSF_PARAM_COUNT = 7; // Includes root folder at parameter 0.
+static constexpr uint8_t CRSF_PARAM_COUNT = 8; // Includes root folder at parameter 0.
 static constexpr uint8_t CRSF_PARAM_ROOT = 0;
 static constexpr uint8_t CRSF_PARAM_RATE = 1;
 static constexpr uint8_t CRSF_PARAM_MAX_POWER = 2;
 static constexpr uint8_t CRSF_PARAM_DYNAMIC_POWER = 3;
 static constexpr uint8_t CRSF_PARAM_REGION = 4;
 static constexpr uint8_t CRSF_PARAM_FAILSAFE = 5;
-static constexpr uint8_t CRSF_PARAM_REBOOT = 6;
+static constexpr uint8_t CRSF_PARAM_BIND = 6;
+static constexpr uint8_t CRSF_PARAM_REBOOT = 7;
 
 static bool crsfDestinationIsTxModule(uint8_t destination) {
     return destination == CRSF_ADDRESS_BROADCAST || destination == CRSF_ADDRESS_CRSF_TRANSMITTER;
@@ -121,7 +126,12 @@ static void sendCrsfParameterWriteAck(uint8_t destination, uint8_t parameterNumb
 
 static bool saveRfConfigFromCrsf() {
     xlrs::RfConfig::refreshChecksum(g_rfConfig);
-    return xlrs::RfConfig::save(g_rfConfig);
+    bool saved = xlrs::RfConfig::save(g_rfConfig);
+    xlrs::AppTelemetryMessage message{};
+    if (xlrs::makeRxConfigMessage(g_rfConfig, message)) {
+        g_appTelemetryToRf.push(message);
+    }
+    return saved;
 }
 
 static void buildRootParameter(uint8_t* payload, uint8_t& len) {
@@ -135,6 +145,7 @@ static void buildRootParameter(uint8_t* payload, uint8_t& len) {
     appendByte(payload, len, CRSF_PARAM_DYNAMIC_POWER);
     appendByte(payload, len, CRSF_PARAM_REGION);
     appendByte(payload, len, CRSF_PARAM_FAILSAFE);
+    appendByte(payload, len, CRSF_PARAM_BIND);
     appendByte(payload, len, CRSF_PARAM_REBOOT);
     appendByte(payload, len, 0xFF);
 }
@@ -220,6 +231,9 @@ static void sendCrsfParameter(uint8_t destination, uint8_t parameterNumber) {
         case CRSF_PARAM_REBOOT:
             buildCommandParameter(payload, len, parameterNumber, "Reboot", "Apply saved config");
             break;
+        case CRSF_PARAM_BIND:
+            buildCommandParameter(payload, len, parameterNumber, "Bind RX", "Send TX identity");
+            break;
         default:
             buildOutOfRangeParameter(payload, len, parameterNumber);
             break;
@@ -295,9 +309,23 @@ void onCrsfParameterWrite(uint8_t parameterNumber, const uint8_t* value, uint8_t
             break;
         case CRSF_PARAM_REBOOT:
             if (valueLen >= 1 && (value[0] == CRSF_COMMAND_START || value[0] == CRSF_COMMAND_CONFIRM)) {
+                xlrs::AppTelemetryMessage message{};
+                if (xlrs::makeRebootMessage(message)) {
+                    g_appTelemetryToRf.push(message);
+                }
                 sendCrsfParameter(origin, parameterNumber);
-                xlrs::hal::sleepMs(100);
+                xlrs::hal::sleepMs(1000);
                 watchdog_reboot(0, 0, 0);
+            }
+            break;
+        case CRSF_PARAM_BIND:
+            if (valueLen >= 1 && value[0] == CRSF_COMMAND_START) {
+                uint8_t uid[xlrs::LINK_UID_SIZE] = {};
+                xlrs::AppTelemetryMessage message{};
+                if (g_bindingStore.getBindingUid(uid) && xlrs::makeBindUidMessage(uid, message)) {
+                    g_appTelemetryToRf.push(message);
+                }
+                sendCrsfParameter(origin, parameterNumber);
             }
             break;
         default:
@@ -437,6 +465,15 @@ static void setup_app_core() {
 static void app_core_loop() {
 #if XLRS_TX_CONTROLLER_CRSF
     controllerCrsf.loop();
+    xlrs::AppTelemetryMessage downlinkMessage{};
+    while (g_rfTelemetryToApp.pop(downlinkMessage)) {
+        const uint8_t* crsfFrame = nullptr;
+        uint8_t crsfFrameLen = 0;
+        if (xlrs::parseCrsfFrameMessage(downlinkMessage.data, downlinkMessage.len,
+                                        crsfFrame, crsfFrameLen)) {
+            controllerCrsf.write(crsfFrame, crsfFrameLen);
+        }
+    }
 #else
     uartProto.loop();
 #endif
@@ -528,6 +565,20 @@ static void rf_core_main() {
     }
 
     while (true) {
+        static bool telemetryPending = false;
+        static xlrs::AppTelemetryMessage pendingTelemetryMessage{};
+        xlrs::AppTelemetryMessage telemetryMessage{};
+        if (telemetryPending) {
+            telemetryPending = !g_link.queueTelemetry(pendingTelemetryMessage.data,
+                                                      pendingTelemetryMessage.len);
+        }
+        if (!telemetryPending && g_appTelemetryToRf.pop(telemetryMessage)) {
+            telemetryPending = !g_link.queueTelemetry(telemetryMessage.data, telemetryMessage.len);
+            if (telemetryPending) {
+                pendingTelemetryMessage = telemetryMessage;
+            }
+        }
+
         AppToRfData appData;
         if (g_appToRf.load(appData)) {
             g_link.setChannels(appData.channels, xlrs::Link::RC_CHANNELS);
@@ -544,6 +595,14 @@ static void rf_core_main() {
             rfData.stats = g_link.stats();
             rfData.hardwareError = !g_phy.healthy();
             g_rfToApp.store(rfData);
+
+            size_t telemetryLen = 0;
+            xlrs::AppTelemetryMessage downlinkMessage{};
+            if (g_link.getTelemetry(downlinkMessage.data, telemetryLen) &&
+                telemetryLen <= xlrs::APP_TELEMETRY_MAX_LEN) {
+                downlinkMessage.len = (uint8_t)telemetryLen;
+                g_rfTelemetryToApp.push(downlinkMessage);
+            }
         }
 
         g_rfHeartbeat.fetch_add(1, std::memory_order_release);

@@ -113,7 +113,7 @@ public:
     int8_t           txPowerDbm() const { return _txPowerDbm; }
     Role             role() const { return _role; }
 
-    void queueTelemetry(const uint8_t* data, size_t len) { _tlmSender.queuePayload(data, len); }
+    bool queueTelemetry(const uint8_t* data, size_t len) { return _tlmSender.queuePayload(data, len); }
     bool getTelemetry(uint8_t* outBuf, size_t& outLen) { return _tlmReceiver.getPayload(outBuf, outLen); }
 
 private:

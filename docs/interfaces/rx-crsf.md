@@ -7,6 +7,10 @@ come from the RF link. Channels 9-16 are held at CRSF midpoint.
 
 RX also emits CRSF `LINK_STATISTICS` about every 500 ms.
 
+Valid CRSF frames received from the flight controller, except RC channels and
+link statistics, are forwarded to TX over XLRS downlink telemetry. In CRSF
+controller mode, TX writes those frames back to the controller CRSF port.
+
 Failsafe behavior is controlled by RF config:
 
 | Mode | Value | Behavior |

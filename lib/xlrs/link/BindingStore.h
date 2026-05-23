@@ -50,6 +50,32 @@ public:
         return true;
     }
 
+    bool setBindingUid(const uint8_t uid[LINK_UID_SIZE]) {
+        if (!uid) return false;
+        bool any = false;
+        for (uint8_t i = 0; i < LINK_UID_SIZE; ++i) {
+            if (uid[i] != 0) {
+                any = true;
+                break;
+            }
+        }
+        if (!any) return false;
+
+        memcpy(_uid, uid, LINK_UID_SIZE);
+        hal::FlashStore::write(BINDING_STORE_MAGIC_ADDR + 0, (BINDING_STORE_MAGIC >> 24) & 0xFF);
+        hal::FlashStore::write(BINDING_STORE_MAGIC_ADDR + 1, (BINDING_STORE_MAGIC >> 16) & 0xFF);
+        hal::FlashStore::write(BINDING_STORE_MAGIC_ADDR + 2, (BINDING_STORE_MAGIC >> 8) & 0xFF);
+        hal::FlashStore::write(BINDING_STORE_MAGIC_ADDR + 3, BINDING_STORE_MAGIC & 0xFF);
+        hal::FlashStore::write(BINDING_STORE_VERSION_ADDR, BINDING_STORE_VERSION);
+        for (uint8_t i = 0; i < LINK_UID_SIZE; ++i) {
+            hal::FlashStore::write(BINDING_STORE_UID_ADDR + i, _uid[i]);
+        }
+        writeChecksum(checksum());
+        hal::FlashStore::commit();
+        _loaded = true;
+        return true;
+    }
+
     bool getBindingUid(uint8_t uid[LINK_UID_SIZE]) const {
         if (!uid || !_loaded) return false;
         memcpy(uid, _uid, LINK_UID_SIZE);

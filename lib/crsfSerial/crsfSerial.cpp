@@ -59,6 +59,7 @@ CrsfSerial::CrsfSerial(xlrs::hal::SerialPort &port, uint32_t baud) :
     onDevicePing = nullptr;
     onParameterRead = nullptr;
     onParameterWrite = nullptr;
+    onPacketRaw = nullptr;
 }
 
 void CrsfSerial::begin(uint32_t baud)
@@ -133,6 +134,9 @@ void CrsfSerial::handleByteReceived()
                 uint8_t crc = _crc.calc(&_rxBuf[2], len - 1);
                 if (crc == inCrc)
                 {
+                    if (onPacketRaw) {
+                        onPacketRaw(_rxBuf, (uint8_t)(len + 2));
+                    }
                     processPacketIn(len);
                     shiftRxBuffer(len + 2);
                     reprocess = true;

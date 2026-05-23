@@ -179,13 +179,18 @@ Implemented today:
   RF data is available.
 - CRSF device ping/device info for TX module discovery.
 - CRSF parameter read/write for Rate, Max Power, Dynamic Power, Region, Failsafe,
-  and Reboot.
+  Bind RX, and Reboot.
+- TX forwards critical RF config writes to RX over XLRS uplink telemetry. RX
+  persists them to flash.
+- RX forwards valid flight-controller CRSF telemetry frames to TX over XLRS
+  downlink telemetry. TX writes those frames back to the controller CRSF port.
 
 Current limitation: parameter writes persist config to flash, but RF
-rate/region/power/failsafe changes apply after reboot. A dedicated XLRS Lua
-script and CRSF bind phrase commands are not implemented yet. XLRS currently
-carries 8 OTA `rc_channel` values, so CRSF channels 9-16 are not transmitted over
-the XLRS uplink.
+rate/region/power/failsafe changes apply after reboot. Bind RX sends the TX
+module's current binding identity over the already connected link, so it is not
+an over-the-air discovery workflow for an unconnected RX. A dedicated XLRS Lua
+script is not implemented yet. XLRS currently carries 8 OTA `rc_channel` values,
+so CRSF channels 9-16 are not transmitted over the XLRS uplink.
 
 ## RX Flight Controller Interface
 
@@ -284,6 +289,7 @@ Implemented today:
   selected.
 - TX CRSF device info and critical RF config parameters when
   `XLRS_TX_CONTROLLER_PROTOCOL=CRSF` is selected.
+- TX-mediated RX RF config persistence and RX-to-TX CRSF telemetry bridge.
 - TX runtime binding phrase update.
 - RX CRSF RC and link-statistics output.
 - Flash-backed RF config with validated defaults.
@@ -291,7 +297,7 @@ Implemented today:
 
 Reserved or incomplete:
 
-- Runtime RX binding update.
+- Binding an RX that is not already connected with a compatible identity.
 - Runtime RF config application without reboot.
 - True pair/bond workflow.
 - Dedicated EdgeTX/OpenTX Lua script.

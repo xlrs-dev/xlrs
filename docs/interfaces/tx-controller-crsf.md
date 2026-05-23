@@ -29,16 +29,22 @@ Implemented today:
   - Dynamic power.
   - Region.
   - Failsafe mode.
+  - Bind RX command.
   - Reboot command.
+- TX forwards critical RF config writes to RX over the existing XLRS telemetry
+  transport. RX persists them to flash.
+- RX forwards valid flight-controller CRSF telemetry frames over downlink
+  telemetry. TX writes those frames back to the controller CRSF port.
 
 Current limitations:
 
 - The default TX controller protocol is still the custom UART protocol unless
   `XLRS_TX_CONTROLLER_PROTOCOL=CRSF` is selected at configure time.
-- CRSF parameter writes persist config to flash. RF rate/region/power/failsafe
-  changes are applied after reboot.
+- CRSF parameter writes persist config to flash on both modules. RF
+  rate/region/power/failsafe changes are applied after reboot.
+- Bind RX sends the TX module's current binding identity over the already
+  connected link. It does not discover or bind an unconnected RX.
 - A dedicated XLRS Lua script is not implemented yet.
-- CRSF bind phrase commands are not implemented yet.
 - XLRS currently carries 8 OTA `rc_channel` values. CRSF channels 9-16 are parsed
   by the CRSF decoder but are not transmitted over the XLRS uplink.
 

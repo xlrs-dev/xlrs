@@ -59,6 +59,7 @@ public:
     void (*onDevicePing)(uint8_t destination, uint8_t origin);
     void (*onParameterRead)(uint8_t parameterNumber, uint8_t chunkNumber, uint8_t destination, uint8_t origin);
     void (*onParameterWrite)(uint8_t parameterNumber, const uint8_t *value, uint8_t valueLen, uint8_t destination, uint8_t origin);
+    void (*onPacketRaw)(const uint8_t *frame, uint8_t frameLen);
 
 private:
     xlrs::hal::SerialPort &_port;

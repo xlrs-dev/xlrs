@@ -57,6 +57,8 @@ if [[ -z "${sdk_path}" && -d "${default_sdk}" ]]; then
   ok "PICO_SDK_PATH not set; using local default ${sdk_path}"
 elif [[ -n "${sdk_path}" ]]; then
   ok "PICO_SDK_PATH set: ${sdk_path}"
+elif [[ "${PICO_SDK_FETCH_FROM_GIT:-}" == "ON" || "${PICO_SDK_FETCH_FROM_GIT:-}" == "1" ]]; then
+  warn "PICO_SDK_PATH is not set; CMake will fetch the Pico SDK because PICO_SDK_FETCH_FROM_GIT is enabled."
 else
   fail "PICO_SDK_PATH is not set and ${default_sdk} does not exist."
 fi
@@ -105,6 +107,19 @@ if [[ -n "${gcc_path}" ]]; then
   else
     fail "arm-none-eabi-gcc is not executable at ${gcc_path}."
   fi
+fi
+
+if have_command picotool; then
+  picotool_path="$(command -v picotool)"
+  ok "picotool found: ${picotool_path} ($(print_version picotool version))"
+  picotool_help="$(picotool help 2>/dev/null || true)"
+  if printf '%s\n' "${picotool_help}" | grep -Eq '^[[:space:]]+load[[:space:]]'; then
+    ok "picotool USB load support is available."
+  else
+    warn "picotool is present but does not expose USB load/reboot commands. Install a USB-capable picotool for flashing."
+  fi
+else
+  warn "picotool is not on PATH. Build still works, but flashing with scripts/flash.sh requires a USB-capable picotool."
 fi
 
 if [[ -f "${repo_root}/CMakeLists.txt" ]]; then

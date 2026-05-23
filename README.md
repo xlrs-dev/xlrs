@@ -46,9 +46,30 @@ Default SX1280 pin map:
 | RXEN | GP14 |
 | TXEN | GP15 |
 
-Pin defaults live in `CMakeLists.txt` as compile definitions and can be overridden from CMake cache or target definitions as the board layout evolves.
+The RX status LED defaults to GP13.
+
+Pin defaults are CMake cache variables, so custom boards can override them at configure time:
+
+```bash
+cmake -S . -B build -G Ninja \
+  -DXLRS_UART_TX_PIN=8 \
+  -DXLRS_UART_RX_PIN=9 \
+  -DXLRS_CRSF_TX_PIN=8 \
+  -DXLRS_CRSF_RX_PIN=9 \
+  -DXLRS_STATUS_LED_PIN=13 \
+  -DXLRS_SX128X_SPI_SCK=18
+```
 
 ## Build
+
+Requirements:
+
+- CMake
+- Ninja
+- Python 3
+- Arm embedded GCC (`arm-none-eabi-gcc`)
+- Raspberry Pi Pico SDK
+- Optional for flashing: a USB-capable `picotool`
 
 This workspace has been verified with:
 
@@ -84,17 +105,75 @@ scripts/build.sh
 If you do not have a local SDK checkout yet, CMake can fetch it into `build/`:
 
 ```bash
+PICO_SDK_FETCH_FROM_GIT=ON scripts/build.sh
+```
+
+Manual equivalent:
+
+```bash
 cmake -S . -B build -G Ninja -DPICO_BOARD=pico -DPICO_SDK_FETCH_FROM_GIT=ON
 cmake --build build --target xlrs_tx xlrs_rx
 ```
 
 Build outputs are written under `build/`, including `xlrs_tx.uf2` and `xlrs_rx.uf2`.
 
+## Flash
+
+Use a USB-capable `picotool` for command-line flashing. The Pico SDK may also build a local `picotool` for file inspection, but that binary is not always built with USB support. `scripts/check-env.sh` reports which case you have.
+
+Build first:
+
+```bash
+scripts/build.sh
+```
+
+Flash one board at a time. Hold BOOTSEL while plugging in the Pico, then run:
+
+```bash
+scripts/flash.sh tx
+scripts/flash.sh rx
+```
+
+To flash both, the helper pauses between boards:
+
+```bash
+scripts/flash.sh both
+```
+
+Raw `picotool` commands:
+
+```bash
+picotool info build/xlrs_tx.uf2
+picotool load -f build/xlrs_tx.uf2
+picotool reboot
+```
+
+Repeat with `build/xlrs_rx.uf2` for the receiver.
+
+Fallback: put the Pico in BOOTSEL mode and drag the matching UF2 onto the `RPI-RP2` mass-storage drive.
+
+## Verify
+
+Diagnostics print over USB CDC stdio. The GP8/GP9 UART is reserved for the controller side on TX and CRSF on RX.
+
+After flashing and rebooting, open the Pico USB serial device at 115200 baud. On macOS, for example:
+
+```bash
+screen /dev/tty.usbmodemXXXX 115200
+```
+
+Expected startup banners:
+
+- TX: `=== XLRS Pico SDK Transmitter ===`
+- RX: `=== XLRS Pico SDK Receiver ===`
+
+The RX also prints periodic status lines like `[RX STATUS] State: ...` while running.
+
 ## Test
 
 The pure-logic layers (UID/FHSS, OTA packing, AEAD crypto, PFD timing, the link
 state machine, scheduler, and telemetry transport) have a host-native test suite
-that runs off-device — no Pico SDK or hardware required:
+that runs off-device, with no Pico SDK or hardware required:
 
 ```bash
 scripts/test.sh
@@ -121,6 +200,13 @@ Override it at configure time:
 
 ```bash
 cmake -S . -B build -DXLRS_DEFAULT_BINDING_PHRASE="your-phrase"
+```
+
+If the build directory already exists, reconfigure both TX and RX from the same build directory after changing the phrase:
+
+```bash
+cmake -S . -B build -G Ninja -DXLRS_DEFAULT_BINDING_PHRASE="your-phrase"
+cmake --build build --target xlrs_tx xlrs_rx
 ```
 
 ## Runtime

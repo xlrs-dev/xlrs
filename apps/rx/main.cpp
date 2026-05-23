@@ -29,7 +29,9 @@
 #define CRSF_RX_PIN 9
 #endif
 
+#ifndef STATUS_LED_PIN
 #define STATUS_LED_PIN 13
+#endif
 
 struct RfToAppData {
     xlrs::LinkState state;

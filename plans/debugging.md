@@ -1,6 +1,6 @@
 # XLRS Host Interfacing & Step-by-Step Troubleshooting Guide
 
-This guide outlines the system integration, chronological validation flow, and bench troubleshooting protocols for interfacing an external remote control MCU (specifically an **RP2040** host running custom controller logic or telemetry readers) with the **XLRS 2.4 GHz Link Core**.
+This guide outlines the system integration, chronological validation flow, and bench troubleshooting protocols for the XLRS **TX/RX radio modules**. The TX module consumes channel/control frames over UART; the RX module emits CRSF to the flight controller.
 
 Debugging embedded real-time transceivers is notoriously difficult because radio frequency (RF) packets are microsecond-critical and cross multiple hardware, serial, and multicore boundaries. This document provides a highly structured, step-by-step procedure to isolate and systematically verify the entire signal path—from static build-time parameters up to full end-to-end bidirectional loop telemetry.
 
@@ -65,9 +65,25 @@ To achieve a verified, fully operational system, follow this chronological 4-pha
 
 Before flashing firmware to the hardware modules, verify that the compiled configuration structures on both nodes mathematically align. If the static parameters mismatch, the nodes will fail to establish an RF link.
 
+Recommended preflight:
+
+```bash
+scripts/check-env.sh
+scripts/build.sh
+scripts/test.sh
+```
+
+Flash and monitor:
+
+```bash
+scripts/flash.sh tx
+scripts/flash.sh rx
+TX_PORT=/dev/cu.usbmodem101 RX_PORT=/dev/cu.usbmodem102 scripts/monitor.sh both
+```
+
 #### 1. FNV-1a Link UID Verification
 * **Why it matters:** The 64-bit Link UID seeds the FHSS pseudorandom hop sequence and the transceiver sync words. Both the TX and RX must compute the identical 64-bit hash from the binding phrase.
-* **Verification Action:** Open the serial monitor at boot. Verify that both modules print the identical hex value:
+* **Verification Action:** Use `scripts/monitor.sh` at boot. Verify that both modules use the same binding phrase and computed identity. If richer UID logging is needed, add it around `BindingStore::begin()` during bench bring-up.
   ```text
   [UID] Binding Phrase: "Kikobot-02"
   [UID] Computed 64-bit Hash: 0xE36C2F8A4B9D1E0F
@@ -82,16 +98,16 @@ Before flashing firmware to the hardware modules, verify that the compiled confi
   ```
 
 #### 3. Channel Count Constraint
-* **Note on Milestone 3 limits:** The clean-slate core currently sets `RC_CHANNELS = 4` to fit the strict 8-byte over-the-air packet payload budget. Ensure that your Host controller is configured to send exactly 4 primary stick channels (Aileron, Elevator, Throttle, Rudder) scaled from 1000 to 2000 µs. Attempting to unpack 8 channels from the 8-byte OTA frame will corrupt memory.
+* **Current behavior:** the link core carries 8 primary channels (`Link::RC_CHANNELS = 8`). The RX emits a 16-channel CRSF packed frame: channels 0-7 come from the RF link and channels 8-15 are centered placeholders. The host-side TX UART should provide 8 channel values scaled to the expected 11-bit/control range.
 
 ---
 
-### Phase 2: Host to TX (Transmitter) Interfacing & Bench Debugging
+### Phase 2: TX UART Interfacing & Bench Debugging
 
-In this phase, wire the Host MCU (RP2040) to the XLRS TX module and verify the high-speed UART interface.
+In this phase, wire a controller-side UART peer to the XLRS TX module and verify the high-speed channel/control interface.
 
 ```
-   Host MCU (RP2040)                      XLRS TX Module
+   Controller UART Peer                  XLRS TX Module
 +--------------------+                 +--------------------+
 |                GP8 |---------------->| GP9 (RX)           |
 |                GP9 |<----------------| GP8 (TX)           |
@@ -116,7 +132,7 @@ In this phase, wire the Host MCU (RP2040) to the XLRS TX module and verify the h
 
 #### 3. Multi-Core Mailbox Handoff Verification
 * **Why it matters:** The UART parser runs on Core 0, while the `RfScheduler` runs on Core 1. Channels are handed off via a lock-free `LatestValue` mailbox. If there is a compilation reordering or memory barrier issue, the RF core may read torn or stale data.
-* **Verification Action:** Enable `DEBUG_LINK_STATS = 1` in the TX build. Verify that channel updates are loaded into the RF task without latency slips:
+* **Verification Action:** Monitor TX/RX USB logs and, if needed, add temporary counters around `LatestValue<AppToRfData>` in `apps/tx/main.cpp`. Verify that channel updates are loaded into the RF task without latency slips:
   ```text
   [STATS] Tick: 12000, AppToRf Mailbox updates: 100Hz, Slot Jitter: < 2 us, Queue Drops: 0
   ```
@@ -169,7 +185,7 @@ Power up the Receiver module in isolation and verify its synchronization and out
   3. Measure the time until the CRSF serial stream stops.
 * **Success Criteria:**
   * **Uplink Slot Counting:** The failsafe accountant must count missed *uplink slots only* (excluding sync and telemetry slots).
-  * **Cutoff Time:** The CRSF output must cease completely within exactly **200 ms** (equal to 20 consecutive missed uplink slots at 100 Hz). The output must remain flat (`NoPulses`); it must never emit "hold last state" channels unless explicitly configured.
+  * **Cutoff Time:** The CRSF output must cease after the configured consecutive missed-uplink threshold (`Link::FAILSAFE_MISS`). The output must remain flat (`NoPulses`); it must never emit "hold last state" channels unless explicitly configured.
 
 ---
 
@@ -178,12 +194,10 @@ Power up the Receiver module in isolation and verify its synchronization and out
 With the TX and RX synchronized, verify the complete bidirectional telemetry loop and dynamic RF power settings.
 
 #### 1. Telemetry Downlink Verification
-* **Operational Flow:** On designated telemetry slots (e.g. 1 out of every 8 slots), the RX module switches to TX mode and transmits a `OtaType::TlmDown` packet containing:
-  * RSSI (dBm) and SNR (dB) as measured by the RX.
-  * Receiver battery voltage.
-* **Verification Action:** Monitor the Host MCU serial console. It should print the telemetry packets passed from the TX module at a steady **5 Hz** cadence:
+* **Operational Flow:** On designated telemetry slots, the RX module switches to TX mode and transmits a `OtaType::TlmDown` packet containing RF link statistics such as RSSI, SNR, LQ, current rate, and queue/recovery counters.
+* **Verification Action:** Monitor the TX USB log and the controller-side UART telemetry consumer. The TX app forwards telemetry/status over its UART protocol at its configured app interval:
   ```text
-  [TELEM] RSSI: -62 dBm, SNR: 8.5 dB, RX Batt: 5040 mV (100%)
+  [TELEM] RSSI: -62 dBm, SNR: 8.5 dB, LQ: 98%, Rate: 100Hz
   ```
 
 #### 2. Dynamic Power Hysteresis Verification
@@ -202,7 +216,7 @@ If you encounter issues during bench testing, use this matrix to quickly isolate
 | Observed Symptom | Likely Root Cause | Diagnostic Steps & Actions |
 |------------------|-------------------|----------------------------|
 | **Host prints `PING Timeout`** | 1. Incorrect UART wiring.<br>2. Baud rate mismatch.<br>3. Sync byte mismatch. | * Check that TX/RX lines are crossed between Host and TX module.<br>* Use a logic analyzer to verify baud is exactly 420K bps.<br>* Verify Host transmits `0xA5` as the first byte of every frame. |
-| **No-Connect (Acquisition Failure)** | 1. Link UID phrase mismatch.<br>2. Frequency-hopping table discrepancy. | * Verify boot serial outputs show identical computed 64-bit Link UIDs on both ends.<br>* Verify that both TX and RX compiled the same regional channel table. |
+| **No-Connect (Acquisition Failure)** | 1. Link UID phrase mismatch.<br>2. Frequency-hopping table discrepancy.<br>3. SX1280 sync-word remap issue. | * Verify both modules were built with the same `XLRS_DEFAULT_BINDING_PHRASE` or have the same persisted binding phrase.<br>* Verify that both TX and RX compiled the same regional channel table.<br>* Check the FLRC sync word path, including the §16.4 forbidden sync-word guard. |
 | **Link connects briefly, then drops out repeatedly** | 1. PFD feedback sign inversion.<br>2. Excessive crystal reference frequency mismatch. | * Check that `RfScheduler.cpp` computes `offsetUs` with negative feedback sign.<br>* Use a scope to verify the RX slot tick pulls *toward* the RX-done pulse, not away from it.<br>* Check PFD integral wind-up. If it hits limits (+/- interval * 4) rapidly, replace the crystal/TCXO. |
 | **High UART packet loss or system freezes** | 1. Heavy SPI or encryption calls running in the HwTimer ISR. | * Audit `HwTimer.cpp` and `RfScheduler.cpp`. Ensure `onTick` is deferred to Core 1 task context.<br>* Toggle GPIO pins in the ISR and verify execution duration is **$< 5\,\mu\text{s}$**. |
 | **Failsafe triggers prematurely during telemetry** | 1. Failsafe accountant is tracking raw ticks instead of uplink slots. | * Verify that missed slots are only incremented on ticks allocated to Uplink. |

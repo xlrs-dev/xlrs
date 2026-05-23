@@ -18,31 +18,52 @@ Firmware builds are configured as Pico SDK CMake targets:
 
 ---
 
-### B. Hardware & Pinout Macros
-Passed as Pico SDK target compile definitions to map physical microcontroller pins to the `IRadioPhy` layer:
+### B. Hardware & Pinout Cache Variables
+Pins are configured as CMake cache variables and emitted as target compile definitions. Override them at configure time with `-D...=...`.
 
 #### 1. Radio Module SPI Configuration (SX1280)
-* **`SX128X_SPI_SCK`** (e.g. `18`) — SPI clock pin.
-* **`SX128X_SPI_MOSI`** (e.g. `19`) — SPI Master-Out Slave-In pin.
-* **`SX128X_SPI_MISO`** (e.g. `16`) — SPI Master-In Slave-Out pin.
-* **`SX128X_SPI_CS`** (e.g. `17`) — SPI Chip Select pin.
-* **`SX128X_SPI_BUSY`** (e.g. `20`) — SX1280 busy indicator pin (critical for state transition timing).
-* **`SX128X_SPI_DIO1`** (e.g. `21`) — DIO1 pin (configured as a hardware interrupt to signal TX-done or RX-done immediately).
-* **`SX128X_SPI_RST`** (e.g. `22`) — Reset pin.
-* **`SX128X_RXEN`** (e.g. `14`) / **`SX128X_TXEN`** (e.g. `15`) — Front-end LNA/PA active switching pins.
+* **`XLRS_SX128X_SPI_SCK`** (default `18`) — SPI clock pin.
+* **`XLRS_SX128X_SPI_MOSI`** (default `19`) — SPI Master-Out Slave-In pin.
+* **`XLRS_SX128X_SPI_MISO`** (default `16`) — SPI Master-In Slave-Out pin.
+* **`XLRS_SX128X_SPI_CS`** (default `17`) — SPI Chip Select pin.
+* **`XLRS_SX128X_SPI_BUSY`** (default `20`) — SX1280 busy indicator pin.
+* **`XLRS_SX128X_SPI_DIO1`** (default `21`) — DIO1 pin for TX-done/RX-done interrupts.
+* **`XLRS_SX128X_SPI_RST`** (default `22`) — Reset pin.
+* **`XLRS_SX128X_RXEN`** (default `14`) / **`XLRS_SX128X_TXEN`** (default `15`) — Front-end LNA/PA switching pins.
 
 #### 2. TX UART Interface Configuration
-* **`UART_PROTOCOL_TX`** (e.g. `8`) / **`UART_PROTOCOL_RX`** (e.g. `9`) — UART serial routing pins for the TX module channel/control input.
+* **`XLRS_UART_TX_PIN`** (default `8`) / **`XLRS_UART_RX_PIN`** (default `9`) — TX module channel/control UART.
+
+#### 3. RX CRSF Interface Configuration
+* **`XLRS_CRSF_TX_PIN`** (default `8`) / **`XLRS_CRSF_RX_PIN`** (default `9`) — RX module CRSF UART to the flight controller.
+* **`XLRS_STATUS_LED_PIN`** (default `13`) — RX status LED GPIO.
 
 ---
 
 ### C. Feature Control Macros
 Configure high-level software settings:
 
-* **`DEFAULT_BINDING_PHRASE`** (e.g. `"Kikobot-02"`)
+* **`XLRS_DEFAULT_BINDING_PHRASE`** (default `"Kikobot-02"`)
   * String literal used to seed the default **Link UID** if a customized bind phrase is not active.
-* **`DEBUG_LINK_STATS`**
-  * Set to `1` to periodically output loop timings, serial rates, and link statistics over the hardware serial interface once per second.
+
+Example:
+
+```bash
+cmake -S . -B build -G Ninja \
+  -DXLRS_DEFAULT_BINDING_PHRASE="bench-pair-01" \
+  -DXLRS_STATUS_LED_PIN=25
+```
+
+---
+
+### D. Build, Test, Flash, and Monitor Scripts
+
+* **`scripts/check-env.sh`** verifies CMake, Ninja, Python, Pico SDK, Arm GCC/newlib, and optional USB-capable `picotool`.
+* **`scripts/build.sh`** configures and builds `xlrs_tx` and `xlrs_rx`.
+* **`scripts/test.sh`** runs the host-native CMake/CTest suite in `test/`.
+* **`scripts/flash.sh tx|rx|both`** flashes UF2 files using USB-capable `picotool` when available, else UF2 mass-storage copy.
+* **`scripts/monitor.sh tx|rx|both`** tails USB CDC logs at 115200 baud, with `[TX]`/`[RX]` prefixes for dual monitoring.
+* **`scripts/flash-monitor.sh tx|rx|both`** builds, flashes, then starts monitoring.
 
 ---
 
@@ -68,7 +89,7 @@ Runtime configurations are dynamically resolved on boot, computed mathematically
 ---
 
 ### B. Dynamically Swappable Rates (`RateConfig`)
-Packet rates are stored in a static constant lookup table `kRates` inside [RateConfig.h](file:///Users/sawan/projects/xlrs-dev/xlrs/lib/xlrs/link/RateConfig.h). Rates can be switched dynamically at runtime:
+Packet rates are stored in a static constant lookup table `kRates` inside [`RateConfig.h`](../lib/xlrs/link/RateConfig.h). Rates can be switched dynamically at runtime:
 
 ```cpp
 struct RateConfig {

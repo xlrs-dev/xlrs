@@ -21,6 +21,7 @@ Handset firmware, RC controller UI, battery-management code, and web configurati
 | `lib/UARTProtocol/` | UART protocol consumed by the TX module |
 | `lib/crsfSerial/` | CRSF output support used by the RX module |
 | `cmake/` | Pico SDK import helper |
+| `scripts/` | Build, test, flash, and serial monitor helpers |
 
 ## Hardware
 
@@ -57,7 +58,15 @@ cmake -S . -B build -G Ninja \
   -DXLRS_CRSF_TX_PIN=8 \
   -DXLRS_CRSF_RX_PIN=9 \
   -DXLRS_STATUS_LED_PIN=13 \
-  -DXLRS_SX128X_SPI_SCK=18
+  -DXLRS_SX128X_SPI_SCK=18 \
+  -DXLRS_SX128X_SPI_MOSI=19 \
+  -DXLRS_SX128X_SPI_MISO=16 \
+  -DXLRS_SX128X_SPI_CS=17 \
+  -DXLRS_SX128X_SPI_BUSY=20 \
+  -DXLRS_SX128X_SPI_DIO1=21 \
+  -DXLRS_SX128X_SPI_RST=22 \
+  -DXLRS_SX128X_RXEN=14 \
+  -DXLRS_SX128X_TXEN=15
 ```
 
 ## Build
@@ -147,6 +156,13 @@ FLASH_METHOD=uf2 scripts/flash.sh tx
 FLASH_METHOD=picotool scripts/flash.sh rx
 ```
 
+When using UF2 copy, the helper auto-detects a single mounted `RPI-RP2` volume. If more than one is mounted, pass the volume explicitly:
+
+```bash
+TX_UF2_VOLUME=/Volumes/RPI-RP2 scripts/flash.sh tx
+RX_UF2_VOLUME=/Volumes/RPI-RP2 scripts/flash.sh rx
+```
+
 ## Monitor
 
 Diagnostics print over USB CDC stdio. The GP8/GP9 UART is reserved for the controller side on TX and CRSF on RX.
@@ -178,12 +194,16 @@ scripts/flash-monitor.sh rx
 scripts/flash-monitor.sh both
 ```
 
+For `both`, flash TX first, then RX, and provide the serial ports after both boards reboot.
+
 Expected startup banners:
 
 - TX: `=== XLRS Pico SDK Transmitter ===`
 - RX: `=== XLRS Pico SDK Receiver ===`
 
 The RX also prints periodic status lines like `[RX STATUS] State: ...` while running.
+
+`scripts/monitor.sh` uses 115200 baud by default. Override with `BAUD=...` if needed.
 
 ## Test
 

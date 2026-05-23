@@ -1,12 +1,14 @@
 // Small app-level payloads carried by Link::queueTelemetry/getTelemetry.
 #pragma once
 
+#include <stddef.h>
 #include <stdint.h>
 #include <string.h>
 
 #include "crsf_protocol.h"
 #include "link/RfConfig.h"
 #include "link/Uid.h"
+#include "util/RingBuffer.h"
 
 namespace xlrs {
 
@@ -124,6 +126,20 @@ inline bool parseCrsfFrameMessage(const uint8_t* payload, size_t len, const uint
 inline bool makeRebootMessage(AppTelemetryMessage& out) {
     out.len = appTelemetryWritePrefix(out.data, AppTelemetryType::Reboot);
     return true;
+}
+
+template <typename LinkLike, size_t QueueSize>
+inline bool pumpLinkTelemetryToApp(LinkLike& link,
+                                   SpscRing<AppTelemetryMessage, QueueSize>& queue) {
+    size_t telemetryLen = 0;
+    AppTelemetryMessage message{};
+    if (!link.getTelemetry(message.data, telemetryLen) ||
+        telemetryLen > APP_TELEMETRY_MAX_LEN) {
+        return false;
+    }
+
+    message.len = (uint8_t)telemetryLen;
+    return queue.push(message);
 }
 
 } // namespace xlrs

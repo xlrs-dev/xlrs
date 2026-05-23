@@ -226,10 +226,12 @@ static void test_crsf_rc_channels_frame_sets_link_up() {
     xlrs::hal::SerialPort port;
     CrsfSerial crsf = makeCrsf(port);
 
+    uint16_t input[CRSF_NUM_CHANNELS] = {};
     crsf_channels_t channels{};
     for (uint8_t i = 0; i < CRSF_NUM_CHANNELS; ++i) {
-        setCrsfChannelByIndex(channels, i, rcUsToCrsfChannel((uint16_t)(1000 + i * 25)));
+        input[i] = (uint16_t)(1000 + i * 25);
     }
+    rcUsToCrsfChannels(input, channels);
     auto frame = makeCrsfFrame(CRSF_ADDRESS_FLIGHT_CONTROLLER,
                                CRSF_FRAMETYPE_RC_CHANNELS_PACKED,
                                reinterpret_cast<const uint8_t*>(&channels),

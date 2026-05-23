@@ -11,6 +11,7 @@
 #include <pico/stdlib.h>
 
 #include "app/AppTelemetry.h"
+#include "app/CrsfChannels.h"
 #include "app/CrsfLinkStats.h"
 #include "crsfSerial.h"
 #include "fhss/Fhss.h"
@@ -148,13 +149,6 @@ static void applyRxAppTelemetry(const xlrs::AppTelemetryMessage& message) {
     }
 }
 
-// Linear map with clamping: an out-of-range RC value must not extrapolate past the CRSF limits.
-static long mapRange(long value, long inMin, long inMax, long outMin, long outMax) {
-    if (value < inMin) value = inMin;
-    if (value > inMax) value = inMax;
-    return (value - inMin) * (outMax - outMin) / (inMax - inMin) + outMin;
-}
-
 static void updateLED(xlrs::LinkState state, bool outputActive, bool hardwareError,
                       bool bindScanOpen, bool bindPacketReceived) {
     if (xlrs::hal::nowMs() - lastLedUpdate < LED_UPDATE_INTERVAL_MS) return;
@@ -272,24 +266,11 @@ static void app_core_loop() {
 
         if (outputActive) {
             crsf_channels_t crsfChannels{};
-            crsfChannels.ch0 = mapRange(localChannels[0], RC_US_MIN, RC_US_MAX, CRSF_CHANNEL_VALUE_1000, CRSF_CHANNEL_VALUE_2000);
-            crsfChannels.ch1 = mapRange(localChannels[1], RC_US_MIN, RC_US_MAX, CRSF_CHANNEL_VALUE_1000, CRSF_CHANNEL_VALUE_2000);
-            crsfChannels.ch2 = mapRange(localChannels[2], RC_US_MIN, RC_US_MAX, CRSF_CHANNEL_VALUE_1000, CRSF_CHANNEL_VALUE_2000);
-            crsfChannels.ch3 = mapRange(localChannels[3], RC_US_MIN, RC_US_MAX, CRSF_CHANNEL_VALUE_1000, CRSF_CHANNEL_VALUE_2000);
-            crsfChannels.ch4 = mapRange(localChannels[4], RC_US_MIN, RC_US_MAX, CRSF_CHANNEL_VALUE_1000, CRSF_CHANNEL_VALUE_2000);
-            crsfChannels.ch5 = mapRange(localChannels[5], RC_US_MIN, RC_US_MAX, CRSF_CHANNEL_VALUE_1000, CRSF_CHANNEL_VALUE_2000);
-            crsfChannels.ch6 = mapRange(localChannels[6], RC_US_MIN, RC_US_MAX, CRSF_CHANNEL_VALUE_1000, CRSF_CHANNEL_VALUE_2000);
-            crsfChannels.ch7 = mapRange(localChannels[7], RC_US_MIN, RC_US_MAX, CRSF_CHANNEL_VALUE_1000, CRSF_CHANNEL_VALUE_2000);
-
-            uint16_t center = CRSF_CHANNEL_VALUE_MID;
-            crsfChannels.ch8 = center;
-            crsfChannels.ch9 = center;
-            crsfChannels.ch10 = center;
-            crsfChannels.ch11 = center;
-            crsfChannels.ch12 = center;
-            crsfChannels.ch13 = center;
-            crsfChannels.ch14 = center;
-            crsfChannels.ch15 = center;
+            uint16_t crsfRcUs[CRSF_NUM_CHANNELS] = {};
+            for (uint8_t i = 0; i < CRSF_NUM_CHANNELS; ++i) {
+                crsfRcUs[i] = i < RC_CHANNELS ? localChannels[i] : RC_US_MID;
+            }
+            xlrs::rcUsToCrsfChannels(crsfRcUs, crsfChannels);
 
             crsf.queuePacket(CRSF_ADDRESS_FLIGHT_CONTROLLER, CRSF_FRAMETYPE_RC_CHANNELS_PACKED,
                              &crsfChannels, CRSF_FRAME_RC_CHANNELS_PAYLOAD_SIZE);
@@ -446,13 +427,7 @@ static void rf_core_main() {
             rfData.rfToAppQueueDrops = g_rfTelemetryToApp.dropped();
             g_rfToApp.store(rfData);
 
-            size_t telemetryLen = 0;
-            xlrs::AppTelemetryMessage uplinkMessage{};
-            if (g_link.getTelemetry(uplinkMessage.data, telemetryLen) &&
-                telemetryLen <= xlrs::APP_TELEMETRY_MAX_LEN) {
-                uplinkMessage.len = (uint8_t)telemetryLen;
-                g_rfTelemetryToApp.push(uplinkMessage);
-            }
+            xlrs::pumpLinkTelemetryToApp(g_link, g_rfTelemetryToApp);
         }
 
         g_rfHeartbeat.fetch_add(1, std::memory_order_release);

@@ -197,6 +197,9 @@ void Link::onTick(uint32_t tick) {
 }
 
 float Link::freqForTick(uint32_t tick) const {
+    // Bind acquisition uses a fixed shared rf_channel. An unbound RX has no phase reference, so
+    // letting bind TX hop would make discovery depend on lucky scheduler phase alignment.
+    if (_bindTransmitActive || _bindScanActive) return freqForPos(0);
     if (_role == Role::Tx) {
         return freqForPos(txPos(tick));
     } else {

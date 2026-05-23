@@ -725,13 +725,7 @@ static void rf_core_main() {
             }
             g_rfToApp.store(rfData);
 
-            size_t telemetryLen = 0;
-            xlrs::AppTelemetryMessage downlinkMessage{};
-            if (g_link.getTelemetry(downlinkMessage.data, telemetryLen) &&
-                telemetryLen <= xlrs::APP_TELEMETRY_MAX_LEN) {
-                downlinkMessage.len = (uint8_t)telemetryLen;
-                g_rfTelemetryToApp.push(downlinkMessage);
-            }
+            xlrs::pumpLinkTelemetryToApp(g_link, g_rfTelemetryToApp);
         }
 
         g_rfHeartbeat.fetch_add(1, std::memory_order_release);

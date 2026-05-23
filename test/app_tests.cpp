@@ -37,10 +37,12 @@ static void test_crsf_channel_mapping() {
 }
 
 static void test_crsf_packed_channels_to_rc_channels() {
+    uint16_t input[CRSF_NUM_CHANNELS] = {};
     crsf_channels_t crsfChannels{};
     for (uint8_t i = 0; i < CRSF_NUM_CHANNELS; ++i) {
-        setCrsfChannelByIndex(crsfChannels, i, rcUsToCrsfChannel((uint16_t)(1000 + i * 20)));
+        input[i] = (uint16_t)(1000 + i * 20);
     }
+    rcUsToCrsfChannels(input, crsfChannels);
 
     uint16_t rcChannels[CRSF_NUM_CHANNELS] = {};
     crsfChannelsToRcUs(crsfChannels, rcChannels);

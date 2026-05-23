@@ -7,6 +7,29 @@
 using namespace xlrs;
 using namespace xlrs_test;
 
+static void simTickWithPhaseOffset(SimEnvironment& env, uint32_t txTick, uint32_t rxTick,
+                                   bool txOn = true) {
+    g_txSched = &env.txSched;
+    g_rxSched = &env.rxSched;
+
+    env.txPhy.setOnRxDone(onTxRxDone);
+    env.txPhy.setOnTxDone(onTxTxDone);
+    env.rxPhy.setOnRxDone(onRxRxDone);
+    env.rxPhy.setOnTxDone(onRxTxDone);
+
+    Slot slot = env.tx.slotForTick(txTick);
+    if (slot == Slot::Telemetry) {
+        if (txOn) env.txSched.onTick(txTick);
+        env.rxSched.onTick(rxTick);
+    } else {
+        env.rxSched.onTick(rxTick);
+        if (txOn) env.txSched.onTick(txTick);
+    }
+
+    if (txOn) env.tx.service(txTick);
+    env.rx.service(rxTick);
+}
+
 static void test_link_connect_flow_failsafe() {
     uint8_t uid[LINK_UID_SIZE];
     linkUidFromPhrase("Kikobot-02", uid);
@@ -80,6 +103,39 @@ static void test_link_bind_scan_accepts_offered_uid() {
     env.rxPhy.setSyncWord(env.rx.syncWord());
 
     for (uint32_t t = 1; t <= 80; ++t) simTick(env, t);
+
+    uint8_t receivedUid[LINK_UID_SIZE] = {};
+    TEST_ASSERT_TRUE(env.rx.takeReceivedBindUid(receivedUid));
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(txUid, receivedUid, LINK_UID_SIZE);
+}
+
+static void test_link_bind_scan_accepts_offered_uid_with_tick_phase_offset() {
+    uint8_t txUid[LINK_UID_SIZE], rxUid[LINK_UID_SIZE];
+    linkUidFromPhrase("CraftA", txUid);
+    linkUidFromPhrase("CraftB", rxUid);
+
+    SimEnvironment env;
+    PhyConfig cfg{};
+    cfg.freqMHz = 2420.0f;
+    cfg.payloadLen = OTA16_LEN;
+    env.txPhy.init(cfg);
+    env.rxPhy.init(cfg);
+    MockPhy::connect(env.txPhy, env.rxPhy);
+
+    env.tx.begin(Role::Tx, txUid, 2);
+    env.rx.begin(Role::Rx, rxUid, 2);
+    env.txSched.begin(&env.txPhy, &env.tx, 2);
+    env.rxSched.begin(&env.rxPhy, &env.rx, 2);
+
+    env.tx.startBindTransmit(txUid);
+    env.rx.startBindScan();
+    env.txPhy.setSyncWord(env.tx.syncWord());
+    env.rxPhy.setSyncWord(env.rx.syncWord());
+
+    const uint32_t txPhaseOffset = 137;
+    for (uint32_t t = 1; t <= 80; ++t) {
+        simTickWithPhaseOffset(env, t + txPhaseOffset, t);
+    }
 
     uint8_t receivedUid[LINK_UID_SIZE] = {};
     TEST_ASSERT_TRUE(env.rx.takeReceivedBindUid(receivedUid));
@@ -273,6 +329,7 @@ int main() {
     RUN_TEST(test_link_connect_flow_failsafe);
     RUN_TEST(test_link_mismatched_phrase_no_connect);
     RUN_TEST(test_link_bind_scan_accepts_offered_uid);
+    RUN_TEST(test_link_bind_scan_accepts_offered_uid_with_tick_phase_offset);
     RUN_TEST(test_link_fhss_acquire_and_recover);
     RUN_TEST(test_link_telemetry_downlink);
     RUN_TEST(test_link_rate_switch_and_power);

@@ -10,9 +10,11 @@ bind workflow:
 
 1. TX reads its current persisted Link UID.
 2. TX switches the RF core to a shared XLRS bind identity for about 30 seconds.
-3. TX transmits XLRS `Bind` OTA frames containing its real Link UID.
+3. TX transmits XLRS `Bind` OTA frames containing its real Link UID on the
+   shared bind acquisition rf_channel.
 4. An RX that has not yet made a normal connection in this boot periodically
-   enters short bind-scan windows on the shared bind identity.
+   enters short bind-scan windows on the shared bind identity and bind
+   acquisition rf_channel.
 5. If RX receives a valid bind frame while scanning, it persists the offered
    Link UID and reboots.
 6. After reboot, RX uses the learned Link UID for normal acquisition.
@@ -31,7 +33,7 @@ Instead, RX only accepts bind frames when all of these are true:
 | Check | Purpose |
 | --- | --- |
 | RX is in pre-first-link bind-scan mode | Avoid accepting bind data during normal operation |
-| Radio sync word matches the shared bind identity | Avoid normal-link or random same-frequency frames |
+| Radio sync word and rf_channel match the shared bind acquisition settings | Avoid normal-link or random same-frequency frames |
 | OTA frame type is `Bind` | Accept only the binding frame type |
 | Bind payload magic/version is valid | Reject malformed bind-looking payloads |
 | Offered Link UID CRC matches | Reject corrupted UID payloads |

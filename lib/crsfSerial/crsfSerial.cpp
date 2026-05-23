@@ -111,7 +111,12 @@ void CrsfSerial::handleByteReceived()
     do
     {
         reprocess = false;
-        if (_rxBufPos > 1)
+        if (_rxBufPos > 0 && !isCrsfFrameAddress(_rxBuf[0]))
+        {
+            shiftRxBuffer(1);
+            reprocess = true;
+        }
+        else if (_rxBufPos > 1)
         {
             uint8_t len = _rxBuf[1];
             // Sanity check the declared length isn't outside Type + X{1,CRSF_MAX_PAYLOAD_LEN} + CRC

@@ -46,6 +46,18 @@ static void test_crsf_packed_channels_to_rc_channels() {
     TEST_ASSERT_EQUAL_UINT16(1300, rcChannels[15]);
 }
 
+static void test_crsf_frame_address_validation() {
+    TEST_ASSERT_TRUE(isCrsfFrameAddress(CRSF_ADDRESS_BROADCAST));
+    TEST_ASSERT_TRUE(isCrsfFrameAddress(CRSF_ADDRESS_FLIGHT_CONTROLLER));
+    TEST_ASSERT_TRUE(isCrsfFrameAddress(CRSF_ADDRESS_RADIO_TRANSMITTER));
+    TEST_ASSERT_TRUE(isCrsfFrameAddress(CRSF_ADDRESS_CRSF_RECEIVER));
+    TEST_ASSERT_TRUE(isCrsfFrameAddress(CRSF_ADDRESS_CRSF_TRANSMITTER));
+    TEST_ASSERT_TRUE(isCrsfFrameAddress(CRSF_ADDRESS_GPS));
+
+    TEST_ASSERT_FALSE(isCrsfFrameAddress(0x41));
+    TEST_ASSERT_FALSE(isCrsfFrameAddress(0xFF));
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -54,5 +66,6 @@ int main() {
     RUN_TEST(test_crsf_link_statistics);
     RUN_TEST(test_crsf_channel_mapping);
     RUN_TEST(test_crsf_packed_channels_to_rc_channels);
+    RUN_TEST(test_crsf_frame_address_validation);
     return UNITY_END();
 }

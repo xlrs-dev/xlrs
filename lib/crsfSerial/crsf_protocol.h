@@ -76,6 +76,28 @@ typedef enum
     CRSF_ADDRESS_CRSF_TRANSMITTER = 0xEE,
 } crsf_addr_e;
 
+static inline bool isCrsfFrameAddress(uint8_t value)
+{
+    switch (value) {
+    case CRSF_ADDRESS_BROADCAST:
+    case CRSF_ADDRESS_USB:
+    case CRSF_ADDRESS_TBS_CORE_PNP_PRO:
+    case CRSF_ADDRESS_RESERVED1:
+    case CRSF_ADDRESS_CURRENT_SENSOR:
+    case CRSF_ADDRESS_GPS:
+    case CRSF_ADDRESS_TBS_BLACKBOX:
+    case CRSF_ADDRESS_FLIGHT_CONTROLLER:
+    case CRSF_ADDRESS_RESERVED2:
+    case CRSF_ADDRESS_RACE_TAG:
+    case CRSF_ADDRESS_RADIO_TRANSMITTER:
+    case CRSF_ADDRESS_CRSF_RECEIVER:
+    case CRSF_ADDRESS_CRSF_TRANSMITTER:
+        return true;
+    default:
+        return false;
+    }
+}
+
 typedef enum
 {
     CRSF_PARAM_UINT8 = 0x00,

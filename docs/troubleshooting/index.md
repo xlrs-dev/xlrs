@@ -73,6 +73,19 @@ Periodic status lines:
 [RX STATUS] State: <n> LQ: <n>% RSSI: <n> dBm | PHY timeouts: <n> CRC: <n>
 ```
 
+During CRSF Bind RX, TX also logs one-shot bind state transitions:
+
+```text
+[TX BIND] OTA bind transmit window open for <n> seconds.
+[TX BIND] OTA bind transmit window closed.
+```
+
+While the TX bind window is open, periodic TX status lines append
+`[BIND TX <n>s]`, where `<n>` is the approximate seconds remaining. In the
+custom controller UART build, `UART_MSG_STATUS.pairingState` is also set to `2`
+while bind transmit is active so a PC-side tool can monitor it without parsing
+USB logs.
+
 Current state values:
 
 | Value | LinkState |

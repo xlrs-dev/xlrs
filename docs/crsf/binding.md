@@ -77,6 +77,19 @@ RX serial status lines also append:
 | --- | --- |
 | `[BIND SCAN]` | RX is in a bind-scan window and open to bind packets |
 | `[BIND RX]` | RX received a valid bind frame and is handing it to the app core |
+| `[BIND TX <n>s]` | TX is actively sending bind frames; `<n>` is seconds remaining |
+
+TX also emits one-shot USB log lines when the bind transmit window opens and
+closes:
+
+```text
+[TX BIND] OTA bind transmit window open for <n> seconds.
+[TX BIND] OTA bind transmit window closed.
+```
+
+In the custom controller UART build, `UART_MSG_STATUS.pairingState` is set to
+`2` while TX is in bind transmit mode. This gives PC-side programming tools a
+machine-readable bind-progress signal without parsing the USB serial log.
 
 If the LED never shows the bind-scan pattern while unconnected, the RX is not
 entering bind scan. If it shows bind scan but never `[BIND RX]`, check that TX

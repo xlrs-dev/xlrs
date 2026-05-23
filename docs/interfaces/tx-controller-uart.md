@@ -26,6 +26,16 @@ Default UART:
 1000-2000 us by the app layer. The TX app copies all 8 channels into the RF
 mailbox, and the link layer masks values to 11 bits before OTA packing.
 
+`UART_MSG_STATUS` is emitted about once per second when RF data is available.
+During an OTA bind transmit window, `pairingState` is set to `2` so a PC-side
+programming or monitoring tool can show that TX is actively sending bind frames.
+
+| `pairingState` | Meaning |
+| ---: | --- |
+| `0` | Unpaired or unknown |
+| `1` | Normal paired operation |
+| `2` | OTA bind transmit active |
+
 See [index.md](index.md) for the complete current interface reference.
 
 For controller-facing CRSF, build with `-DXLRS_TX_CONTROLLER_PROTOCOL=CRSF` and

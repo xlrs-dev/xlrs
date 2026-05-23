@@ -45,6 +45,8 @@ struct RfToAppData {
     xlrs::LinkState state;
     xlrs::LinkStats stats;
     bool hardwareError;   // RF core: radio init failed or PHY unhealthy
+    bool bindTransmitActive;
+    uint8_t bindSecondsRemaining;
 };
 
 xlrs::LatestValue<AppToRfData> g_appToRf;
@@ -182,13 +184,14 @@ static void buildInt8Parameter(uint8_t* payload, uint8_t& len, uint8_t parameter
 }
 
 static void buildCommandParameter(uint8_t* payload, uint8_t& len, uint8_t parameterNumber,
-                                  const char* label, const char* info) {
+                                  const char* label, const char* info,
+                                  uint8_t commandStatus = CRSF_COMMAND_READY) {
     appendByte(payload, len, parameterNumber);
     appendByte(payload, len, 0);
     appendByte(payload, len, CRSF_PARAM_ROOT);
     appendByte(payload, len, CRSF_PARAM_COMMAND);
     appendString(payload, len, label);
-    appendByte(payload, len, CRSF_COMMAND_READY);
+    appendByte(payload, len, commandStatus);
     appendByte(payload, len, 10); // poll/display timeout in 100 ms units
     appendString(payload, len, info);
 }
@@ -233,7 +236,12 @@ static void sendCrsfParameter(uint8_t destination, uint8_t parameterNumber) {
             buildCommandParameter(payload, len, parameterNumber, "Reboot", "Apply saved config");
             break;
         case CRSF_PARAM_BIND:
-            buildCommandParameter(payload, len, parameterNumber, "Bind RX", "Send TX identity");
+            {
+                RfToAppData rfData{};
+                const bool bindActive = g_rfToApp.load(rfData) && rfData.bindTransmitActive;
+                buildCommandParameter(payload, len, parameterNumber, "Bind RX", "Send TX identity",
+                                      bindActive ? CRSF_COMMAND_PROGRESS : CRSF_COMMAND_READY);
+            }
             break;
         default:
             buildOutOfRangeParameter(payload, len, parameterNumber);
@@ -482,6 +490,17 @@ static void app_core_loop() {
     RfToAppData rfData;
     if (g_rfToApp.load(rfData)) {
         uint32_t now = xlrs::hal::nowMs();
+        static bool lastBindTransmitActive = false;
+        if (rfData.bindTransmitActive != lastBindTransmitActive) {
+            lastBindTransmitActive = rfData.bindTransmitActive;
+            if (rfData.bindTransmitActive) {
+                printf("[TX BIND] OTA bind transmit window open for %u seconds.\n",
+                       (unsigned)rfData.bindSecondsRemaining);
+            } else {
+                printf("[TX BIND] OTA bind transmit window closed.\n");
+            }
+        }
+
         if (now - lastTelemetrySent >= TELEMETRY_INTERVAL) {
             lastTelemetrySent = now;
 
@@ -514,17 +533,21 @@ static void app_core_loop() {
                 case xlrs::LinkState::Failsafe:     status.connectionState = 4; break;
                 default:                            status.connectionState = 0; break;
             }
-            status.pairingState = 1;
+            status.pairingState = rfData.bindTransmitActive ? 2 : 1;
             status.packetsLost = rfData.stats.missedDeadlines;
             uartProto.sendStatus(&status);
 #endif
 
             // Core-0 diagnostic: surface PHY fault counters so a wedged radio is visible on the
             // bench console, not just an opaque healthy()=false (docs/troubleshooting/index.md §3).
-            printf("[TX STATUS] State: %d LQdown: %u%% RSSI: %d dBm | PHY timeouts: %lu CRC: %lu%s\n",
+            printf("[TX STATUS] State: %d LQdown: %u%% RSSI: %d dBm | PHY timeouts: %lu CRC: %lu%s",
                    (int)rfData.state, (unsigned)rfData.stats.lqDown, (int)rfData.stats.rssiDbm,
                    (unsigned long)g_phy.spiTimeouts(), (unsigned long)g_phy.crcErrors(),
                    rfData.hardwareError ? " [HW FAULT]" : "");
+            if (rfData.bindTransmitActive) {
+                printf(" [BIND TX %us]", (unsigned)rfData.bindSecondsRemaining);
+            }
+            printf("\n");
         }
     }
 }
@@ -619,6 +642,15 @@ static void rf_core_main() {
             rfData.state = g_link.state();
             rfData.stats = g_link.stats();
             rfData.hardwareError = !g_phy.healthy();
+            rfData.bindTransmitActive = g_link.bindTransmitActive();
+            if (rfData.bindTransmitActive && bindTransmitUntilMs != 0) {
+                const int32_t remainingMs = (int32_t)(bindTransmitUntilMs - xlrs::hal::nowMs());
+                rfData.bindSecondsRemaining = remainingMs > 0
+                    ? (uint8_t)((remainingMs + 999) / 1000)
+                    : 0;
+            } else {
+                rfData.bindSecondsRemaining = 0;
+            }
             g_rfToApp.store(rfData);
 
             size_t telemetryLen = 0;

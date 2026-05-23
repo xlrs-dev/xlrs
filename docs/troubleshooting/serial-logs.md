@@ -27,6 +27,15 @@ Periodic status lines:
 [RX STATUS] State: <n> LQ: <n>% RSSI: <n> dBm | PHY timeouts: <n> CRC: <n>
 ```
 
+During CRSF Bind RX:
+
+```text
+[TX BIND] OTA bind transmit window open for <n> seconds.
+[TX STATUS] State: <n> ... [BIND TX <n>s]
+[RX STATUS] State: <n> ... [BIND SCAN]
+[RX STATUS] State: <n> ... [BIND RX]
+```
+
 Current state values:
 
 | Value | LinkState |

@@ -185,7 +185,7 @@ The TX sends `UART_MSG_STATUS` about every 1000 ms when RF data is available:
 struct StatusData {
     uint8_t  connectionState; // 0 Disconnected, 1 Binding, 2 Connecting,
                               // 3 Connected, 4 Failsafe
-    uint8_t  pairingState;    // currently always 1
+    uint8_t  pairingState;    // 0 Unpaired, 1 Normal, 2 Bind TX active
     uint32_t packetsReceived; // currently not populated by TX app
     uint32_t packetsLost;     // currently mapped from missedDeadlines
 } __attribute__((packed));

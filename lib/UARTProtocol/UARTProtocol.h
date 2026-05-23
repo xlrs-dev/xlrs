@@ -42,7 +42,7 @@ struct TelemetryData {
 
 struct StatusData {
     uint8_t connectionState;  // ConnectionState enum
-    uint8_t pairingState;     // 0=unpaired, 1=paired
+    uint8_t pairingState;     // 0=unpaired, 1=paired/normal, 2=bind transmit active
     uint32_t packetsReceived;
     uint32_t packetsLost;
 } __attribute__((packed));

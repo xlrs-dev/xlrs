@@ -14,6 +14,8 @@
 #include "link/DynamicPower.h"
 #include "crypto/ICipher.h"
 #include "fhss/Fhss.h"
+#include "fhss/channels_2g4.h"
+#include "link/StubbornTelemetry.h"
 #include "link/RfScheduler.h"
 
 namespace xlrs {
@@ -32,6 +34,9 @@ struct LinkStats {
     uint16_t rxQueueDrops;    // RfToApp ring overflow count
     uint16_t phyRecoveries;   // radio backend recovered/reinitialized
     uint16_t phyRecoveryFailures;
+    uint16_t telemetryMisses;  // expected telemetry slots without a downlink packet
+    uint8_t  fhssIndex;        // current sequence position for diagnostics
+    int8_t   txPowerDbm;       // currently requested TX output power
 };
 
 // Sliding-window link quality: received vs. expected over the last `Window` slots.
@@ -67,6 +72,7 @@ public:
     static constexpr uint16_t FAILSAFE_MISS = 10;  // consecutive missed uplink slots → Failsafe
 
     void begin(Role role, const uint8_t uid[8], uint8_t rateIndex, int8_t maxPowerDbm = 10, bool useDynamicPower = true);
+    void setRegion(FhssRegion region) { _region = region; }
     void setFailsafeMode(FailsafeMode mode) { _fsMode = mode; }
     void requestRate(uint8_t rateIndex);   // TX: switch rate (conveyed to RX via the Sync beacon)
     void setCipher(ICipher* c) { _cipher = c; }              // opt-in AEAD over the RC payload
@@ -95,6 +101,9 @@ public:
     int8_t           txPowerDbm() const { return _txPowerDbm; }
     Role             role() const { return _role; }
 
+    void queueTelemetry(const uint8_t* data, size_t len) { _tlmSender.queuePayload(data, len); }
+    bool getTelemetry(uint8_t* outBuf, size_t& outLen) { return _tlmReceiver.getPayload(outBuf, outLen); }
+
 private:
     enum class SlotKind : uint8_t { Sync, Telemetry, Uplink };
     uint16_t hopInterval() const;
@@ -112,7 +121,10 @@ private:
     ICipher*     _cipher    = nullptr;  // null ⇒ NullCipher (plaintext); opt-in AEAD (M8)
     uint32_t     _sessionSalt = 0;      // nonce salt; negotiated at Connect on real hardware
     Fhss         _fhss;                 // UID-seeded hop sequence (M4)
+    FhssRegion   _region   = FhssRegion::US_FCC;
+    uint8_t      _uidCrc   = 0;
     bool         _locked   = false;     // RX: hop-locked to the TX sequence?
+    bool         _syncSeen = false;
     uint16_t     _rxPos    = 0;         // RX: current sequence position (from Sync beacon)
     FailsafeMode _fsMode   = FailsafeMode::NoPulses;
     LinkState    _state    = LinkState::Disconnected;
@@ -129,6 +141,10 @@ private:
     bool         _gotTlmThisTick = false;
     uint32_t     _consecutiveMissedUplinks = 0;
     uint32_t     _consecutiveMissedTelemetry = 0;
+    StubbornSender   _tlmSender;
+    StubbornReceiver _tlmReceiver;
+    uint8_t          _receivedAckSeq = 0;
+    uint8_t          _localAckSeq = 0;
 };
 
 } // namespace xlrs

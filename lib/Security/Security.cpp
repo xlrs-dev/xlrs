@@ -1,4 +1,5 @@
 #include "Security.h"
+#include "link/Uid.h"
 #include <EEPROM.h>
 #include <string.h>
 
@@ -17,16 +18,7 @@ bool Security::begin() {
     // Use a larger size to accommodate WiFi config + pairing key + device IDs
     EEPROM.begin(256);  // Ensure EEPROM is initialized
 
-    // Check magic; if mismatched, wipe stored state and re-init
-    uint32_t magic = 0;
-    magic |= (uint32_t)EEPROM.read(SECURITY_MAGIC_ADDR + 0) << 24;
-    magic |= (uint32_t)EEPROM.read(SECURITY_MAGIC_ADDR + 1) << 16;
-    magic |= (uint32_t)EEPROM.read(SECURITY_MAGIC_ADDR + 2) << 8;
-    magic |= (uint32_t)EEPROM.read(SECURITY_MAGIC_ADDR + 3);
-
-    bool magic_ok = (magic == SECURITY_MAGIC_VALUE);
-
-    if (!magic_ok) {
+    if (!securityBlockValid()) {
         // Wipe pairing key, paired device ID, binding UID
         for (int i = 0; i < PAIRING_KEY_SIZE; i++) EEPROM.write(PAIRING_KEY_ADDR + i, 0);
         for (int i = 0; i < DEVICE_ID_SIZE; i++) EEPROM.write(PAIRED_DEVICE_ID_ADDR + i, 0);
@@ -36,11 +28,8 @@ bool Security::begin() {
         generatePairingKey();
         generateBindingUID(DEFAULT_BINDING_PHRASE);
 
-        // Write magic
-        EEPROM.write(SECURITY_MAGIC_ADDR + 0, (SECURITY_MAGIC_VALUE >> 24) & 0xFF);
-        EEPROM.write(SECURITY_MAGIC_ADDR + 1, (SECURITY_MAGIC_VALUE >> 16) & 0xFF);
-        EEPROM.write(SECURITY_MAGIC_ADDR + 2, (SECURITY_MAGIC_VALUE >> 8) & 0xFF);
-        EEPROM.write(SECURITY_MAGIC_ADDR + 3, (SECURITY_MAGIC_VALUE) & 0xFF);
+        writeSecurityHeader();
+        updateSecurityChecksum();
         EEPROM.commit();
     }
 
@@ -115,6 +104,8 @@ bool Security::generatePairingKey() {
     for (int i = 0; i < PAIRING_KEY_SIZE; i++) {
         EEPROM.write(PAIRING_KEY_ADDR + i, _pairingKey[i]);
     }
+    writeSecurityHeader();
+    updateSecurityChecksum();
     EEPROM.commit();
     
     _keyLoaded = true;
@@ -130,6 +121,8 @@ bool Security::setPairingKey(const uint8_t* key) {
     for (int i = 0; i < PAIRING_KEY_SIZE; i++) {
         EEPROM.write(PAIRING_KEY_ADDR + i, _pairingKey[i]);
     }
+    writeSecurityHeader();
+    updateSecurityChecksum();
     EEPROM.commit();
     
     _keyLoaded = true;
@@ -307,6 +300,8 @@ bool Security::setPairedDeviceId(const uint8_t* deviceId) {
     for (int i = 0; i < DEVICE_ID_SIZE; i++) {
         EEPROM.write(PAIRED_DEVICE_ID_ADDR + i, _pairedDeviceId[i]);
     }
+    writeSecurityHeader();
+    updateSecurityChecksum();
     EEPROM.commit();
     
     _pairedDeviceIdLoaded = true;
@@ -358,18 +353,15 @@ bool Security::decrypt(const uint8_t* ciphertext, size_t len, uint8_t* plaintext
 // Binding phrase UID management
 bool Security::generateBindingUID(const char* bindingPhrase) {
     if (!bindingPhrase) return false;
-    
-    // Hash the binding phrase to generate UID
-    uint8_t hash[32];  // Full SHA-256 hash
-    sha256((const uint8_t*)bindingPhrase, strlen(bindingPhrase), hash);
-    
-    // Use first 8 bytes as UID
-    memcpy(_bindingUID, hash, BINDING_UID_SIZE);
+
+    xlrs::linkUidFromPhrase(bindingPhrase, _bindingUID);
     
     // Save to EEPROM
     for (int i = 0; i < BINDING_UID_SIZE; i++) {
         EEPROM.write(BINDING_UID_ADDR + i, _bindingUID[i]);
     }
+    writeSecurityHeader();
+    updateSecurityChecksum();
     EEPROM.commit();
     
     _bindingUIDLoaded = true;
@@ -412,5 +404,58 @@ void Security::clearPairingState() {
     for (int i = 0; i < DEVICE_ID_SIZE; i++) {
         EEPROM.write(PAIRED_DEVICE_ID_ADDR + i, 0);
     }
+    writeSecurityHeader();
+    updateSecurityChecksum();
     EEPROM.commit();
+}
+
+void Security::writeSecurityHeader() {
+    EEPROM.write(SECURITY_MAGIC_ADDR + 0, (SECURITY_MAGIC_VALUE >> 24) & 0xFF);
+    EEPROM.write(SECURITY_MAGIC_ADDR + 1, (SECURITY_MAGIC_VALUE >> 16) & 0xFF);
+    EEPROM.write(SECURITY_MAGIC_ADDR + 2, (SECURITY_MAGIC_VALUE >> 8) & 0xFF);
+    EEPROM.write(SECURITY_MAGIC_ADDR + 3, SECURITY_MAGIC_VALUE & 0xFF);
+    EEPROM.write(SECURITY_VERSION_ADDR, SECURITY_SCHEMA_VERSION);
+}
+
+bool Security::securityBlockValid() {
+    uint32_t magic = 0;
+    magic |= (uint32_t)EEPROM.read(SECURITY_MAGIC_ADDR + 0) << 24;
+    magic |= (uint32_t)EEPROM.read(SECURITY_MAGIC_ADDR + 1) << 16;
+    magic |= (uint32_t)EEPROM.read(SECURITY_MAGIC_ADDR + 2) << 8;
+    magic |= (uint32_t)EEPROM.read(SECURITY_MAGIC_ADDR + 3);
+    if (magic != SECURITY_MAGIC_VALUE) return false;
+    if (EEPROM.read(SECURITY_VERSION_ADDR) != SECURITY_SCHEMA_VERSION) return false;
+
+    uint32_t stored = 0;
+    stored |= (uint32_t)EEPROM.read(SECURITY_CHECKSUM_ADDR + 0) << 24;
+    stored |= (uint32_t)EEPROM.read(SECURITY_CHECKSUM_ADDR + 1) << 16;
+    stored |= (uint32_t)EEPROM.read(SECURITY_CHECKSUM_ADDR + 2) << 8;
+    stored |= (uint32_t)EEPROM.read(SECURITY_CHECKSUM_ADDR + 3);
+    return stored == calculateSecurityChecksum();
+}
+
+void Security::updateSecurityChecksum() {
+    uint32_t crc = calculateSecurityChecksum();
+    EEPROM.write(SECURITY_CHECKSUM_ADDR + 0, (crc >> 24) & 0xFF);
+    EEPROM.write(SECURITY_CHECKSUM_ADDR + 1, (crc >> 16) & 0xFF);
+    EEPROM.write(SECURITY_CHECKSUM_ADDR + 2, (crc >> 8) & 0xFF);
+    EEPROM.write(SECURITY_CHECKSUM_ADDR + 3, crc & 0xFF);
+}
+
+uint32_t Security::calculateSecurityChecksum() {
+    uint32_t crc = 0x811C9DC5UL;
+    const int ranges[][2] = {
+        {SECURITY_MAGIC_ADDR, 5},
+        {PAIRING_KEY_ADDR, PAIRING_KEY_SIZE},
+        {DEVICE_ID_ADDR, DEVICE_ID_SIZE},
+        {PAIRED_DEVICE_ID_ADDR, DEVICE_ID_SIZE},
+        {BINDING_UID_ADDR, BINDING_UID_SIZE},
+    };
+    for (unsigned r = 0; r < sizeof(ranges) / sizeof(ranges[0]); ++r) {
+        for (int i = 0; i < ranges[r][1]; ++i) {
+            crc ^= EEPROM.read(ranges[r][0] + i);
+            crc *= 0x01000193UL;
+        }
+    }
+    return crc;
 }

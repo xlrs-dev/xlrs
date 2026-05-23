@@ -262,6 +262,16 @@ bool Sx1280NativePhy::init(const PhyConfig& cfg) {
     // 7. Set sync word (also sets packet parameters)
     setSyncWord(cfg.syncWord);
 
+    // 7b. Apply professional Semtech high-sensitivity calibrations & AutoFS optimization
+    uint8_t lnaTrim = 0xC0;
+    writeRegister(0x0891, &lnaTrim, 1); // Maximize front-end LNA gain under weak signals
+
+    uint8_t pllTune = 0x08;
+    writeRegister(0x0930, &pllTune, 1); // Fine-tune PLL phase noise and speed up lock acquisition
+
+    uint8_t autoFs = 0x01;
+    writeRegister(0x08F4, &autoFs, 1);  // Enable AutoFS (Frequency Synthesis turnaround mode)
+
     // 8. Set DIO IRQ Params
     uint8_t dioParams[8] = { 0x40, 0x43, 0x40, 0x43, 0x00, 0x00, 0x00, 0x00 };
     spiCommand(SX1280_OP_SET_DIO_IRQ_PARAMS, dioParams, 8);

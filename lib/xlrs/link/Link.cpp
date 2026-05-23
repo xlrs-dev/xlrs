@@ -13,12 +13,23 @@
 #include "link/Link.h"
 #include "link/Uid.h"
 #include "ota/OtaCodec.h"
-#include "fhss/channels_2g4.h"
+#include "ota/OtaFrameShrink.h"
 #include <string.h>
 
 namespace xlrs {
 
 static NullCipher s_nullCipher;   // default when no cipher is set (plaintext, integrity = PHY CRC)
+
+static uint8_t uidCrc8(const uint8_t uid[8]) {
+    uint8_t crc = 0xA5;
+    for (uint8_t i = 0; i < 8; ++i) {
+        crc ^= uid[i];
+        for (uint8_t bit = 0; bit < 8; ++bit) {
+            crc = (crc & 0x80) ? (uint8_t)((crc << 1) ^ 0x07) : (uint8_t)(crc << 1);
+        }
+    }
+    return crc;
+}
 
 void Link::begin(Role role, const uint8_t uid[8], uint8_t rateIndex, int8_t maxPowerDbm, bool useDynamicPower) {
     _role     = role;
@@ -29,10 +40,12 @@ void Link::begin(Role role, const uint8_t uid[8], uint8_t rateIndex, int8_t maxP
     _tick = 0;
     _rate     = kRates[rateIndex];
     _syncWord = syncWordFromUid(uid);
+    _uidCrc   = uidCrc8(uid);
     _fhss.generate(fhssSeedFromUid(uid), kNumFhssChannels2g4, kNumFhssChannels2g4);
     _fsMode   = FailsafeMode::NoPulses;
     _state    = LinkState::Connecting;
     _locked   = false;
+    _syncSeen = false;
     _rxPos    = 0;
     _lastRxTick = 0;
     _everRx     = false;
@@ -45,6 +58,7 @@ void Link::begin(Role role, const uint8_t uid[8], uint8_t rateIndex, int8_t maxP
     _stats.rateIndex = _rateIndex;
     for (uint8_t i = 0; i < RC_CHANNELS; ++i) _ch[i] = 1024;   // mid (11-bit)
     _txPowerDbm = maxPowerDbm;
+    _stats.txPowerDbm = _txPowerDbm;
     if (_role == Role::Tx) {
         if (useDynamicPower) {
             _power.begin(-18, maxPowerDbm, maxPowerDbm);            // dynamic power starts at max
@@ -78,7 +92,7 @@ Link::SlotKind Link::slotKind(uint32_t tick, uint16_t pos) const {
 }
 
 float Link::freqForPos(uint16_t pos) const {
-    return fhssFreqForIndex(_fhss.at((uint8_t)(pos % _fhss.count())));
+    return fhssFreqForIndex(_fhss.at((uint8_t)(pos % _fhss.count())), _region);
 }
 
 void Link::onTick(uint32_t tick) {
@@ -97,6 +111,8 @@ void Link::onTick(uint32_t tick) {
     if (_role == Role::Rx && _locked && (tick % hop) == 0) {
         _rxPos = (uint16_t)((_rxPos + 1) % seqLen);
     }
+    _stats.fhssIndex = (_role == Role::Tx) ? (uint8_t)txPos(tick) : (uint8_t)_rxPos;
+    _stats.txPowerDbm = _txPowerDbm;
 }
 
 float Link::freqForTick(uint32_t tick) const {
@@ -127,24 +143,75 @@ bool Link::getTxPayload(uint32_t tick, uint16_t pos, uint8_t* outBuf, uint8_t& o
             s.nextRateIndex = _nextRateIndex;
             s.switchTick    = _rateSwitchTick;
             s.tlmRatioDenom = _rate.tlmRatioDenom;
-            s.uidCrc        = 0;
+            s.uidCrc        = _uidCrc;
             outLen = otaEncodeSync(s, outBuf);
             ++_txCounter;
             return true;
         } else if (k == SlotKind::Uplink) {
             ICipher* c = _cipher ? _cipher : &s_nullCipher;
-            const uint8_t p = packedSize(RC_CHANNELS);
-            otaEncodeRc(_ch, RC_CHANNELS, outBuf);                  // outBuf[0]=hdr, outBuf[1..p]=payload
-            c->seal(outBuf + 1, p, Nonce96::build(_sessionSalt, tick, pos));
-            outLen = (uint8_t)(1 + p + c->overhead());
+
+            // Interleave stubborn telemetry (MSP) on 25% of uplink frames if queued
+            TelemetryChunk chunk{};
+            if (!_tlmSender.idle() && (tick % 4 == 0) && _tlmSender.getNextChunk(chunk)) {
+                outBuf[0] = otaMakeHeader(OtaType::Msp);
+                outBuf[1] = chunk.seq;
+                outBuf[2] = chunk.length;
+                memcpy(outBuf + 3, chunk.data, 13);
+                c->seal(outBuf + 1, 15, Nonce96::build(_sessionSalt, tick, pos));
+                outLen = (uint8_t)(1 + 15 + c->overhead());
+                ++_txCounter;
+                return true;
+            }
+
+            // Otherwise, send standard or compact RC frame
+            bool useCompact = true;
+            for (int i = 0; i < RC_CHANNELS; ++i) {
+                if (i >= 5 && _ch[i] != 1024) {
+                    useCompact = false;
+                    break;
+                }
+                if ((_ch[i] & 0x01) != 0) {
+                    useCompact = false;
+                    break;
+                }
+            }
+
+            if (useCompact) {
+                // Pack into compact 8-byte frame, piggybacking _localAckSeq in the sequence field
+                packChannels8Byte(_ch, _localAckSeq, outBuf);
+                c->seal(outBuf + 1, 7, Nonce96::build(_sessionSalt, tick, pos));
+                outLen = (uint8_t)(8 + c->overhead());
+            } else {
+                const uint8_t p = packedSize(RC_CHANNELS);
+                otaEncodeRc(_ch, RC_CHANNELS, outBuf);
+                c->seal(outBuf + 1, p, Nonce96::build(_sessionSalt, tick, pos));
+                outLen = (uint8_t)(1 + p + c->overhead());
+            }
             ++_txCounter;
             return true;
         }
         return false;
     } else {
         if (!_locked) return false;
-        if (slotKind(tick, pos) == SlotKind::Telemetry) {
+        SlotKind k = slotKind(tick, pos);
+        if (k == SlotKind::Telemetry) {
+            ICipher* c = _cipher ? _cipher : &s_nullCipher;
+            TelemetryChunk chunk{};
+            if (!_tlmSender.idle() && _tlmSender.getNextChunk(chunk)) {
+                // Send RX->TX stubborn telemetry chunk
+                outBuf[0] = otaMakeHeader(OtaType::Msp);
+                outBuf[1] = chunk.seq;
+                outBuf[2] = chunk.length;
+                memcpy(outBuf + 3, chunk.data, 13);
+                c->seal(outBuf + 1, 15, Nonce96::build(_sessionSalt, tick, pos));
+                outLen = (uint8_t)(1 + 15 + c->overhead());
+                return true;
+            }
+
+            // Fallback to standard telemetry downlink, appending _localAckSeq as a 5th byte
             outLen = otaEncodeTlmDown(_stats.lqUp, _stats.rssiDbm, _stats.snr, outBuf);
+            outBuf[outLen] = _localAckSeq;
+            outLen += 1;
             return true;
         }
         return false;
@@ -157,9 +224,11 @@ bool Link::processRxPayload(uint32_t tick, uint16_t pos, const uint8_t* data, ui
     uint8_t  upLq;  int16_t upRssi;  int8_t upSnr;
 
     if (otaDecodeSync(data, len, s)) {
+        if (s.uidCrc != _uidCrc) return false;
         _gotSyncThisTick = true;
         if (_role == Role::Rx) {
             if (!_locked) { _rxPos = s.fhssIndex; _locked = true; }
+            _syncSeen = true;
             _lastRxTick = tick; _everRx = true;
             _stats.rssiDbm = rssi; _stats.snr = snr;
 
@@ -186,10 +255,52 @@ bool Link::processRxPayload(uint32_t tick, uint16_t pos, const uint8_t* data, ui
         if (_role == Role::Tx) {                   // RX-reported uplink view
             _stats.lqUp = upLq; _stats.rssiDbm = upRssi; _stats.snr = upSnr;
             _txPowerDbm = _power.update(upLq, upRssi);
+            if (len >= 5) {
+                _receivedAckSeq = data[4];
+                _tlmSender.receiveAck(_receivedAckSeq);
+            }
         }
         return true;
-    } else if (otaType(data[0]) == OtaType::Rc && _role == Role::Rx) {
+    } else if (otaType(data[0]) == OtaType::Msp) {
         ICipher* c = _cipher ? _cipher : &s_nullCipher;
+        if (len >= (uint8_t)(1 + 15 + c->overhead())) {
+            uint8_t decBuf[64];
+            memcpy(decBuf, data, len);
+            if (c->open(decBuf + 1, 15, Nonce96::build(_sessionSalt, tick, pos))) {
+                TelemetryChunk chunk{};
+                chunk.seq = decBuf[1];
+                chunk.length = decBuf[2];
+                memcpy(chunk.data, decBuf + 3, 13);
+                uint8_t ackSeq = 0;
+                _tlmReceiver.processChunk(chunk, ackSeq);
+                _localAckSeq = ackSeq;
+                _lastRxTick = tick; _everRx = true;
+                return true;
+            }
+        }
+    } else if (otaType(data[0]) == OtaType::Rc && _role == Role::Rx) {
+        if (!_locked || !_syncSeen) return false;
+        ICipher* c = _cipher ? _cipher : &s_nullCipher;
+
+        // Try compact 8-byte frame first
+        if (len >= (uint8_t)(8 + c->overhead())) {
+            uint8_t decBuf[32];
+            memcpy(decBuf, data, len);
+            if (c->open(decBuf + 1, 7, Nonce96::build(_sessionSalt, tick, pos))) {
+                uint8_t decSeq = 0;
+                if (unpackChannels8Byte(decBuf, rxch, decSeq)) {
+                    _gotRcThisTick = true;
+                    memcpy(_ch, rxch, sizeof(uint16_t) * RC_CHANNELS);
+                    _lastRxTick = tick; _everRx = true;
+                    _stats.rssiDbm = rssi; _stats.snr = snr;
+                    _receivedAckSeq = decSeq;
+                    _tlmSender.receiveAck(_receivedAckSeq);
+                    return true;
+                }
+            }
+        }
+
+        // Fallback to standard 12-byte frame
         const uint8_t p = packedSize(RC_CHANNELS);
         if (len >= (uint8_t)(1 + p + c->overhead())) {
             uint8_t decBuf[32];
@@ -221,6 +332,7 @@ void Link::service(uint32_t tick) {
                 _consecutiveMissedTelemetry = 0;
             } else {
                 _consecutiveMissedTelemetry++;
+                if (_stats.telemetryMisses != UINT16_MAX) _stats.telemetryMisses++;
                 if (_consecutiveMissedTelemetry >= 2) {
                     _txPowerDbm = _power.update(0, 0, true); // ELRS standard: jump to max power immediately on telemetry loss
                 }
@@ -248,13 +360,21 @@ void Link::service(uint32_t tick) {
     switch (_state) {
         case LinkState::Disconnected:
         case LinkState::Connecting:
-            if (got) _state = LinkState::Connected;
+            if (_role == Role::Rx) {
+                if (_locked && _syncSeen && _gotRcThisTick) _state = LinkState::Connected;
+            } else if (got) {
+                _state = LinkState::Connected;
+            }
             break;
         case LinkState::Connected:
             if (misses >= FAILSAFE_MISS) { _state = LinkState::Failsafe; _locked = false; }
             break;
         case LinkState::Failsafe:
-            if (got) _state = LinkState::Connected;
+            if (_role == Role::Rx) {
+                if (_locked && _syncSeen && _gotRcThisTick) _state = LinkState::Connected;
+            } else if (got) {
+                _state = LinkState::Connected;
+            }
             break;
         case LinkState::Binding:
             break;
@@ -264,6 +384,7 @@ void Link::service(uint32_t tick) {
     _gotRcThisTick = false;
     _gotSyncThisTick = false;
     _gotTlmThisTick = false;
+    _stats.txPowerDbm = _txPowerDbm;
 }
 
 void Link::notePhyRecovery(bool success) {
@@ -274,6 +395,7 @@ void Link::notePhyRecovery(bool success) {
         if (_role == Role::Rx) {
             _state = LinkState::Failsafe;
             _locked = false;
+            _syncSeen = false;
         }
     }
 }
@@ -293,7 +415,7 @@ uint8_t Link::getChannels(uint16_t* ch, uint8_t maxN) const {
 
 bool Link::outputActive() const {
     if (_role != Role::Rx) return false;
-    if (_state == LinkState::Connected) return true;
+    if (_state == LinkState::Connected && _locked && _syncSeen) return true;
     if (_state == LinkState::Failsafe && _fsMode == FailsafeMode::Hold) return true;
     return false;   // NoPulses (default): stop CRSF when not connected
 }

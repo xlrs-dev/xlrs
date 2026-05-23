@@ -85,10 +85,49 @@ The RC board is a separate module that reads analog inputs and communicates with
 
 1. Install PlatformIO
 2. Clone this repository
-3. Build and upload:
+3. (Recommended) Use the **XLRS Developer Helper CLI Utility** to detect, flash, test, and monitor your boards with a single unified command:
+   ```bash
+   uv run scripts/xlrs_helper.py
+   ```
+   *Note: If you don't have `uv` installed, see instructions [here](https://astral.sh/uv).*
+
+   Alternatively, you can build and upload manually:
    - For TX Module: `pio run -e tx_sx128x -t upload`
    - For RX Module: `pio run -e rx_sx128x -t upload`
    - For RC Board: `pio run -e rc-crsf -t upload` (RP2040 + ADS1115) or `pio run -e rc-rp2350 -t upload` / `pio run -e rc-HID-rp2350 -t upload` (RP2350 Dhanush; see [`docs/rc-build-flash.md`](docs/rc-build-flash.md))
+
+### Developer Helper CLI (`scripts/xlrs_helper.py`)
+
+A comprehensive, zero-dependency setup (via `uv`) helper to simplify hardware development. 
+
+#### Core Features
+- **Auto-Detection**: Scans USB ports and classifies connected devices into `TX` and `RX` via real-time boot log sniffing.
+- **Flashing Modes**: Instantly builds and flashes either **Native PHY Mode** (`xlrs_tx_native`/`xlrs_rx_native`) or **RadioLib PHY Mode** (`xlrs_tx`/`xlrs_rx`) to the targeted boards.
+- **Parallel Multi-Device Log Streaming**: Listens to both `TX` and `RX` serial feeds in parallel, printing beautifully color-coded console logs (`[TX]` in green, `[RX]` in cyan).
+- **Persistent Session Logs**: Writes all activities and streamed board logs to `xlrs_session.log`.
+- **Unit Test Runner**: Integrates with PlatformIO's Unity framework to run host tests.
+
+#### Command Examples
+* **Interactive CLI Menu**:
+  ```bash
+  uv run scripts/xlrs_helper.py
+  ```
+* **Direct Non-Interactive Flash & Monitor (Native Mode)**:
+  ```bash
+  uv run scripts/xlrs_helper.py --flash native --monitor
+  ```
+* **Direct Non-Interactive Flash & Monitor (RadioLib Mode)**:
+  ```bash
+  uv run scripts/xlrs_helper.py --flash radiolib --monitor
+  ```
+* **Target Specific Ports Manually**:
+  ```bash
+  uv run scripts/xlrs_helper.py --tx-port /dev/cu.usbmodem1101 --rx-port /dev/cu.usbmodem1201 --monitor
+  ```
+* **Run Host Unit Tests**:
+  ```bash
+  uv run scripts/xlrs_helper.py --test
+  ```
 
 **Note:** The TX module expects to receive channel data from the RC board via UART protocol. Make sure the RC board is running and connected before the TX module will transmit.
 

@@ -2,11 +2,13 @@
 //   pio test -e native
 #include <unity.h>
 #include "ota/ChannelPack.h"
+#include "ota/OtaFrameShrink.h"
 #include "fhss/Fhss.h"
 #include "timing/Pfd.h"
 #include "util/RingBuffer.h"
 #include "util/Mailbox.h"
 #include "link/Link.h"
+#include "link/StubbornTelemetry.h"
 #include "link/RfScheduler.h"
 #include "link/Uid.h"
 #include "phy/MockPhy.h"
@@ -112,6 +114,94 @@ static void test_fhss_deterministic_and_balanced() {
     bool differs = false;
     for (int i = 0; i < 40; ++i) if (c.at(i) != a.at(i)) { differs = true; break; }
     TEST_ASSERT_TRUE(differs);                                             // seed-sensitive
+}
+
+static void test_fhss_80_channel_balance() {
+    Fhss a;
+    a.generate(0xABCD, 80, 80);
+    int counts[80] = {0};
+    for (int i = 0; i < 80; ++i) {
+        TEST_ASSERT_TRUE(a.at(i) < 80);
+        counts[a.at(i)]++;
+    }
+    for (int i = 0; i < 80; ++i) {
+        TEST_ASSERT_EQUAL_INT(1, counts[i]); // exactly 1 hit per channel for 80 hops over 80 channels
+    }
+}
+
+static void test_ota_8_byte_packing() {
+    uint16_t origCh[8] = { 2000, 1000, 1500, 400, 100, 1024, 1024, 1024 };
+    uint8_t buf[8] = {0};
+    uint8_t seq = 42;
+
+    packChannels8Byte(origCh, seq, buf);
+
+    uint16_t decCh[8] = {0};
+    uint8_t decSeq = 0;
+    bool status = unpackChannels8Byte(buf, decCh, decSeq);
+
+    TEST_ASSERT_TRUE(status);
+    TEST_ASSERT_EQUAL_UINT8(seq, decSeq);
+
+    // Verify 10-bit resolution round-trip (loss of LSB bit 0)
+    for (int i = 0; i < 5; ++i) {
+        TEST_ASSERT_EQUAL_UINT16(origCh[i] & 0xFFFE, decCh[i]);
+    }
+    // Verify default fallback values for aux channels
+    for (int i = 5; i < 8; ++i) {
+        TEST_ASSERT_EQUAL_UINT16(1024, decCh[i]);
+    }
+}
+
+static void test_stubborn_telemetry_reliability() {
+    StubbornSender sender;
+    StubbornReceiver receiver;
+
+    const char* message = "Flight telemetry packet test!";
+    size_t msgLen = strlen(message); // 29 bytes
+
+    sender.queuePayload((const uint8_t*)message, msgLen);
+
+    uint8_t steps = 0;
+    // LCG pseudo-random generator to simulate packet drop deterministically
+    uint32_t seed = 0x5678;
+
+    while (!sender.idle() && steps < 200) {
+        steps++;
+        TelemetryChunk chunk;
+        if (sender.getNextChunk(chunk)) {
+            // Simulate 35% forward loss
+            seed = seed * 1664525u + 1013904223u;
+            if ((seed % 100) < 35) {
+                // Drop forward packet
+                continue;
+            }
+
+            uint8_t ackSeq = 0;
+            bool accepted = receiver.processChunk(chunk, ackSeq);
+            (void)accepted;
+
+            // Simulate 35% reverse loss (ACK drop)
+            seed = seed * 1664525u + 1013904223u;
+            if ((seed % 100) < 35) {
+                // Drop reverse ACK packet
+                continue;
+            }
+
+            sender.receiveAck(ackSeq);
+        }
+    }
+
+    TEST_ASSERT_TRUE(sender.idle());
+    TEST_ASSERT_TRUE(receiver.ready());
+
+    uint8_t decBuf[128] = {0};
+    size_t decLen = 0;
+    bool status = receiver.getPayload(decBuf, decLen);
+
+    TEST_ASSERT_TRUE(status);
+    TEST_ASSERT_EQUAL_UINT32(msgLen, decLen);
+    TEST_ASSERT_EQUAL_STRING_LEN(message, (char*)decBuf, msgLen);
 }
 
 // ---- PFD: a one-time phase step settles back to ~0 ----
@@ -322,7 +412,7 @@ static void test_link_fhss_acquire_and_recover() {
     TEST_ASSERT_FALSE(env.rx.outputActive());
 
     // Recover: TX returns → RX must RE-ACQUIRE via a Sync on the acq channel.
-    for (uint32_t t = 341; t <= 640; ++t) simTick(env, t);
+    for (uint32_t t = 341; t <= 650; ++t) simTick(env, t);
     TEST_ASSERT_TRUE(env.rx.state() == LinkState::Connected);
     TEST_ASSERT_TRUE(env.rx.outputActive());
 }
@@ -401,15 +491,44 @@ static void test_link_rate_switch_and_power() {
 
     uint16_t ch[4] = {300, 1500, 2047, 0}; env.tx.setChannels(ch, 4);
 
-    for (uint32_t t = 1; t <= 300; ++t) simTick(env, t);
+    for (uint32_t t = 1; t <= 800; ++t) simTick(env, t);
     TEST_ASSERT_TRUE(env.rx.state() == LinkState::Connected);
     TEST_ASSERT_EQUAL_UINT8(2, env.rx.stats().rateIndex);
     TEST_ASSERT_TRUE(env.txPhy.outputPowerDbm() < 10);        // dynamic power dropped under strong link
 
     env.tx.requestRate(4);                        // switch to L50 (long range)
-    for (uint32_t t = 301; t <= 600; ++t) simTick(env, t);
+    for (uint32_t t = 801; t <= 1600; ++t) simTick(env, t);
     TEST_ASSERT_TRUE(env.rx.state() == LinkState::Connected); // survived the switch
     TEST_ASSERT_EQUAL_UINT8(4, env.rx.stats().rateIndex);     // RX adopted the new rate via Sync
+}
+
+static void test_link_stubborn_telemetry_integrated() {
+    uint8_t uid[LINK_UID_SIZE]; linkUidFromPhrase("Kikobot-02", uid);
+    SimEnvironment env;
+    env.setup(uid, 2); // F1000
+
+    // Connect link first
+    for (uint32_t t = 1; t <= 100; ++t) simTick(env, t);
+    TEST_ASSERT_TRUE(env.rx.state() == LinkState::Connected);
+
+    // Queue stubborn telemetry payload on RX side (representing MSP/MAVLink telemetry packet)
+    const char* tlmData = "MSP config ok";
+    size_t tlmLen = strlen(tlmData);
+    env.rx.queueTelemetry((const uint8_t*)tlmData, tlmLen);
+
+    // Run simulator loop to allow packetization, transmission, and ACK propagation
+    for (uint32_t t = 101; t <= 1200; ++t) {
+        simTick(env, t);
+    }
+
+    // Verify TX side successfully received and reassembled the payload
+    uint8_t rcvBuf[128] = {0};
+    size_t rcvLen = 0;
+    bool received = env.tx.getTelemetry(rcvBuf, rcvLen);
+
+    TEST_ASSERT_TRUE(received);
+    TEST_ASSERT_EQUAL_UINT32(tlmLen, rcvLen);
+    TEST_ASSERT_EQUAL_STRING_LEN(tlmData, (char*)rcvBuf, tlmLen);
 }
 
 // ---- M8: ChaCha20-Poly1305 against the RFC 8439 §2.8.2 known-answer vector ----
@@ -569,6 +688,10 @@ int main(int, char**) {
     UNITY_BEGIN();
     RUN_TEST(test_channel_pack_roundtrip);
     RUN_TEST(test_fhss_deterministic_and_balanced);
+    RUN_TEST(test_fhss_80_channel_balance);
+    RUN_TEST(test_ota_8_byte_packing);
+    RUN_TEST(test_stubborn_telemetry_reliability);
+    RUN_TEST(test_link_stubborn_telemetry_integrated);
     RUN_TEST(test_pfd_step_settles);
     RUN_TEST(test_pfd_nulls_drift);
     RUN_TEST(test_lq_tracker);

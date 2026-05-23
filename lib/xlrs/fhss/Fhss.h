@@ -12,7 +12,7 @@ namespace xlrs {
 
 class Fhss {
 public:
-    static constexpr uint8_t MAX_SEQ = 64;
+    static constexpr uint8_t MAX_SEQ = 128;
 
     // Build a hop sequence of `seqLen` channel indices in [0, numChannels) from `seed`.
     void generate(uint32_t seed, uint8_t numChannels, uint8_t seqLen) {

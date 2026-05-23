@@ -286,6 +286,7 @@ void setup1() {
     }
     
     g_link.begin(xlrs::Role::Rx, uid, g_rfConfig.defaultRate, g_rfConfig.maxPowerDbm, g_rfConfig.dynamicPower == 1);
+    g_link.setRegion(g_rfConfig.region == (uint8_t)xlrs::RfRegion::EU ? xlrs::FhssRegion::EU_CE : xlrs::FhssRegion::US_FCC);
     
     // Configure receiver failsafe behavior
     g_link.setFailsafeMode(g_rfConfig.failsafeMode == 0 ? xlrs::FailsafeMode::NoPulses : xlrs::FailsafeMode::Hold);

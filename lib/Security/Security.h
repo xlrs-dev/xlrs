@@ -14,8 +14,11 @@
 #define BINDING_UID_SIZE 8  // 8-byte UID derived from binding phrase
 
 // EEPROM magic to invalidate old stored state when changed
-#define SECURITY_MAGIC_VALUE 0x58554352UL  // "TECR"
+#define SECURITY_MAGIC_VALUE 0x58465332UL  // "XFS2" (FNV UID + block CRC schema)
 #define SECURITY_MAGIC_ADDR 120            // 4 bytes
+#define SECURITY_VERSION_ADDR 124          // 1 byte
+#define SECURITY_CHECKSUM_ADDR 168         // 4 bytes CRC32 over security payload
+#define SECURITY_SCHEMA_VERSION 2
 
 // Compile-time default binding phrase (can be overridden)
 #ifndef DEFAULT_BINDING_PHRASE
@@ -84,7 +87,10 @@ private:
     void sha256(const uint8_t* data, size_t len, uint8_t* hash);
     void hmac_sha256(const uint8_t* key, size_t keyLen, const uint8_t* data, size_t dataLen, uint8_t* hmac);
     void clearPairingState();
+    void writeSecurityHeader();
+    bool securityBlockValid();
+    void updateSecurityChecksum();
+    uint32_t calculateSecurityChecksum();
 };
 
 #endif // SECURITY_H
-

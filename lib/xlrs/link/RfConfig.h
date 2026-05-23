@@ -20,7 +20,7 @@ struct __attribute__((packed)) RfConfigData {
     uint8_t  failsafeMode;  // 0 = NoPulses, 1 = Hold
     uint8_t  dynamicPower;  // 0 = disabled, 1 = enabled
     uint8_t  reserved[2];   // alignment padding
-    uint16_t checksum;      // simple additive checksum
+    uint16_t checksum;      // CRC16 over the config payload
 };
 
 class RfConfig {
@@ -62,11 +62,14 @@ public:
 private:
     static uint16_t calculateChecksum(const RfConfigData& cfg) {
         const uint8_t* ptr = reinterpret_cast<const uint8_t*>(&cfg);
-        uint16_t sum = 0;
+        uint16_t crc = 0xFFFF;
         for (size_t i = 0; i < sizeof(RfConfigData) - 2; ++i) {
-            sum += ptr[i];
+            crc ^= (uint16_t)ptr[i] << 8;
+            for (uint8_t bit = 0; bit < 8; ++bit) {
+                crc = (crc & 0x8000) ? (uint16_t)((crc << 1) ^ 0x1021) : (uint16_t)(crc << 1);
+            }
         }
-        return sum;
+        return crc;
     }
 };
 

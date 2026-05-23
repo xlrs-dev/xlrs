@@ -4,9 +4,9 @@
 // the 2400–2483.5 MHz ISM band with margin for the modulation's occupied bandwidth (FLRC ~1.2 MHz
 // at 1.3 Mbps), so no channel's signal spills past a band edge. This is NOT a certified table:
 // the SHIPPING set MUST be the regulator-approved channels / spacing / dwell budget for the target
-// region (FCC §15.247 / ETSI EN 300 328), validated under the RF compliance gate (architecture.md
+// region (FCC §15.247 / ETSI EN 300 328), validated under the RF compliance gate (docs/developer/architecture.md
 // roadmap) before any above-bench-power transmission.
-// configuration.md §2.C: the Fhss sequence (UID-seeded) produces indices into this table.
+// docs/developer/configuration.md §2.C: the Fhss sequence (UID-seeded) produces indices into this table.
 #pragma once
 #include <stdint.h>
 

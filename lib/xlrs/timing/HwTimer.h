@@ -6,7 +6,7 @@
 // the RX timer locked to the TX.
 //
 // The RP2040 implementation and the PFD-driven lock are validated on hardware for jitter,
-// convergence, and drift acceptance (architecture.md §M2). In the native sim the
+// convergence, and drift acceptance (docs/developer/architecture.md §M2). In the native sim the
 // test loop drives ticks directly (synchronous delivery ⇒ measured offset ≈ 0), so the timer
 // impl isn't needed there; the PFD math itself is verified (timing/Pfd.h).
 #pragma once

@@ -1,6 +1,6 @@
 // DynamicPower — LQ-first, RSSI-second TX power control with hysteresis (M6).
 //
-// Per configuration.md: link quality is the primary signal (raise power when LQ sags), RSSI is
+// Per docs/developer/configuration.md: link quality is the primary signal (raise power when LQ sags), RSSI is
 // the secondary gate (only reduce power when LQ is high AND there's RSSI margin). Hysteresis
 // (N consecutive readings before a step, plus a deadband between the raise/lower thresholds)
 // prevents oscillation — RSSI-only control would be weak and twitchy. Pure / host-testable.

@@ -1,6 +1,6 @@
 # XLRS Assistant Memory
 
-Use `plans/naming.md` as the source of truth for project terminology.
+Use `docs/developer/terminology.md` as the source of truth for project terminology.
 
 Important defaults:
 

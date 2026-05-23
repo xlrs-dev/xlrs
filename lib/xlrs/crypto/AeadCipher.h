@@ -3,7 +3,7 @@
 // The Nonce96 (session_salt ‖ packet_counter ‖ fhss_index) is exactly the 12-byte ChaCha20
 // IETF nonce. The Poly1305 tag is truncated to TAG_LEN bytes to fit the 8-byte OTA frame — a
 // deliberate airtime ↔ forgery-resistance tradeoff (4 bytes ⇒ 2^-32 per-attempt forgery; pair
-// with per-session salt + rekey, see architecture.md §3.2 / §3.10).
+// with per-session salt + rekey, see docs/developer/architecture.md §3.2 / §3.10).
 #pragma once
 #include <stdint.h>
 #include <string.h>

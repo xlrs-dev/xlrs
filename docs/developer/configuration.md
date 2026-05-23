@@ -75,7 +75,7 @@ Runtime configurations are dynamically resolved on boot, computed mathematically
 * **Link UID (8 bytes / 64-bit)**
   * **Source:** Derived by hashing the binding phrase with 64-bit **FNV-1a** (fast, non-cryptographic):
     $$\text{Link UID} = \text{FNV-1a}(\text{Binding Phrase})$$
-  * **Implemented:** `linkUidFromPhrase()` in [`lib/xlrs/link/Uid.h`](../lib/xlrs/link/Uid.h)
+  * **Implemented:** `linkUidFromPhrase()` in [`lib/xlrs/link/Uid.h`](../../lib/xlrs/link/Uid.h)
     (big-endian split of the hash). Verified in the native suite: deterministic, phrase-sensitive,
     and the bind property (same phrase ⇒ identical FHSS sequence; else isolation).
   * **Role:** Seeds the FHSS pseudorandom hop sequence and forms the radio's hardware Sync Word
@@ -89,7 +89,7 @@ Runtime configurations are dynamically resolved on boot, computed mathematically
 ---
 
 ### B. Dynamically Swappable Rates (`RateConfig`)
-Packet rates are stored in a static constant lookup table `kRates` inside [`RateConfig.h`](../lib/xlrs/link/RateConfig.h). Rates can be switched dynamically at runtime:
+Packet rates are stored in a static constant lookup table `kRates` inside [`RateConfig.h`](../../lib/xlrs/link/RateConfig.h). Rates can be switched dynamically at runtime:
 
 ```cpp
 struct RateConfig {
@@ -121,7 +121,7 @@ struct RateConfig {
   Congruential Generator (LCG) combined with a Fisher-Yates shuffle to build a balanced sequence
   of channel indices.
 * **Frequency Mapping:** Channel indices map to a regional frequency table —
-  [`fhss/channels_2g4.h`](../lib/xlrs/fhss/channels_2g4.h) (⚠ placeholder set; the shipping table
+  [`fhss/channels_2g4.h`](../../lib/xlrs/fhss/channels_2g4.h) (⚠ placeholder set; the shipping table
   must be the regulator-approved channels per the RF compliance gate). `fhssFreqForIndex()`.
 * **Cadence:** Frequency advances on hop boundaries: `tick % RateConfig.fhssHopInterval == 0`.
 * **Acquisition (Link.{h,cpp}, M4):** the TX sends an `OtaType::Sync` beacon at sequence
@@ -141,8 +141,8 @@ $$\text{Nonce} = \big[\,4\text{-byte } \text{session\_salt}\,\big] \,\, \big|\bi
 * **`packet_counter`:** 48-bit rolling tick counter to prevent wrap-arounds.
 * **`fhss_index`:** 16-bit current hop index.
 
-**Implemented (M8):** `AeadCipher` ([`crypto/AeadCipher.h`](../lib/xlrs/crypto/AeadCipher.h)) =
-ChaCha20-Poly1305 ([`crypto/Chacha20Poly1305.h`](../lib/xlrs/crypto/Chacha20Poly1305.h), verified
+**Implemented (M8):** `AeadCipher` ([`crypto/AeadCipher.h`](../../lib/xlrs/crypto/AeadCipher.h)) =
+ChaCha20-Poly1305 ([`crypto/Chacha20Poly1305.h`](../../lib/xlrs/crypto/Chacha20Poly1305.h), verified
 against the RFC 8439 §2.8.2 known-answer vector) with a **4-byte truncated tag**. The `Nonce96`
 is the 12-byte ChaCha20 IETF nonce, built as `Nonce96::build(session_salt, packet_counter, fhss_index)`.
 It's wired into the Link RC path opt-in (`Link::setCipher`) — `seal()` on TX `slotSend`, `open()`
@@ -156,7 +156,7 @@ random `session_salt` at Connect (vs. the fixed sim value) are follow-ups.
 ### E. Clock Synchronization (Pfd) & Failsafes
 * **Timing Corrections:** The Phase-Frequency Detector (`Pfd`) tracks crystal ppm offsets using a Proportional-Integral (PI) loop (`Kp=1/4`, `Ki=1/256`). It takes the normalized arrival offset (`actual_arrival - expected_arrival - precomputed_airtime`) and nudges the local hardware timer registers dynamically to null out frequency drift.
 * **Failsafe Operations:** `NoPulses` (stops the CRSF stream → FC failsafe) or `Hold` (holds last
-  valid sticks). Implemented in [`Link.{h,cpp}`](../lib/xlrs/link/Link.cpp): RX state machine
+  valid sticks). Implemented in [`Link.{h,cpp}`](../../lib/xlrs/link/Link.cpp): RX state machine
   Disconnected → Connecting → Connected → Failsafe; falls to `Failsafe` after `FAILSAFE_MISS`
   consecutive missed uplink slots, and `Link::outputActive()` returns false under `NoPulses` so
   the app stops emitting CRSF. Verified in the native two-node sim (connect → channel flow →
@@ -175,7 +175,7 @@ random `session_salt` at Connect (vs. the fixed sim value) are follow-ups.
   The TX tracks the downlink reception ratio as `LinkStats.lqDown`.
 * **Link statistics to the FC:** the RX packs `LinkStats` into a CRSF `LINK_STATISTICS` (0x14)
   10-byte frame via `buildCrsfLinkStatistics()`
-  ([`app/CrsfLinkStats.h`](../lib/xlrs/app/CrsfLinkStats.h)). Uplink LQ is counted over **uplink
+  ([`app/CrsfLinkStats.h`](../../lib/xlrs/app/CrsfLinkStats.h)). Uplink LQ is counted over **uplink
   slots only** (Sync/Telemetry excluded, so a high telemetry ratio isn't read as packet loss).
   Verified in the native sim (downlink reaches the TX without disturbing uplink RC; CRSF bytes correct).
 
@@ -183,7 +183,7 @@ random `session_salt` at Connect (vs. the fixed sim value) are follow-ups.
 
 ### G. Dynamic TX Power (M6)
 
-* **Policy:** LQ-first, RSSI-second, with hysteresis ([`link/DynamicPower.h`](../lib/xlrs/link/DynamicPower.h)).
+* **Policy:** LQ-first, RSSI-second, with hysteresis ([`link/DynamicPower.h`](../../lib/xlrs/link/DynamicPower.h)).
   Raise power when uplink LQ sags (`< 80`); lower it only when LQ is high (`>= 99`) **and** there is
   RSSI margin (`> -65 dBm`); hold in the deadband between. A step requires N consecutive readings, so
   the controller doesn't oscillate (RSSI-only control would be twitchy).

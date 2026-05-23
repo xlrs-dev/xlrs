@@ -1,4 +1,4 @@
-// Uid — Link UID derivation (binding identity).  See configuration.md §2.A / §2.C.
+// Uid — Link UID derivation (binding identity).  See docs/developer/configuration.md §2.A / §2.C.
 //
 // The Link UID seeds the FHSS hop sequence and the radio sync word, so a bound TX and RX
 // MUST compute the SAME value — therefore it is derived from the shared binding PHRASE,
@@ -23,13 +23,13 @@ inline void linkUidFromPhrase(const char* phrase, uint8_t out[LINK_UID_SIZE]) {
     for (int i = 0; i < LINK_UID_SIZE; ++i) out[i] = (uint8_t)(h >> (56 - 8 * i));
 }
 
-// FHSS PRNG seed = the lower 32 bits of the Link UID (configuration.md §2.C).
+// FHSS PRNG seed = the lower 32 bits of the Link UID (docs/developer/configuration.md §2.C).
 inline uint32_t fhssSeedFromUid(const uint8_t uid[LINK_UID_SIZE]) {
     return ((uint32_t)uid[4] << 24) | ((uint32_t)uid[5] << 16) |
            ((uint32_t)uid[6] <<  8) |  (uint32_t)uid[7];
 }
 
-// Radio sync word from the Link UID (configuration.md §2.A). Provides PHY-level filtering so
+// Radio sync word from the Link UID (docs/developer/configuration.md §2.A). Provides PHY-level filtering so
 // a mismatched-phrase link is rejected even on a shared frequency. Uses the LOW 16 bits:
 // FNV-1a's high bits barely change for inputs differing only in the trailing byte (so the
 // top bits collide for e.g. "CraftA"/"CraftB"), whereas the low bits avalanche.

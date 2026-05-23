@@ -75,7 +75,7 @@ private:
     // Wall-clock (us) latched IN the timer ISR at each fire. onTick() uses this as the PFD's
     // "expected tick" reference so the phase error is measured against the true fire time, not
     // against when the core-1 task got around to processing the tick (which adds wake-latency
-    // jitter). See debugging.md §1.1.
+    // jitter). See docs/troubleshooting/index.md §1.1.
     std::atomic<uint32_t> _lastTickFireUs{0};
 
 private:

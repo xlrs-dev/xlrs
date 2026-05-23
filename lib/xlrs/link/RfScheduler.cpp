@@ -56,7 +56,7 @@ bool RfScheduler::begin(IRadioPhy* phy, Link* link, uint8_t rateIndex) {
 #if defined(XLRS_PICO_SDK)
     // On hardware, run a true Tiny ISR: latch the fire timestamp, then bump the event counter.
     // The timestamp is captured HERE (in ISR context) — not later in onTick() — so the PFD's
-    // phase reference is the true tick time, free of task wake-latency jitter (debugging.md §1.1).
+    // phase reference is the true tick time, free of task wake-latency jitter (docs/troubleshooting/index.md §1.1).
     if (_timer) {
         _timer->begin(_rate.intervalUs, []() {
             if (s_activeScheduler) {

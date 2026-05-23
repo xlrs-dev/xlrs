@@ -21,7 +21,7 @@ static constexpr uint8_t  OTA16_LEN     = 16;
 // Link UID: 8 bytes (64-bit), derived from the binding phrase (hash) so a bound TX/RX
 // share it and seed the SAME FHSS sequence + sync word. NOT a board's own hardware ID
 // (the hardware flash unique ID is the per-device *serial*, used for identity, not
-// addressing). See architecture.md §8.
+// addressing). See docs/developer/architecture.md §8.
 static constexpr uint8_t  LINK_UID_SIZE = 8;
 
 // Header byte layout: [ ver:2 | type:3 | flags:3 ]

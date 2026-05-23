@@ -8,4 +8,7 @@ compile_commands.json
 .vscode/launch.json
 .vscode/ipch
 
+docs/roadmap/
+plans/
+
 .DS_Store

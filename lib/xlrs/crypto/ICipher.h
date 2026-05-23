@@ -1,7 +1,7 @@
 // ICipher — pluggable security layer over the OTA payload.
 //
 // Defaults to NullCipher (no confidentiality), so the link ships without crypto and the
-// crypto decision is deferred (architecture.md §3.2): slot in real authenticated encryption
+// crypto decision is deferred (docs/developer/architecture.md §3.2): slot in real authenticated encryption
 // later by swapping the cipher — link and PHY unchanged. Candidates: ChaCha20-Poly1305
 // (preferred — no hardware AES on RP2040/RP2350), AES-CCM, or a MAC-only construction
 // (integrity without confidentiality, often the right call for an RC link). NOT AES-CTR
@@ -15,7 +15,7 @@
 
 namespace xlrs {
 
-// 96-bit nonce, byte-concatenated per architecture.md §3.10 (no bit-overlap aliasing):
+// 96-bit nonce, byte-concatenated per docs/developer/architecture.md §3.10 (no bit-overlap aliasing):
 //   bytes[0..3]   session_salt   (4 bytes)
 //   bytes[4..9]   packet_counter (6 bytes / 48-bit — cannot wrap within a session)
 //   bytes[10..11] fhss_index     (2 bytes)

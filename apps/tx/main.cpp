@@ -206,7 +206,7 @@ static void app_core_loop() {
             uartProto.sendStatus(&status);
 
             // Core-0 diagnostic: surface PHY fault counters so a wedged radio is visible on the
-            // bench console, not just an opaque healthy()=false (debugging.md §3).
+            // bench console, not just an opaque healthy()=false (docs/troubleshooting/index.md §3).
             printf("[TX STATUS] State: %d LQdown: %u%% RSSI: %d dBm | PHY timeouts: %lu CRC: %lu%s\n",
                    (int)rfData.state, (unsigned)rfData.stats.lqDown, (int)rfData.stats.rssiDbm,
                    (unsigned long)g_phy.spiTimeouts(), (unsigned long)g_phy.crcErrors(),

@@ -11,13 +11,15 @@ bind workflow:
 1. TX reads its current persisted Link UID.
 2. TX switches the RF core to a shared XLRS bind identity for about 30 seconds.
 3. TX transmits XLRS `Bind` OTA frames containing its real Link UID.
-4. An unconnected RX periodically enters short bind-scan windows on the shared
-   bind identity.
+4. An RX that has not yet made a normal connection in this boot periodically
+   enters short bind-scan windows on the shared bind identity.
 5. If RX receives a valid bind frame while scanning, it persists the offered
    Link UID and reboots.
 6. After reboot, RX uses the learned Link UID for normal acquisition.
 
-This means Bind RX can pair an RX that is not already connected to the TX.
+This means Bind RX can pair an RX that is not already connected to the TX. After
+the RX has connected normally once in a boot, bind scan is disabled until the RX
+is power-cycled so normal reacquisition is not interrupted by bind windows.
 
 ## Validation Boundary
 
@@ -28,7 +30,7 @@ Instead, RX only accepts bind frames when all of these are true:
 
 | Check | Purpose |
 | --- | --- |
-| RX is in bind-scan mode | Avoid accepting bind data during normal operation |
+| RX is in pre-first-link bind-scan mode | Avoid accepting bind data during normal operation |
 | Radio sync word matches the shared bind identity | Avoid normal-link or random same-frequency frames |
 | OTA frame type is `Bind` | Accept only the binding frame type |
 | Bind payload magic/version is valid | Reject malformed bind-looking payloads |
@@ -92,9 +94,10 @@ In the custom controller UART build, `UART_MSG_STATUS.pairingState` is set to
 machine-readable bind-progress signal without parsing the USB serial log.
 
 If the LED never shows the bind-scan pattern while unconnected, the RX is not
-entering bind scan. If it shows bind scan but never `[BIND RX]`, check that TX
-entered Bind RX mode, both modules are powered, antennas are attached, and the
-RX is within range.
+entering bind scan. If the RX previously connected normally in this boot,
+power-cycle it before retrying first-time binding. If it shows bind scan but
+never `[BIND RX]`, check that TX entered Bind RX mode, both modules are powered,
+antennas are attached, and the RX is within range.
 
 ## Current Limits
 

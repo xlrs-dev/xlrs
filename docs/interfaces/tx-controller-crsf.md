@@ -1,7 +1,7 @@
-# TX Controller CRSF
+# TX Controller CRSF RC
 
-The TX firmware can be built with a controller-facing CRSF port instead of the
-default custom controller UART protocol:
+The TX firmware can be built with a controller-facing CRSF RC port instead of
+the default custom controller UART protocol:
 
 ```bash
 cmake -S . -B build -G Ninja -DXLRS_TX_CONTROLLER_PROTOCOL=CRSF
@@ -41,13 +41,28 @@ Implemented today:
 - RX forwards valid flight-controller CRSF telemetry frames over downlink
   telemetry. TX writes those frames back to the controller CRSF port.
 
+USB serial diagnostics expose the first-time interface flow:
+
+```text
+[TX STATUS] ... | CRSF rc:<n> age:<ms> ping:<n> pr:<n> pw:<n> fc:<n> bad:<n> qdrop:<n> dldrop:<n>
+```
+
+| Field | Meaning |
+| --- | --- |
+| `rc` / `age` | CRSF RC frames received from the controller, and age of the most recent one |
+| `ping` | CRSF device discovery frames received |
+| `pr` / `pw` | Parameter reads/writes received |
+| `fc` | Flight-controller CRSF telemetry frames forwarded back to the CRSF RC controller |
+| `bad` | Downlink messages that were not valid CRSF-frame messages |
+| `qdrop` / `dldrop` | TX app -> RF and RF -> TX app queue drops |
+
 Current limitations:
 
 - The default TX controller protocol is still the custom UART protocol unless
   `XLRS_TX_CONTROLLER_PROTOCOL=CRSF` is selected at configure time.
 - CRSF parameter writes persist config to flash on both modules. RF
   rate/region/power/failsafe changes are applied after reboot.
-- A dedicated XLRS Lua script is not implemented yet.
+- A dedicated XLRS CRSF RC configuration script is not implemented yet.
 - XLRS currently carries 8 OTA `rc_channel` values. CRSF channels 9-16 are parsed
   by the CRSF decoder but are not transmitted over the XLRS uplink.
 

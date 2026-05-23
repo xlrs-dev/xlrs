@@ -334,7 +334,8 @@ void CrsfSerial::packetGps(const crsf_header_t *p)
         onPacketGps(&_gpsSensor);
 }
 
-// DEVICE_INFO payload: 1 version, 1 param_count, 2 sw, 2 hw, 4 serial, null-term name
+// DEVICE_INFO payload: null-term name, then 14 trailing bytes: 4 serial, 4 hw, 4 fw,
+// 1 param_count, 1 version. Only name + serial are surfaced via onDeviceInfo.
 void CrsfSerial::packetDeviceInfo(const crsf_header_t *p)
 {
     bool extended = p->type >= CRSF_FRAMETYPE_DEVICE_PING;

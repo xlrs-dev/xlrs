@@ -47,6 +47,7 @@ struct RfToAppData {
     bool hardwareError;   // RF core: radio init failed or PHY unhealthy
     bool bindTransmitActive;
     uint8_t bindSecondsRemaining;
+    uint32_t downlinkQueueDrops;
 };
 
 xlrs::LatestValue<AppToRfData> g_appToRf;
@@ -70,6 +71,19 @@ xlrs::RfConfigData g_rfConfig;
 xlrs::hal::SerialPort g_controlUart(uart1, UART_PROTOCOL_TX, UART_PROTOCOL_RX);
 #if XLRS_TX_CONTROLLER_CRSF
 CrsfSerial controllerCrsf(g_controlUart, CRSF_BAUDRATE);
+struct CrsfControllerDebug {
+    uint32_t rcFrames;
+    uint32_t devicePings;
+    uint32_t parameterReads;
+    uint32_t parameterWrites;
+    uint32_t telemetryFramesToController;
+    uint32_t invalidDownlinkMessages;
+    uint32_t lastRcMs;
+    uint32_t lastDevicePingMs;
+    uint32_t lastParameterReadMs;
+    uint32_t lastParameterWriteMs;
+};
+static CrsfControllerDebug g_crsfDebug{};
 #else
 UARTProtocol uartProto(&g_controlUart);
 #endif
@@ -262,6 +276,10 @@ static void sendCrsfParameter(uint8_t destination, uint8_t parameterNumber) {
 
 void onCrsfDevicePing(uint8_t destination, uint8_t origin) {
     if (!crsfDestinationIsTxModule(destination)) return;
+    g_crsfDebug.devicePings++;
+    g_crsfDebug.lastDevicePingMs = xlrs::hal::nowMs();
+    printf("[CRSF CTRL] DEVICE_PING origin=0x%02X dest=0x%02X count=%lu\n",
+           origin, destination, (unsigned long)g_crsfDebug.devicePings);
 
     uint8_t payload[CRSF_MAX_PAYLOAD_LEN] = {};
     uint8_t len = 0;
@@ -279,12 +297,21 @@ void onCrsfDevicePing(uint8_t destination, uint8_t origin) {
 void onCrsfParameterRead(uint8_t parameterNumber, uint8_t chunkNumber,
                          uint8_t destination, uint8_t origin) {
     if (!crsfDestinationIsTxModule(destination) || chunkNumber != 0) return;
+    g_crsfDebug.parameterReads++;
+    g_crsfDebug.lastParameterReadMs = xlrs::hal::nowMs();
+    printf("[CRSF CTRL] PARAMETER_READ id=%u origin=0x%02X count=%lu\n",
+           (unsigned)parameterNumber, origin, (unsigned long)g_crsfDebug.parameterReads);
     sendCrsfParameter(origin, parameterNumber);
 }
 
 void onCrsfParameterWrite(uint8_t parameterNumber, const uint8_t* value, uint8_t valueLen,
                           uint8_t destination, uint8_t origin) {
     if (!crsfDestinationIsTxModule(destination) || !value) return;
+    g_crsfDebug.parameterWrites++;
+    g_crsfDebug.lastParameterWriteMs = xlrs::hal::nowMs();
+    printf("[CRSF CTRL] PARAMETER_WRITE id=%u len=%u origin=0x%02X count=%lu\n",
+           (unsigned)parameterNumber, (unsigned)valueLen, origin,
+           (unsigned long)g_crsfDebug.parameterWrites);
 
     switch (parameterNumber) {
         case CRSF_PARAM_RATE:
@@ -380,6 +407,8 @@ void onCrsfChannelsReceived() {
         payload.channels[i] = (uint16_t)controllerCrsf.getChannel((unsigned int)i + 1);
     }
     g_appToRf.store(payload);
+    g_crsfDebug.rcFrames++;
+    g_crsfDebug.lastRcMs = xlrs::hal::nowMs();
 }
 #else
 void onChannelsReceived(const ChannelData* data) {
@@ -512,6 +541,9 @@ static void app_core_loop() {
         if (xlrs::parseCrsfFrameMessage(downlinkMessage.data, downlinkMessage.len,
                                         crsfFrame, crsfFrameLen)) {
             controllerCrsf.write(crsfFrame, crsfFrameLen);
+            g_crsfDebug.telemetryFramesToController++;
+        } else {
+            g_crsfDebug.invalidDownlinkMessages++;
         }
     }
 #else
@@ -571,10 +603,25 @@ static void app_core_loop() {
 
             // Core-0 diagnostic: surface PHY fault counters so a wedged radio is visible on the
             // bench console, not just an opaque healthy()=false (docs/troubleshooting/index.md §3).
-            printf("[TX STATUS] State: %d LQdown: %u%% RSSI: %d dBm | PHY timeouts: %lu CRC: %lu%s",
+            printf("[TX STATUS] State: %d LQdown: %u%% RSSI: %d dBm | PHY timeouts: %lu CRC: %lu",
                    (int)rfData.state, (unsigned)rfData.stats.lqDown, (int)rfData.stats.rssiDbm,
-                   (unsigned long)g_phy.spiTimeouts(), (unsigned long)g_phy.crcErrors(),
-                   rfData.hardwareError ? " [HW FAULT]" : "");
+                   (unsigned long)g_phy.spiTimeouts(), (unsigned long)g_phy.crcErrors());
+#if XLRS_TX_CONTROLLER_CRSF
+            const uint32_t rcAge = g_crsfDebug.lastRcMs == 0 ? 0 : now - g_crsfDebug.lastRcMs;
+            printf(" | CRSF rc:%lu age:%lums ping:%lu pr:%lu pw:%lu fc:%lu bad:%lu qdrop:%lu dldrop:%lu",
+                   (unsigned long)g_crsfDebug.rcFrames,
+                   (unsigned long)rcAge,
+                   (unsigned long)g_crsfDebug.devicePings,
+                   (unsigned long)g_crsfDebug.parameterReads,
+                   (unsigned long)g_crsfDebug.parameterWrites,
+                   (unsigned long)g_crsfDebug.telemetryFramesToController,
+                   (unsigned long)g_crsfDebug.invalidDownlinkMessages,
+                   (unsigned long)g_appTelemetryToRf.dropped(),
+                   (unsigned long)rfData.downlinkQueueDrops);
+#endif
+            if (rfData.hardwareError) {
+                printf(" [HW FAULT]");
+            }
             if (rfData.bindTransmitActive) {
                 printf(" [BIND TX %us]", (unsigned)rfData.bindSecondsRemaining);
             }
@@ -674,6 +721,7 @@ static void rf_core_main() {
             rfData.stats = g_link.stats();
             rfData.hardwareError = !g_phy.healthy();
             rfData.bindTransmitActive = g_link.bindTransmitActive();
+            rfData.downlinkQueueDrops = g_rfTelemetryToApp.dropped();
             if (rfData.bindTransmitActive && bindTransmitUntilMs != 0) {
                 const int32_t remainingMs = (int32_t)(bindTransmitUntilMs - xlrs::hal::nowMs());
                 rfData.bindSecondsRemaining = remainingMs > 0

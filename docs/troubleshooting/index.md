@@ -9,13 +9,15 @@ modules. It follows the project glossary in
 - **Downlink** is RX -> TX over the radio.
 - **RC channel** means stick/switch data.
 - **RF channel** means a frequency-hop table entry.
-- **CRSF** is the wired RX -> flight-controller protocol.
+- **CRSF** is a wired protocol. XLRS can use it on the TX controller side and
+  always uses it on the RX flight-controller side.
 
 The fastest way to debug XLRS is to isolate the path in order:
 
 ```text
-build/config -> boot identity -> radio init -> sync/acquisition
-             -> uplink RC -> RX CRSF output -> downlink telemetry
+build/config -> TX controller input -> boot identity -> radio init
+             -> acquisition -> uplink RC -> RX CRSF output
+             -> FC telemetry ingress -> downlink telemetry -> TX controller output
 ```
 
 Do not start by changing RF timing constants. Most failures are configuration,
@@ -31,7 +33,17 @@ Run these before touching hardware:
 scripts/check-env.sh
 scripts/test.sh
 scripts/lint.sh
+```
+
+Build the TX for the controller protocol you are actually wiring:
+
+```bash
+# Custom XLRS controller UART, default
 scripts/build.sh
+
+# CRSF RC controller input
+cmake -S . -B build-crsf -G Ninja -DXLRS_TX_CONTROLLER_PROTOCOL=CRSF
+cmake --build build-crsf --target xlrs_tx xlrs_rx
 ```
 
 Flash and monitor both boards:
@@ -52,7 +64,8 @@ Expected boot markers:
 [TX] Max Power Cap: ... dBm
 [TX] [UID] Computed identity: 0x...
 [TX] [PHY] Mode: FLRC|LoRa, Sync Word: 0x....
-[TX] Controller UART initialized.
+[TX] Controller UART initialized.      # Custom UART build
+[TX] Controller CRSF initialized.      # CRSF RC build
 
 [RX] === XLRS Pico SDK Receiver ===
 [RX] Binding identity store initialized.
@@ -70,8 +83,11 @@ Periodic status lines:
 
 ```text
 [TX STATUS] State: <n> LQdown: <n>% RSSI: <n> dBm | PHY timeouts: <n> CRC: <n>
-[RX STATUS] State: <n> LQ: <n>% RSSI: <n> dBm | PHY timeouts: <n> CRC: <n>
+[TX STATUS] ... | CRSF rc:<n> age:<ms> ping:<n> pr:<n> pw:<n> fc:<n> bad:<n> qdrop:<n> dldrop:<n>
+[RX STATUS] State: <n> LQ: <n>% RSSI: <n> dBm | PHY timeouts: <n> CRC: <n> | out:<0|1> crsf_rc:<n> age:<ms> stats:<n> fc:<n> fcq:<n> fcdrop:<n> fcage:<ms> qdrop:<n>
 ```
+
+The second TX status form appears only in CRSF RC builds.
 
 During CRSF Bind RX, TX also logs one-shot bind state transitions:
 
@@ -99,6 +115,35 @@ Current state values:
 `[HW FAULT]`, increasing PHY timeouts, or increasing CRC errors mean the problem
 is at or below the radio/PHY layer, not in CRSF or controller input.
 
+### CRSF RC Bring-Up Counters
+
+In a CRSF RC build, the TX status counters answer whether the wired controller
+side works before you debug RF:
+
+| Field | Meaning | Healthy bring-up signal |
+| --- | --- | --- |
+| `rc` | Valid CRSF RC frames received by TX from the CRSF RC controller | Increments continuously while the controller is on |
+| `age` | Milliseconds since last CRSF RC frame | Stays low; a large value means controller UART/wiring/protocol trouble |
+| `ping` | CRSF `DEVICE_PING` frames received | Increments when the controller discovers the module |
+| `pr` / `pw` | CRSF parameter reads/writes | Increments when the controller opens/edits the device parameters |
+| `fc` | FC telemetry CRSF frames forwarded by TX back to the CRSF RC controller | Increments after RX receives FC telemetry and downlink works |
+| `bad` | Downlink app messages TX could not parse as CRSF frame messages | Should stay zero |
+| `qdrop` | TX app -> RF queue drops for config/bind/reboot messages | Should stay zero |
+| `dldrop` | RF -> TX app downlink queue drops | Should stay zero |
+
+The RX status counters answer whether the flight-controller side works:
+
+| Field | Meaning | Healthy bring-up signal |
+| --- | --- | --- |
+| `out` | Whether RX is allowed to emit CRSF RC frames to the flight controller | `1` when connected, or in `Hold` failsafe |
+| `crsf_rc` | CRSF RC frames emitted by RX to the flight controller | Increments while `out:1` |
+| `stats` | CRSF link-statistics frames emitted by RX to the flight controller | Increments about every 500 ms |
+| `fc` | Valid non-RC, non-link-stat CRSF frames received from the flight controller | Increments when FC telemetry is present |
+| `fcq` | FC telemetry CRSF frames queued into XLRS downlink telemetry | Tracks `fc` unless queueing is saturated |
+| `fcdrop` | FC telemetry frames dropped before OTA queueing | Should stay zero |
+| `fcage` | Milliseconds since last accepted FC telemetry frame | Low when FC telemetry is active |
+| `qdrop` | RF -> RX app queue drops | Should stay zero |
+
 ---
 
 ## 2. Symptom Matrix
@@ -113,7 +158,8 @@ is at or below the radio/PHY layer, not in CRSF or controller input.
 | RX status reaches Connected but no FC input | CRSF wiring, baud, output gating, FC serial config | Check RX GP8/GP9 wiring to FC, CRSF baud, FC serial protocol, `outputActive` behavior |
 | Failsafe too early during telemetry | Uplink-slot accounting bug or poor uplink RF | Check RX LQ and telemetry ratio; native tests cover uplink-slot accounting |
 | TX telemetry stale or zero | Downlink telemetry slots missing, RX not transmitting telemetry | Watch TX `LQdown`, RX state, and PHY counters on both sides |
-| Controller input ignored | TX UART wiring/protocol issue | Verify controller UART at 420000 8N1 and TX app ACK/PONG behavior |
+| CRSF RC controller never discovers module | TX built for custom UART, wrong UART wiring, no CRSF `DEVICE_PING` | Confirm boot says `Controller CRSF initialized`, check TX status `ping`, probe TX UART at 420000 8N1 |
+| CRSF RC input ignored | TX controller wiring/protocol issue | In CRSF build, check TX status `rc` increments and `age` stays low; in UART build, verify custom UART ACK/PONG |
 | Status LED solid on RX before link | Config fault or hardware fault | Check RX boot log for default config write or `[HW FAULT]` |
 
 ---
@@ -162,9 +208,10 @@ If they differ:
 
 ## 4. Hardware Wiring
 
-### Controller UART To TX Module
+### Controller UART Or CRSF RC To TX Module
 
-The TX module consumes controller frames over UART at 420000 baud.
+The TX module consumes either custom UART frames or CRSF RC frames over UART at
+420000 baud, depending on `XLRS_TX_CONTROLLER_PROTOCOL`.
 
 ```text
 Controller TX  -> XLRS TX module RX pin
@@ -180,6 +227,9 @@ XLRS TX module UART RX: GP9
 ```
 
 Use 3.3 V logic. On a logic analyzer, one bit at 420000 baud is about 2.38 us.
+In CRSF RC builds, a healthy controller side shows TX status `rc` increasing and
+`age` staying low. If the CRSF RC controller supports device discovery, `ping`
+should increment when it scans the module.
 
 ### RX Module CRSF To Flight Controller
 
@@ -274,16 +324,19 @@ emits CRSF while output is active.
 
 If link is Connected but the FC sees no input:
 
-1. Verify RX state is 3 (`Connected`).
-2. Verify failsafe mode and `outputActive()` behavior.
-3. Probe RX CRSF TX pin at 420000 baud.
-4. Confirm FC serial port is configured for CRSF.
-5. Confirm ground is shared between RX module and FC.
+1. Verify TX CRSF `rc` increments, or custom UART channel input is active.
+2. Verify RX state is 3 (`Connected`).
+3. Verify RX status `out:1`.
+4. Verify RX status `crsf_rc` increments.
+5. Probe RX CRSF TX pin at 420000 baud.
+6. Confirm FC serial port is configured for CRSF.
+7. Confirm ground is shared between RX module and FC.
 
 ### Stage D: Downlink Telemetry
 
 On telemetry slots, RX transmits downlink telemetry to TX. TX reports this as
-`LQdown` and forwards telemetry over the controller UART protocol.
+`LQdown`. In CRSF RC builds, valid flight-controller CRSF telemetry is bridged
+from RX to TX and then written back to the CRSF RC controller port.
 
 If uplink works but TX telemetry is zero/stale:
 
@@ -291,6 +344,14 @@ If uplink works but TX telemetry is zero/stale:
 2. Check RX status is Connected and RX PHY counters are stable.
 3. Check TX PHY CRC/timeout counters; downlink can fail independently of uplink.
 4. Verify telemetry ratio/rate config is the same on both sides.
+
+If flight-controller telemetry is missing in a CRSF RC controller:
+
+1. Check RX status `fc` increments when the flight controller is connected.
+2. Check RX `fcq` tracks `fc` and `fcdrop` stays zero.
+3. Check TX status `fc` increments.
+4. Check TX status `dldrop` and RX `qdrop` stay zero.
+5. Probe FC TX -> RX CRSF RX wiring at 420000 baud.
 
 ---
 
@@ -344,7 +405,9 @@ Current RX LED behavior:
 
 During CRSF Bind RX, periodic RX status lines also append `[BIND SCAN]` while
 the RX is open to bind packets and `[BIND RX]` after a valid bind frame has been
-received. The LED is only a coarse hint. Trust serial logs and counters first.
+received. Bind scan is active only before the RX has made a normal connection in
+the current boot. Power-cycle RX before repeating a first-time bind scan. The LED
+is only a coarse hint. Trust serial logs and counters first.
 
 ---
 
@@ -398,6 +461,8 @@ If a behavior fails in hardware but passes natively, suspect:
 - RF path/antenna.
 - Real oscillator drift.
 - App-side UART/CRSF wiring.
+- CRSF RC controller discovery/input counters.
+- RX CRSF output/FC telemetry counters.
 
 ---
 
@@ -417,5 +482,6 @@ When filing a bug or bench note, capture:
 Good troubleshooting logs should make it clear whether the failure is:
 
 ```text
-configuration -> radio init -> acquisition -> uplink -> CRSF output -> downlink
+configuration -> controller input -> radio init -> acquisition -> uplink
+              -> RX CRSF output -> FC telemetry -> downlink -> controller output
 ```

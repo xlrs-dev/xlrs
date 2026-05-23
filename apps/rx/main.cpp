@@ -53,6 +53,7 @@ struct RfToAppData {
     bool hardwareError;
     bool bindScanOpen;
     bool bindPacketReceived;
+    uint32_t rfToAppQueueDrops;
 };
 
 xlrs::LatestValue<RfToAppData> g_rfToApp;
@@ -84,6 +85,13 @@ static uint16_t localChannels[RC_CHANNELS] = {
     RC_US_MID, RC_US_MID, RC_US_MID, RC_THROTTLE_FAILSAFE,
     RC_US_MID, RC_US_MID, RC_US_MID, RC_US_MID};
 static bool g_configFault = false;
+static uint32_t g_crsfRcFramesOut = 0;
+static uint32_t g_crsfLinkStatsOut = 0;
+static uint32_t g_fcCrsfFramesSeen = 0;
+static uint32_t g_fcCrsfFramesQueued = 0;
+static uint32_t g_fcCrsfFramesDropped = 0;
+static uint32_t g_lastFcCrsfFrameMs = 0;
+static uint32_t g_lastCrsfRcOutMs = 0;
 
 static void blinkStatusLedBlocking(uint8_t pulses, uint32_t onMs, uint32_t offMs) {
     for (uint8_t i = 0; i < pulses; ++i) {
@@ -102,9 +110,14 @@ static void onCrsfFrameFromFlightController(const uint8_t *frame, uint8_t frameL
         return;
     }
 
+    g_fcCrsfFramesSeen++;
+    g_lastFcCrsfFrameMs = xlrs::hal::nowMs();
     xlrs::AppTelemetryMessage message{};
-    if (xlrs::makeCrsfFrameMessage(frame, frameLen, message)) {
-        g_appTelemetryToRf.push(message);
+    if (xlrs::makeCrsfFrameMessage(frame, frameLen, message) &&
+        g_appTelemetryToRf.push(message)) {
+        g_fcCrsfFramesQueued++;
+    } else {
+        g_fcCrsfFramesDropped++;
     }
 }
 
@@ -280,6 +293,8 @@ static void app_core_loop() {
 
             crsf.queuePacket(CRSF_ADDRESS_FLIGHT_CONTROLLER, CRSF_FRAMETYPE_RC_CHANNELS_PACKED,
                              &crsfChannels, CRSF_FRAME_RC_CHANNELS_PAYLOAD_SIZE);
+            g_crsfRcFramesOut++;
+            g_lastCrsfRcOutMs = now;
         }
     }
 
@@ -289,9 +304,21 @@ static void app_core_loop() {
         xlrs::buildCrsfLinkStatistics(rfData.stats, stats);
         crsf.queuePacket(CRSF_ADDRESS_FLIGHT_CONTROLLER, CRSF_FRAMETYPE_LINK_STATISTICS,
                          stats, sizeof(stats));
-        printf("[RX STATUS] State: %d LQ: %u%% RSSI: %d dBm | PHY timeouts: %lu CRC: %lu%s\n",
+        g_crsfLinkStatsOut++;
+        const uint32_t fcAge = g_lastFcCrsfFrameMs == 0 ? 0 : now - g_lastFcCrsfFrameMs;
+        const uint32_t rcOutAge = g_lastCrsfRcOutMs == 0 ? 0 : now - g_lastCrsfRcOutMs;
+        printf("[RX STATUS] State: %d LQ: %u%% RSSI: %d dBm | PHY timeouts: %lu CRC: %lu | out:%u crsf_rc:%lu age:%lums stats:%lu fc:%lu fcq:%lu fcdrop:%lu fcage:%lums qdrop:%lu%s\n",
                (int)state, (unsigned)rfData.stats.lqUp, (int)rfData.stats.rssiDbm,
                (unsigned long)g_phy.spiTimeouts(), (unsigned long)g_phy.crcErrors(),
+               outputActive ? 1u : 0u,
+               (unsigned long)g_crsfRcFramesOut,
+               (unsigned long)rcOutAge,
+               (unsigned long)g_crsfLinkStatsOut,
+               (unsigned long)g_fcCrsfFramesSeen,
+               (unsigned long)g_fcCrsfFramesQueued,
+               (unsigned long)g_fcCrsfFramesDropped,
+               (unsigned long)fcAge,
+               (unsigned long)rfData.rfToAppQueueDrops,
                rfData.hardwareError ? " [HW FAULT]" :
                rfData.bindPacketReceived ? " [BIND RX]" :
                rfData.bindScanOpen ? " [BIND SCAN]" : "");
@@ -416,6 +443,7 @@ static void rf_core_main() {
             rfData.hardwareError = !g_phy.healthy();
             rfData.bindScanOpen = bindScanning;
             rfData.bindPacketReceived = bindPacketReceived;
+            rfData.rfToAppQueueDrops = g_rfTelemetryToApp.dropped();
             g_rfToApp.store(rfData);
 
             size_t telemetryLen = 0;

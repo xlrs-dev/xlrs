@@ -14,7 +14,7 @@ The TX controller protocol is selected with `XLRS_TX_CONTROLLER_PROTOCOL`.
 | Value | Behavior |
 | --- | --- |
 | `UART` | Custom XLRS controller UART protocol. This is the default. |
-| `CRSF` | Controller-facing CRSF for EdgeTX/OpenTX-style controllers. |
+| `CRSF` | Controller-facing CRSF RC for any compatible CRSF RC controller. |
 
 ```bash
 cmake -S . -B build -G Ninja -DXLRS_TX_CONTROLLER_PROTOCOL=CRSF
@@ -40,6 +40,18 @@ Supported TX-side CRSF features:
 | Bind RX command | Supported with OTA bind scan/transmit |
 | Reboot command | Supported |
 | Flight-controller telemetry bridge | Supported from RX to TX to controller |
+
+TX CRSF RC status is visible in USB serial logs:
+
+```text
+[TX STATUS] ... | CRSF rc:<n> age:<ms> ping:<n> pr:<n> pw:<n> fc:<n> bad:<n> qdrop:<n> dldrop:<n>
+```
+
+- `rc` and `age` prove CRSF RC input is reaching TX.
+- `ping`, `pr`, and `pw` prove CRSF discovery/config traffic is reaching TX.
+- `fc` proves bridged flight-controller CRSF telemetry is returning to the CRSF
+  RC controller.
+- `qdrop`, `dldrop`, and `bad` should stay zero during normal operation.
 
 Supported parameters:
 
@@ -68,10 +80,22 @@ Supported RX-side CRSF features:
 | Failsafe `Hold` | Supported; continues RC output with preset failsafe channels |
 | Flight-controller telemetry ingestion | Supported for valid non-RC, non-link-stat CRSF frames |
 
+RX CRSF status is visible in USB serial logs:
+
+```text
+[RX STATUS] ... | out:<0|1> crsf_rc:<n> age:<ms> stats:<n> fc:<n> fcq:<n> fcdrop:<n> fcage:<ms> qdrop:<n>
+```
+
+- `out` shows whether CRSF RC output is currently enabled.
+- `crsf_rc` and `stats` prove RX is writing CRSF frames to the flight controller.
+- `fc`, `fcq`, and `fcdrop` prove flight-controller telemetry ingress and queueing
+  into XLRS downlink telemetry.
+
 ## Binding
 
 CRSF Bind RX is supported. The command starts an XLRS OTA bind workflow that can
-bind an unconnected RX. See [CRSF Binding](binding.md).
+bind an RX before it has made a normal connection in the current boot. See
+[CRSF Binding](binding.md).
 
 ## Current Limits
 
@@ -79,6 +103,6 @@ bind an unconnected RX. See [CRSF Binding](binding.md).
   not transmitted over the uplink.
 - RF parameter writes are persisted immediately but rate/region/power/failsafe
   changes apply after reboot.
-- A dedicated XLRS Lua script is not implemented yet.
+- A dedicated XLRS CRSF RC configuration script is not implemented yet.
 - Bind scan is a discovery/pairing workflow, not a cryptographic ownership
   proof.

@@ -36,17 +36,7 @@ public:
         if (len == 0 || len > 32) return false;
 
         linkUidFromPhrase(phrase, _uid);
-        hal::FlashStore::write(BINDING_STORE_MAGIC_ADDR + 0, (BINDING_STORE_MAGIC >> 24) & 0xFF);
-        hal::FlashStore::write(BINDING_STORE_MAGIC_ADDR + 1, (BINDING_STORE_MAGIC >> 16) & 0xFF);
-        hal::FlashStore::write(BINDING_STORE_MAGIC_ADDR + 2, (BINDING_STORE_MAGIC >> 8) & 0xFF);
-        hal::FlashStore::write(BINDING_STORE_MAGIC_ADDR + 3, BINDING_STORE_MAGIC & 0xFF);
-        hal::FlashStore::write(BINDING_STORE_VERSION_ADDR, BINDING_STORE_VERSION);
-        for (uint8_t i = 0; i < LINK_UID_SIZE; ++i) {
-            hal::FlashStore::write(BINDING_STORE_UID_ADDR + i, _uid[i]);
-        }
-        writeChecksum(checksum());
-        hal::FlashStore::commit();
-        _loaded = true;
+        persistUid();
         return true;
     }
 
@@ -62,6 +52,21 @@ public:
         if (!any) return false;
 
         memcpy(_uid, uid, LINK_UID_SIZE);
+        persistUid();
+        return true;
+    }
+
+    bool getBindingUid(uint8_t uid[LINK_UID_SIZE]) const {
+        if (!uid || !_loaded) return false;
+        memcpy(uid, _uid, LINK_UID_SIZE);
+        return true;
+    }
+
+private:
+    // Persist the current _uid to flash. Both setBinding* paths populate _uid then call this,
+    // so the magic/version/UID/checksum storage layout (a safety-sensitive flash schema) lives
+    // in exactly one place.
+    void persistUid() {
         hal::FlashStore::write(BINDING_STORE_MAGIC_ADDR + 0, (BINDING_STORE_MAGIC >> 24) & 0xFF);
         hal::FlashStore::write(BINDING_STORE_MAGIC_ADDR + 1, (BINDING_STORE_MAGIC >> 16) & 0xFF);
         hal::FlashStore::write(BINDING_STORE_MAGIC_ADDR + 2, (BINDING_STORE_MAGIC >> 8) & 0xFF);
@@ -73,16 +78,8 @@ public:
         writeChecksum(checksum());
         hal::FlashStore::commit();
         _loaded = true;
-        return true;
     }
 
-    bool getBindingUid(uint8_t uid[LINK_UID_SIZE]) const {
-        if (!uid || !_loaded) return false;
-        memcpy(uid, _uid, LINK_UID_SIZE);
-        return true;
-    }
-
-private:
     bool valid() const {
         uint32_t magic = 0;
         magic |= (uint32_t)hal::FlashStore::read(BINDING_STORE_MAGIC_ADDR + 0) << 24;

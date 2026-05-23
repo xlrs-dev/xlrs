@@ -12,6 +12,12 @@ namespace xlrs {
 
 static constexpr uint8_t APP_TELEMETRY_MAX_LEN = 128;
 
+// Link::getTelemetry() copies the reassembled payload (StubbornReceiver::_buf, 128 bytes) into
+// AppTelemetryMessage::data BEFORE the caller's `len <= APP_TELEMETRY_MAX_LEN` check runs, so this
+// buffer must be at least that large or that copy overflows. Keep in sync with StubbornTelemetry.h.
+static_assert(APP_TELEMETRY_MAX_LEN >= 128,
+              "AppTelemetryMessage::data must hold the largest stubborn-telemetry payload");
+
 struct AppTelemetryMessage {
     uint8_t len;
     uint8_t data[APP_TELEMETRY_MAX_LEN];
@@ -31,12 +37,19 @@ inline bool appTelemetryHasPrefix(const uint8_t* payload, size_t len, AppTelemet
            payload[3] == (uint8_t)type;
 }
 
+// Write the 4-byte "XL\x01<type>" message header that appTelemetryHasPrefix() validates, keeping
+// the wire prefix defined in one place on both the build and parse sides. Returns the next offset.
+inline uint8_t appTelemetryWritePrefix(uint8_t* data, AppTelemetryType type) {
+    data[0] = 'X';
+    data[1] = 'L';
+    data[2] = 1;
+    data[3] = (uint8_t)type;
+    return 4;
+}
+
 inline bool makeRxConfigMessage(const RfConfigData& cfg, AppTelemetryMessage& out) {
     out.len = 9;
-    out.data[0] = 'X';
-    out.data[1] = 'L';
-    out.data[2] = 1;
-    out.data[3] = (uint8_t)AppTelemetryType::RxConfig;
+    appTelemetryWritePrefix(out.data, AppTelemetryType::RxConfig);
     out.data[4] = cfg.region;
     out.data[5] = cfg.defaultRate;
     out.data[6] = (uint8_t)cfg.maxPowerDbm;
@@ -59,10 +72,7 @@ inline bool parseRxConfigMessage(const uint8_t* payload, size_t len, RfConfigDat
 inline bool makeBindUidMessage(const uint8_t uid[LINK_UID_SIZE], AppTelemetryMessage& out) {
     if (!uid) return false;
     out.len = 4 + LINK_UID_SIZE;
-    out.data[0] = 'X';
-    out.data[1] = 'L';
-    out.data[2] = 1;
-    out.data[3] = (uint8_t)AppTelemetryType::BindUid;
+    appTelemetryWritePrefix(out.data, AppTelemetryType::BindUid);
     memcpy(&out.data[4], uid, LINK_UID_SIZE);
     return true;
 }
@@ -79,10 +89,7 @@ inline bool parseBindUidMessage(const uint8_t* payload, size_t len, uint8_t uid[
 inline bool makeStartBindMessage(const uint8_t uid[LINK_UID_SIZE], AppTelemetryMessage& out) {
     if (!uid) return false;
     out.len = 4 + LINK_UID_SIZE;
-    out.data[0] = 'X';
-    out.data[1] = 'L';
-    out.data[2] = 1;
-    out.data[3] = (uint8_t)AppTelemetryType::StartBind;
+    appTelemetryWritePrefix(out.data, AppTelemetryType::StartBind);
     memcpy(&out.data[4], uid, LINK_UID_SIZE);
     return true;
 }
@@ -99,10 +106,7 @@ inline bool parseStartBindMessage(const uint8_t* payload, size_t len, uint8_t ui
 inline bool makeCrsfFrameMessage(const uint8_t* frame, uint8_t frameLen, AppTelemetryMessage& out) {
     if (!frame || frameLen == 0 || frameLen + 5 > APP_TELEMETRY_MAX_LEN) return false;
     out.len = frameLen + 5;
-    out.data[0] = 'X';
-    out.data[1] = 'L';
-    out.data[2] = 1;
-    out.data[3] = (uint8_t)AppTelemetryType::CrsfFrame;
+    appTelemetryWritePrefix(out.data, AppTelemetryType::CrsfFrame);
     out.data[4] = frameLen;
     memcpy(&out.data[5], frame, frameLen);
     return true;
@@ -118,11 +122,7 @@ inline bool parseCrsfFrameMessage(const uint8_t* payload, size_t len, const uint
 }
 
 inline bool makeRebootMessage(AppTelemetryMessage& out) {
-    out.len = 4;
-    out.data[0] = 'X';
-    out.data[1] = 'L';
-    out.data[2] = 1;
-    out.data[3] = (uint8_t)AppTelemetryType::Reboot;
+    out.len = appTelemetryWritePrefix(out.data, AppTelemetryType::Reboot);
     return true;
 }
 

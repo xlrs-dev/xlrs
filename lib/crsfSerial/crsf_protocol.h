@@ -56,7 +56,7 @@ typedef enum
     // MSP commands
     CRSF_FRAMETYPE_MSP_REQ = 0x7A,   // response request using msp sequence as command
     CRSF_FRAMETYPE_MSP_RESP = 0x7B,  // reply with 58 byte chunked binary
-    CRSF_FRAMETYPE_MSP_WRITE = 0x7C, // write with 8 byte chunked binary (OpenTX outbound telemetry buffer limit)
+    CRSF_FRAMETYPE_MSP_WRITE = 0x7C, // write with 8 byte chunked binary (CRSF controller outbound telemetry buffer limit)
 } crsf_frame_type_e;
 
 typedef enum

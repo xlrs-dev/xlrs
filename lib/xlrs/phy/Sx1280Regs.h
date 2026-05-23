@@ -19,6 +19,7 @@ enum Sx1280Opcode : uint8_t {
     SX1280_OP_SET_BUFFER_BASE_ADDR   = 0x8F,
     SX1280_OP_SET_REGULATOR_MODE     = 0x96,
     SX1280_OP_CLEAR_IRQ_STATUS       = 0x97,
+    SX1280_OP_SET_AUTO_FS            = 0x9E,
     
     SX1280_OP_GET_STATUS             = 0xC0,
     SX1280_OP_GET_IRQ_STATUS         = 0x15,

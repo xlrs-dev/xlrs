@@ -48,6 +48,15 @@ static uint8_t spiTransfer(uint8_t value) {
     spi_write_read_blocking(kRadioSpi, &value, &rx, 1);
     return rx;
 }
+
+// SetTxParams power byte: Pout = -18 + power, valid register range 0..31 (-18..+13 dBm).
+// Clamp so an out-of-range power request can never write an invalid value (datasheet §11.7.4).
+static uint8_t txPowerReg(int8_t dbm) {
+    int p = (int)dbm + 18;
+    if (p < 0) p = 0;
+    if (p > 31) p = 31;
+    return (uint8_t)p;
+}
 } // namespace
 
 bool Sx1280NativePhy::waitBusy() {
@@ -239,8 +248,8 @@ bool Sx1280NativePhy::init(const PhyConfig& cfg) {
 
     // 4. Set TX Params
     uint8_t txParams[2] = {
-        (uint8_t)(cfg.powerDbm + 18),
-        0xE0 // 24 us ramp time
+        txPowerReg(cfg.powerDbm),
+        0xE0 // RADIO_RAMP_20_US (Table 11-49)
     };
     spiCommand(SX1280_OP_SET_TX_PARAMS, txParams, 2);
 
@@ -262,7 +271,7 @@ bool Sx1280NativePhy::init(const PhyConfig& cfg) {
     } else { // FLRC
         uint8_t brBwByte = 0x45; // default 1.3 Mbps
         if (cfg.flrcBitrateKbps < 800) {
-            brBwByte = 0x8A; // 650 kbps
+            brBwByte = 0x86; // FLRC_BR_0_650_BW_0_6 (Table 14-31)
           }
         modParams[0] = brBwByte;
         modParams[1] = (cfg.cr - 2) * 2;
@@ -273,15 +282,23 @@ bool Sx1280NativePhy::init(const PhyConfig& cfg) {
     // 7. Set sync word (also sets packet parameters)
     setSyncWord(cfg.syncWord);
 
-    // 7b. Apply professional Semtech high-sensitivity calibrations & AutoFS optimization
-    uint8_t lnaTrim = 0xC0;
-    writeRegister(0x0891, &lnaTrim, 1); // Maximize front-end LNA gain under weak signals
+    // 7b. High-sensitivity front-end tuning.
+    // RxGain (0x0891) field [7:6] = 3 selects high-sensitivity mode (datasheet Table 13-1).
+    // Read/modify/write per the §13 note so the register's other live bits are preserved
+    // rather than clobbered.
+    uint8_t rxGain = 0;
+    readRegister(0x0891, &rxGain, 1);
+    rxGain = (uint8_t)((rxGain & 0x3F) | 0xC0);
+    writeRegister(0x0891, &rxGain, 1);
 
     uint8_t pllTune = 0x08;
-    writeRegister(0x0930, &pllTune, 1); // Fine-tune PLL phase noise and speed up lock acquisition
+    writeRegister(0x0930, &pllTune, 1); // Vendor PLL tuning (register undocumented in the datasheet)
 
+    // 7c. Enable AutoFS via the documented command (SetAutoFS, opcode 0x9E; 0x01 = enable).
+    // Keeps the radio in FS between RX and TX instead of dropping to STDBY_RC, for faster
+    // half-duplex turnaround. (The previous writeRegister(0x08F4) was not the documented path.)
     uint8_t autoFs = 0x01;
-    writeRegister(0x08F4, &autoFs, 1);  // Enable AutoFS (Frequency Synthesis turnaround mode)
+    spiCommand(SX1280_OP_SET_AUTO_FS, &autoFs, 1);
 
     // 8. Set DIO IRQ Params
     uint8_t dioParams[8] = { 0x40, 0x43, 0x40, 0x43, 0x00, 0x00, 0x00, 0x00 };
@@ -498,25 +515,32 @@ bool Sx1280NativePhy::readRx(RxPacket& out) {
 void Sx1280NativePhy::setOutputPowerDbm(int8_t dbm) {
     _cfg.powerDbm = dbm;
     uint8_t txParams[2] = {
-        (uint8_t)(dbm + 18),
-        0xE0 // 24 us ramp time
+        txPowerReg(dbm),
+        0xE0 // RADIO_RAMP_20_US (Table 11-49)
     };
     spiCommand(SX1280_OP_SET_TX_PARAMS, txParams, 2);
 }
 
 void Sx1280NativePhy::setSyncWord(uint16_t uidDerived) {
     if (_cfg.modulation == Modulation::Flrc) {
+        // Datasheet §16.4: with a FLRC sync word at CR 1/2, sync words whose top 16 bits are
+        // 0x8C38 or 0x630E resemble the FLRC preamble and cause elevated PER. Those top 16 bits
+        // are uidDerived (see byte order below), so remap just those two values. The same
+        // uidDerived is derived on TX and RX, so this stays binding-consistent. (CR 3/4 adds
+        // LSB constraints; all XLRS FLRC rates use CR 1/2.)
+        uint16_t flrcSync = uidDerived;
+        if (flrcSync == 0x8C38 || flrcSync == 0x630E) flrcSync ^= 0x0001;
         uint8_t sync[4] = {
-            (uint8_t)(uidDerived >> 8),
-            (uint8_t)(uidDerived),
-            (uint8_t)(~(uidDerived >> 8)),
-            (uint8_t)(~uidDerived)
+            (uint8_t)(flrcSync >> 8),     // SyncWord1[31:24] @ 0x09CF
+            (uint8_t)(flrcSync),          // SyncWord1[23:16] @ 0x09D0
+            (uint8_t)(~(flrcSync >> 8)),  // SyncWord1[15:8]  @ 0x09D1
+            (uint8_t)(~flrcSync)          // SyncWord1[7:0]   @ 0x09D2
         };
-        // FLRC requires 4-byte write to 0x09CF
+        // FLRC requires 4-byte write to 0x09CF (Table 14-42)
         writeRegister(SX1280_REG_FLRC_SYNC_WORD, sync, 4);
 
         // Update packet params for FLRC with syncWordLen = 4, syncWordMatch = 1
-        uint8_t brBwByte = (_cfg.flrcBitrateKbps < 800) ? 0x8A : 0x45;
+        uint8_t brBwByte = (_cfg.flrcBitrateKbps < 800) ? 0x86 : 0x45;
         uint8_t modParams[3] = {
             brBwByte,
             (uint8_t)((_cfg.cr - 2) * 2),
@@ -582,7 +606,7 @@ void Sx1280NativePhy::reconfigure(const PhyConfig& cfg) {
     } else { // FLRC
         uint8_t brBwByte = 0x45; // default 1.3 Mbps
         if (cfg.flrcBitrateKbps < 800) {
-            brBwByte = 0x8A; // 650 kbps
+            brBwByte = 0x86; // FLRC_BR_0_650_BW_0_6 (Table 14-31)
         }
         modParams[0] = brBwByte;
         modParams[1] = (cfg.cr - 2) * 2;

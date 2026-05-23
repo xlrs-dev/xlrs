@@ -119,7 +119,7 @@ Build outputs are written under `build/`, including `xlrs_tx.uf2` and `xlrs_rx.u
 
 ## Flash
 
-Use a USB-capable `picotool` for command-line flashing. The Pico SDK may also build a local `picotool` for file inspection, but that binary is not always built with USB support. `scripts/check-env.sh` reports which case you have.
+Use `scripts/flash.sh` for flashing. It uses a USB-capable `picotool` when available and falls back to copying the UF2 onto the `RPI-RP2` BOOTSEL volume.
 
 Build first:
 
@@ -140,26 +140,42 @@ To flash both, the helper pauses between boards:
 scripts/flash.sh both
 ```
 
-Raw `picotool` commands:
+Force a method if needed:
 
 ```bash
-picotool info build/xlrs_tx.uf2
-picotool load -f build/xlrs_tx.uf2
-picotool reboot
+FLASH_METHOD=uf2 scripts/flash.sh tx
+FLASH_METHOD=picotool scripts/flash.sh rx
 ```
 
-Repeat with `build/xlrs_rx.uf2` for the receiver.
-
-Fallback: put the Pico in BOOTSEL mode and drag the matching UF2 onto the `RPI-RP2` mass-storage drive.
-
-## Verify
+## Monitor
 
 Diagnostics print over USB CDC stdio. The GP8/GP9 UART is reserved for the controller side on TX and CRSF on RX.
 
-After flashing and rebooting, open the Pico USB serial device at 115200 baud. On macOS, for example:
+After flashing and rebooting, identify the Pico USB serial ports:
 
 ```bash
-screen /dev/tty.usbmodemXXXX 115200
+ls /dev/cu.usbmodem* /dev/tty.usbmodem* 2>/dev/null
+```
+
+Monitor one board:
+
+```bash
+TX_PORT=/dev/cu.usbmodem101 scripts/monitor.sh tx
+RX_PORT=/dev/cu.usbmodem102 scripts/monitor.sh rx
+```
+
+Monitor both with prefixed logs:
+
+```bash
+TX_PORT=/dev/cu.usbmodem101 RX_PORT=/dev/cu.usbmodem102 scripts/monitor.sh both
+```
+
+Build, flash, and monitor in one flow:
+
+```bash
+scripts/flash-monitor.sh tx
+scripts/flash-monitor.sh rx
+scripts/flash-monitor.sh both
 ```
 
 Expected startup banners:

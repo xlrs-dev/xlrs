@@ -86,6 +86,8 @@ private:
     void processPacketIn(uint8_t len);
     void checkPacketTimeout();
     void checkLinkDown();
+    uint8_t standardPayloadLen(const crsf_header_t *p) const;
+    uint8_t extendedPayloadLen(const crsf_header_t *p) const;
 
     // Packet Handlers
     void packetChannelsPacked(const crsf_header_t *p);

@@ -174,6 +174,18 @@ void CrsfSerial::checkLinkDown()
     }
 }
 
+uint8_t CrsfSerial::standardPayloadLen(const crsf_header_t *p) const
+{
+    if (!p || p->frame_size < CRSF_FRAME_LENGTH_TYPE_CRC) return 0;
+    return (uint8_t)(p->frame_size - CRSF_FRAME_LENGTH_TYPE_CRC);
+}
+
+uint8_t CrsfSerial::extendedPayloadLen(const crsf_header_t *p) const
+{
+    if (!p || p->frame_size < CRSF_FRAME_LENGTH_EXT_TYPE_CRC) return 0;
+    return (uint8_t)(p->frame_size - CRSF_FRAME_LENGTH_EXT_TYPE_CRC);
+}
+
 void CrsfSerial::processPacketIn(uint8_t len)
 {
     (void)len;
@@ -221,10 +233,8 @@ void CrsfSerial::processPacketIn(uint8_t len)
 
 void CrsfSerial::packetExtendedHeader(const crsf_header_t *p)
 {
-    uint8_t payloadLen = p->frame_size >= CRSF_FRAME_LENGTH_EXT_TYPE_CRC
-        ? (uint8_t)(p->frame_size - CRSF_FRAME_LENGTH_EXT_TYPE_CRC)
-        : 0;
     if (p->frame_size < CRSF_FRAME_LENGTH_EXT_TYPE_CRC) return;
+    uint8_t payloadLen = extendedPayloadLen(p);
 
     uint8_t destination = p->data[0];
     uint8_t origin = p->data[1];
@@ -279,6 +289,8 @@ void CrsfSerial::shiftRxBuffer(uint8_t cnt)
 
 void CrsfSerial::packetChannelsPacked(const crsf_header_t *p)
 {
+    if (standardPayloadLen(p) != CRSF_FRAME_RC_CHANNELS_PAYLOAD_SIZE) return;
+
     const crsf_channels_t *crsfChannels = (const crsf_channels_t *)&p->data;
     uint16_t rcChannels[CRSF_NUM_CHANNELS];
     xlrs::crsfChannelsToRcUs(*crsfChannels, rcChannels);
@@ -297,6 +309,8 @@ void CrsfSerial::packetChannelsPacked(const crsf_header_t *p)
 
 void CrsfSerial::packetLinkStatistics(const crsf_header_t *p)
 {
+    if (standardPayloadLen(p) != CRSF_FRAME_LINK_STATISTICS_PAYLOAD_SIZE) return;
+
     const crsfLinkStatistics_t *link = (crsfLinkStatistics_t *)p->data;
     memcpy(&_linkStatistics, link, sizeof(_linkStatistics));
 
@@ -306,6 +320,8 @@ void CrsfSerial::packetLinkStatistics(const crsf_header_t *p)
 
 void CrsfSerial::packetGps(const crsf_header_t *p)
 {
+    if (standardPayloadLen(p) != CRSF_FRAME_GPS_PAYLOAD_SIZE) return;
+
     const crsf_sensor_gps_t *gps = (crsf_sensor_gps_t *)p->data;
     _gpsSensor.latitude = be32toh(gps->latitude);
     _gpsSensor.longitude = be32toh(gps->longitude);
@@ -321,7 +337,8 @@ void CrsfSerial::packetGps(const crsf_header_t *p)
 // DEVICE_INFO payload: 1 version, 1 param_count, 2 sw, 2 hw, 4 serial, null-term name
 void CrsfSerial::packetDeviceInfo(const crsf_header_t *p)
 {
-    uint8_t payloadOffset = (p->type >= CRSF_FRAMETYPE_DEVICE_PING) ? 2 : 0;
+    bool extended = p->type >= CRSF_FRAMETYPE_DEVICE_PING;
+    uint8_t payloadOffset = extended ? 2 : 0;
     uint8_t payloadLen = p->frame_size >= (uint8_t)(CRSF_FRAME_LENGTH_TYPE_CRC + payloadOffset)
         ? (uint8_t)(p->frame_size - CRSF_FRAME_LENGTH_TYPE_CRC - payloadOffset)
         : 0;
@@ -334,7 +351,7 @@ void CrsfSerial::packetDeviceInfo(const crsf_header_t *p)
     if (nameLen >= payloadLen || payloadLen < nameLen + 1 + 14) return;
     const uint8_t *serial4 = (const uint8_t *)&payload[nameLen + 1];
     if (onDeviceInfo)
-        onDeviceInfo(serial4, name, p->device_addr);  // source: 0xEE=TX, 0xEC=RX
+        onDeviceInfo(serial4, name, extended ? p->data[1] : p->device_addr);  // source: 0xEE=TX, 0xEC=RX
 }
 
 // PARAMETER_SETTINGS_ENTRY: [fieldId, chunksRemaining, parent, type/hidden, label\0, value...]
@@ -363,6 +380,8 @@ void CrsfSerial::packetParameterEntry(const crsf_header_t *p)
 
 void CrsfSerial::packetBattery(const crsf_header_t *p)
 {
+    if (standardPayloadLen(p) != CRSF_FRAME_BATTERY_SENSOR_PAYLOAD_SIZE) return;
+
     // Battery sensor data is 8 bytes, big-endian
     // Format: voltage (16-bit), current (16-bit), capacity (24-bit), remaining (8-bit)
     const uint8_t *data = p->data;
@@ -403,6 +422,8 @@ void CrsfSerial::queuePacket(uint8_t addr, uint8_t type, const void *payload, ui
     if (getPassthroughMode())
         return;
     if (len > CRSF_MAX_PAYLOAD_LEN)
+        return;
+    if (len > 0 && !payload)
         return;
 
     uint8_t buf[CRSF_MAX_PACKET_SIZE];

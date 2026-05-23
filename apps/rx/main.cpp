@@ -348,6 +348,7 @@ static void rf_core_main() {
         static bool bindScanning = false;
         static uint32_t nextBindScanSwitchMs = xlrs::hal::nowMs() + BIND_SCAN_NORMAL_WINDOW_MS;
         static bool bindPacketReceived = false;
+        static bool normalLinkSeen = false;
         static bool telemetryPending = false;
         static xlrs::AppTelemetryMessage pendingTelemetryMessage{};
         xlrs::AppTelemetryMessage telemetryMessage{};
@@ -364,6 +365,14 @@ static void rf_core_main() {
 
         const uint32_t now = xlrs::hal::nowMs();
         if (g_link.state() == xlrs::LinkState::Connected) {
+            normalLinkSeen = true;
+            if (bindScanning) {
+                g_link.setLinkUid(uid);
+                g_phy.setSyncWord(g_link.syncWord());
+                bindScanning = false;
+            }
+            nextBindScanSwitchMs = now + BIND_SCAN_NORMAL_WINDOW_MS;
+        } else if (normalLinkSeen) {
             if (bindScanning) {
                 g_link.setLinkUid(uid);
                 g_phy.setSyncWord(g_link.syncWord());

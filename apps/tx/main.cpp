@@ -127,14 +127,24 @@ static void sendCrsfParameterWriteAck(uint8_t destination, uint8_t parameterNumb
                                        destination, CRSF_ADDRESS_CRSF_TRANSMITTER, payload, len);
 }
 
-static bool saveRfConfigFromCrsf() {
+static bool enqueueAppTelemetryToRf(const xlrs::AppTelemetryMessage& message, const char* label) {
+    if (g_appTelemetryToRf.push(message)) return true;
+
+    printf("[CRSF] ERROR: RF command queue full, dropped %s (drops=%lu)\n",
+           label, (unsigned long)g_appTelemetryToRf.dropped());
+    return false;
+}
+
+static bool saveRfConfigFromCrsf(const char* label) {
     xlrs::RfConfig::refreshChecksum(g_rfConfig);
     bool saved = xlrs::RfConfig::save(g_rfConfig);
     xlrs::AppTelemetryMessage message{};
-    if (xlrs::makeRxConfigMessage(g_rfConfig, message)) {
-        g_appTelemetryToRf.push(message);
+    bool queued = xlrs::makeRxConfigMessage(g_rfConfig, message) &&
+                  enqueueAppTelemetryToRf(message, label);
+    if (!saved) {
+        printf("[CRSF] ERROR: Failed to save RF config for %s\n", label);
     }
-    return saved;
+    return saved && queued;
 }
 
 static void buildRootParameter(uint8_t* payload, uint8_t& len) {
@@ -280,8 +290,11 @@ void onCrsfParameterWrite(uint8_t parameterNumber, const uint8_t* value, uint8_t
         case CRSF_PARAM_RATE:
             if (valueLen >= 1 && value[0] < xlrs::kNumRates) {
                 g_rfConfig.defaultRate = value[0];
-                saveRfConfigFromCrsf();
-                sendCrsfParameterWriteAck(origin, parameterNumber, &g_rfConfig.defaultRate, 1);
+                if (saveRfConfigFromCrsf("rate")) {
+                    sendCrsfParameterWriteAck(origin, parameterNumber, &g_rfConfig.defaultRate, 1);
+                } else {
+                    sendCrsfParameter(origin, parameterNumber);
+                }
             }
             break;
         case CRSF_PARAM_MAX_POWER:
@@ -289,52 +302,70 @@ void onCrsfParameterWrite(uint8_t parameterNumber, const uint8_t* value, uint8_t
                 int8_t requested = (int8_t)value[0];
                 if (requested >= -18 && requested <= 13) {
                     g_rfConfig.maxPowerDbm = requested;
-                    saveRfConfigFromCrsf();
-                    sendCrsfParameterWriteAck(origin, parameterNumber,
-                                              (const uint8_t*)&g_rfConfig.maxPowerDbm, 1);
+                    if (saveRfConfigFromCrsf("max power")) {
+                        sendCrsfParameterWriteAck(origin, parameterNumber,
+                                                  (const uint8_t*)&g_rfConfig.maxPowerDbm, 1);
+                    } else {
+                        sendCrsfParameter(origin, parameterNumber);
+                    }
                 }
             }
             break;
         case CRSF_PARAM_DYNAMIC_POWER:
             if (valueLen >= 1 && value[0] <= 1) {
                 g_rfConfig.dynamicPower = value[0];
-                saveRfConfigFromCrsf();
-                sendCrsfParameterWriteAck(origin, parameterNumber, &g_rfConfig.dynamicPower, 1);
+                if (saveRfConfigFromCrsf("dynamic power")) {
+                    sendCrsfParameterWriteAck(origin, parameterNumber, &g_rfConfig.dynamicPower, 1);
+                } else {
+                    sendCrsfParameter(origin, parameterNumber);
+                }
             }
             break;
         case CRSF_PARAM_REGION:
             if (valueLen >= 1 && value[0] <= 1) {
                 g_rfConfig.region = value[0];
-                saveRfConfigFromCrsf();
-                sendCrsfParameterWriteAck(origin, parameterNumber, &g_rfConfig.region, 1);
+                if (saveRfConfigFromCrsf("region")) {
+                    sendCrsfParameterWriteAck(origin, parameterNumber, &g_rfConfig.region, 1);
+                } else {
+                    sendCrsfParameter(origin, parameterNumber);
+                }
             }
             break;
         case CRSF_PARAM_FAILSAFE:
             if (valueLen >= 1 && value[0] <= 1) {
                 g_rfConfig.failsafeMode = value[0];
-                saveRfConfigFromCrsf();
-                sendCrsfParameterWriteAck(origin, parameterNumber, &g_rfConfig.failsafeMode, 1);
+                if (saveRfConfigFromCrsf("failsafe")) {
+                    sendCrsfParameterWriteAck(origin, parameterNumber, &g_rfConfig.failsafeMode, 1);
+                } else {
+                    sendCrsfParameter(origin, parameterNumber);
+                }
             }
             break;
         case CRSF_PARAM_REBOOT:
             if (valueLen >= 1 && (value[0] == CRSF_COMMAND_START || value[0] == CRSF_COMMAND_CONFIRM)) {
                 xlrs::AppTelemetryMessage message{};
-                if (xlrs::makeRebootMessage(message)) {
-                    g_appTelemetryToRf.push(message);
+                if (xlrs::makeRebootMessage(message) &&
+                    enqueueAppTelemetryToRf(message, "reboot")) {
+                    sendCrsfParameter(origin, parameterNumber);
+                    xlrs::hal::sleepMs(1000);
+                    watchdog_reboot(0, 0, 0);
+                } else {
+                    sendCrsfParameter(origin, parameterNumber);
                 }
-                sendCrsfParameter(origin, parameterNumber);
-                xlrs::hal::sleepMs(1000);
-                watchdog_reboot(0, 0, 0);
             }
             break;
         case CRSF_PARAM_BIND:
             if (valueLen >= 1 && value[0] == CRSF_COMMAND_START) {
                 uint8_t uid[xlrs::LINK_UID_SIZE] = {};
                 xlrs::AppTelemetryMessage message{};
-                if (g_bindingStore.getBindingUid(uid) && xlrs::makeStartBindMessage(uid, message)) {
-                    g_appTelemetryToRf.push(message);
+                if (g_bindingStore.getBindingUid(uid) &&
+                    xlrs::makeStartBindMessage(uid, message) &&
+                    enqueueAppTelemetryToRf(message, "bind")) {
+                    sendCrsfParameter(origin, parameterNumber);
+                } else {
+                    printf("[CRSF] ERROR: Failed to start bind command\n");
+                    sendCrsfParameter(origin, parameterNumber);
                 }
-                sendCrsfParameter(origin, parameterNumber);
             }
             break;
         default:

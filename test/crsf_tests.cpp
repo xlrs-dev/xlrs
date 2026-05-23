@@ -113,6 +113,9 @@ static int s_linkUpCallbacks = 0;
 static int s_linkDownCallbacks = 0;
 static int s_oobCallbacks = 0;
 static int s_rawCallbacks = 0;
+static int s_linkStatisticsCallbacks = 0;
+static int s_gpsCallbacks = 0;
+static int s_batteryCallbacks = 0;
 static int s_devicePingCallbacks = 0;
 static int s_parameterReadCallbacks = 0;
 static int s_parameterWriteCallbacks = 0;
@@ -136,6 +139,9 @@ static void resetCallbacks() {
     s_linkDownCallbacks = 0;
     s_oobCallbacks = 0;
     s_rawCallbacks = 0;
+    s_linkStatisticsCallbacks = 0;
+    s_gpsCallbacks = 0;
+    s_batteryCallbacks = 0;
     s_devicePingCallbacks = 0;
     s_parameterReadCallbacks = 0;
     s_parameterWriteCallbacks = 0;
@@ -161,6 +167,9 @@ static CrsfSerial makeCrsf(xlrs::hal::SerialPort& port) {
     crsf.onLinkDown = []() { ++s_linkDownCallbacks; };
     crsf.onOobData = [](uint8_t) { ++s_oobCallbacks; };
     crsf.onPacketRaw = [](const uint8_t*, uint8_t) { ++s_rawCallbacks; };
+    crsf.onPacketLinkStatistics = [](crsfLinkStatistics_t*) { ++s_linkStatisticsCallbacks; };
+    crsf.onPacketGps = [](crsf_sensor_gps_t*) { ++s_gpsCallbacks; };
+    crsf.onPacketBattery = [](float, float, uint32_t, uint8_t) { ++s_batteryCallbacks; };
     crsf.onDevicePing = [](uint8_t destination, uint8_t origin) {
         ++s_devicePingCallbacks;
         s_destination = destination;
@@ -309,6 +318,33 @@ static void test_crsf_extended_device_ping_and_parameters() {
     TEST_ASSERT_EQUAL_UINT8(CRSF_COMMAND_START, s_value[0]);
 }
 
+static void test_crsf_short_fixed_payload_frames_are_rejected() {
+    xlrs::hal::SerialPort port;
+    CrsfSerial crsf = makeCrsf(port);
+
+    uint8_t shortPayload[2] = {0xAA, 0x55};
+    feed(crsf, makeCrsfFrame(CRSF_ADDRESS_FLIGHT_CONTROLLER,
+                             CRSF_FRAMETYPE_RC_CHANNELS_PACKED,
+                             shortPayload, sizeof(shortPayload)));
+    feed(crsf, makeCrsfFrame(CRSF_ADDRESS_FLIGHT_CONTROLLER,
+                             CRSF_FRAMETYPE_LINK_STATISTICS,
+                             shortPayload, sizeof(shortPayload)));
+    feed(crsf, makeCrsfFrame(CRSF_ADDRESS_FLIGHT_CONTROLLER,
+                             CRSF_FRAMETYPE_GPS,
+                             shortPayload, sizeof(shortPayload)));
+    feed(crsf, makeCrsfFrame(CRSF_ADDRESS_FLIGHT_CONTROLLER,
+                             CRSF_FRAMETYPE_BATTERY_SENSOR,
+                             shortPayload, sizeof(shortPayload)));
+
+    TEST_ASSERT_EQUAL_INT(4, s_rawCallbacks);
+    TEST_ASSERT_EQUAL_INT(0, s_channelsCallbacks);
+    TEST_ASSERT_EQUAL_INT(0, s_linkUpCallbacks);
+    TEST_ASSERT_EQUAL_INT(0, s_linkStatisticsCallbacks);
+    TEST_ASSERT_EQUAL_INT(0, s_gpsCallbacks);
+    TEST_ASSERT_EQUAL_INT(0, s_batteryCallbacks);
+    TEST_ASSERT_FALSE(crsf.isLinkUp());
+}
+
 static void test_crsf_device_info_and_parameter_entry_parsing() {
     xlrs::hal::SerialPort port;
     CrsfSerial crsf = makeCrsf(port);
@@ -333,7 +369,7 @@ static void test_crsf_device_info_and_parameter_entry_parsing() {
     feed(crsf, info);
     TEST_ASSERT_EQUAL_INT(1, s_deviceInfoCallbacks);
     TEST_ASSERT_EQUAL_STRING("XLRS TX", s_name);
-    TEST_ASSERT_EQUAL_UINT8(CRSF_SYNC_BYTE, s_sourceAddr);
+    TEST_ASSERT_EQUAL_UINT8(CRSF_ADDRESS_CRSF_TRANSMITTER, s_sourceAddr);
 
     uint8_t entryPayload[40] = {};
     uint8_t entryLen = 0;
@@ -388,6 +424,12 @@ static void test_crsf_queue_packet_and_extended_packet() {
     TEST_ASSERT_EQUAL_UINT8(CRSF_ADDRESS_RADIO_TRANSMITTER, ext[3]);
     TEST_ASSERT_EQUAL_UINT8(CRSF_ADDRESS_CRSF_TRANSMITTER, ext[4]);
     TEST_ASSERT_EQUAL_UINT8(calcCrsfCrc(&ext[2], ext[1] - 1), ext.back());
+
+    xlrs::hal::resetHostSerial();
+    crsf.queuePacket(CRSF_ADDRESS_RADIO_TRANSMITTER,
+                     CRSF_FRAMETYPE_LINK_STATISTICS,
+                     nullptr, sizeof(stats));
+    TEST_ASSERT_TRUE(xlrs::hal::hostSerialOut().empty());
 }
 
 void setUp() {
@@ -404,6 +446,7 @@ int main() {
     RUN_TEST(test_crsf_parser_discards_noise_and_bad_crc);
     RUN_TEST(test_crsf_packet_timeout_flushes_partial_frame);
     RUN_TEST(test_crsf_extended_device_ping_and_parameters);
+    RUN_TEST(test_crsf_short_fixed_payload_frames_are_rejected);
     RUN_TEST(test_crsf_device_info_and_parameter_entry_parsing);
     RUN_TEST(test_crsf_queue_packet_and_extended_packet);
     return UNITY_END();

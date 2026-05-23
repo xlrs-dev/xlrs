@@ -29,6 +29,8 @@ struct LinkStats {
     uint8_t  lqDown;          // downlink LQ 0..100 (TX-measured)
     int16_t  rssiDbm;         // smoothed (EMA) RSSI
     int8_t   snr;             // LoRa only; 0 in FLRC
+    int16_t  downlinkRssiDbm; // TX-local RSSI of RX->TX downlink telemetry packets
+    int8_t   downlinkSnr;     // TX-local SNR of RX->TX downlink telemetry packets
     uint8_t  rateIndex;       // index into kRates
     uint16_t missedDeadlines; // slot prep that missed the RF slot deadline (timing health)
     uint16_t rxQueueDrops;    // RfToApp ring overflow count

@@ -117,7 +117,9 @@ static void test_link_telemetry_downlink() {
     linkUidFromPhrase("Kikobot-02", uid);
     SimEnvironment env;
     env.setup(uid, 2);
-    env.txPhy.setRssi(-72);
+    env.txPhy.setRssi(-72);  // TX->RX uplink RSSI measured by RX.
+    env.rxPhy.setRssi(-64);  // RX->TX downlink RSSI measured by TX.
+    env.rxPhy.setSnr(6);
 
     uint16_t ch[4] = {300, 1500, 2047, 0};
     env.tx.setChannels(ch, 4);
@@ -131,6 +133,8 @@ static void test_link_telemetry_downlink() {
 
     TEST_ASSERT_TRUE(env.tx.stats().lqDown > 0);
     TEST_ASSERT_EQUAL_INT16(-72, env.tx.stats().rssiDbm);
+    TEST_ASSERT_EQUAL_INT16(-64, env.tx.stats().downlinkRssiDbm);
+    TEST_ASSERT_EQUAL_INT8(6, env.tx.stats().downlinkSnr);
     TEST_ASSERT_TRUE(env.tx.stats().lqUp >= 90);
 }
 

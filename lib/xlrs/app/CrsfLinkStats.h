@@ -17,9 +17,9 @@ inline void buildCrsfLinkStatistics(const LinkStats& s, uint8_t out[10]) {
     out[4] = 0;                                            // active_antenna
     out[5] = s.rateIndex;                                  // rf_mode
     out[6] = 0;                                            // uplink_TX_power index
-    out[7] = 0;                                            // downlink_RSSI
+    out[7] = (uint8_t)(s.downlinkRssiDbm <= 0 ? -s.downlinkRssiDbm : 0);
     out[8] = s.lqDown;                                     // downlink_LQ
-    out[9] = 0;                                            // downlink_SNR
+    out[9] = (uint8_t)s.downlinkSnr;
 }
 
 } // namespace xlrs

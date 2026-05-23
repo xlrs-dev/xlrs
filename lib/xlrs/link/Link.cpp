@@ -378,6 +378,8 @@ bool Link::processRxPayload(uint32_t tick, uint16_t pos, const uint8_t* data, ui
         _gotValidTelemetryThisTick = true;
         if (_role == Role::Tx) {                   // RX-reported uplink view
             _stats.lqUp = upLq; _stats.rssiDbm = upRssi; _stats.snr = upSnr;
+            _stats.downlinkRssiDbm = rssi;
+            _stats.downlinkSnr = snr;
             _lastRxTick = tick; _everRx = true;
             _txPowerDbm = _power.update(upLq, upRssi);
             if (len >= 5) {

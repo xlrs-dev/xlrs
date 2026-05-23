@@ -8,7 +8,7 @@ current XLRS TX and RX firmware.
 The firmware in this repository is only the radio bridge:
 
 ```text
-Controller UART -> xlrs_tx -> SX1280 RF link -> xlrs_rx -> CRSF UART -> Flight controller
+Controller UART or CRSF -> xlrs_tx -> SX1280 RF link -> xlrs_rx -> CRSF UART -> Flight controller
 ```
 
 Handset UI, model memory, web configuration, battery management, and flight
@@ -41,8 +41,20 @@ Default SX1280 interface:
 RX status LED defaults to GP13.
 
 All defaults are CMake cache variables and can be overridden when configuring
-the build. The TX controller protocol defaults to the custom UART protocol. Build
-with `-DXLRS_TX_CONTROLLER_PROTOCOL=CRSF` to use controller-facing CRSF instead.
+the build. The TX controller protocol is selected with
+`XLRS_TX_CONTROLLER_PROTOCOL`:
+
+| Value | Controller-facing behavior |
+| --- | --- |
+| `UART` | Custom XLRS controller UART protocol. This is the default. |
+| `CRSF` | Controller-facing CRSF for EdgeTX/OpenTX-style handsets and module bays. |
+
+Examples:
+
+```bash
+cmake -S . -B build -G Ninja -DXLRS_TX_CONTROLLER_PROTOCOL=UART
+cmake -S . -B build-crsf -G Ninja -DXLRS_TX_CONTROLLER_PROTOCOL=CRSF
+```
 
 ## Binding
 
@@ -200,11 +212,11 @@ Implemented today:
   downlink telemetry. TX writes those frames back to the controller CRSF port.
 
 Current limitation: parameter writes persist config to flash, but RF
-rate/region/power/failsafe changes apply after reboot. Bind RX sends the TX
-module's current binding identity over the already connected link, so it is not
-an over-the-air discovery workflow for an unconnected RX. A dedicated XLRS Lua
+rate/region/power/failsafe changes apply after reboot. A dedicated XLRS Lua
 script is not implemented yet. XLRS currently carries 8 OTA `rc_channel` values,
-so CRSF channels 9-16 are not transmitted over the XLRS uplink.
+so CRSF channels 9-16 are not transmitted over the XLRS uplink. See
+[CRSF Features](../crsf/index.md) and [CRSF Binding](../crsf/binding.md) for the
+CRSF-specific support matrix.
 
 ## RX Flight Controller Interface
 

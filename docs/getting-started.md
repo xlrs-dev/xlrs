@@ -3,7 +3,7 @@
 XLRS is the firmware for a paired TX/RX radio bridge:
 
 ```text
-Controller UART -> xlrs_tx -> SX1280 RF link -> xlrs_rx -> CRSF UART -> Flight controller
+Controller UART or CRSF -> xlrs_tx -> SX1280 RF link -> xlrs_rx -> CRSF UART -> Flight controller
 ```
 
 The fastest path for a new contributor is:

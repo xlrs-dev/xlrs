@@ -1,6 +1,7 @@
 # TX Controller CRSF
 
-The TX firmware can be built with a controller-facing CRSF port:
+The TX firmware can be built with a controller-facing CRSF port instead of the
+default custom controller UART protocol:
 
 ```bash
 cmake -S . -B build -G Ninja -DXLRS_TX_CONTROLLER_PROTOCOL=CRSF
@@ -33,6 +34,10 @@ Implemented today:
   - Reboot command.
 - TX forwards critical RF config writes to RX over the existing XLRS telemetry
   transport. RX persists them to flash.
+- Bind RX puts the TX module into a temporary OTA bind-transmit window. An
+  unconnected RX periodically scans the shared XLRS bind identity, accepts a
+  valid bind frame, persists the offered Link UID, and reboots back to normal
+  operation.
 - RX forwards valid flight-controller CRSF telemetry frames over downlink
   telemetry. TX writes those frames back to the controller CRSF port.
 
@@ -42,12 +47,10 @@ Current limitations:
   `XLRS_TX_CONTROLLER_PROTOCOL=CRSF` is selected at configure time.
 - CRSF parameter writes persist config to flash on both modules. RF
   rate/region/power/failsafe changes are applied after reboot.
-- Bind RX puts the TX module into a temporary OTA bind-transmit window. An
-  unconnected RX periodically scans the shared XLRS bind identity, accepts a
-  valid bind frame, persists the offered Link UID, and reboots back to normal
-  operation.
 - A dedicated XLRS Lua script is not implemented yet.
 - XLRS currently carries 8 OTA `rc_channel` values. CRSF channels 9-16 are parsed
   by the CRSF decoder but are not transmitted over the XLRS uplink.
 
 See [index.md](index.md) for the complete current interface reference.
+For the CRSF support matrix and binding flow, see
+[CRSF Features](../crsf/index.md) and [CRSF Binding](../crsf/binding.md).

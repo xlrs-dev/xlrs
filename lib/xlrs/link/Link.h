@@ -114,7 +114,8 @@ private:
     RateConfig   _rate{};
     uint8_t      _rateIndex = 0;
     uint8_t      _nextRateIndex = 0;
-    uint32_t     _rateSwitchTick = 0;
+    uint32_t     _rateSwitchCycle = 0;
+    uint32_t     _switchCyclesRemaining = 0;
     uint32_t     _tick = 0;
     DynamicPower _power;                // TX-side dynamic power
     uint16_t     _syncWord  = 0;
@@ -139,6 +140,8 @@ private:
     bool         _gotRcThisTick = false;
     bool         _gotSyncThisTick = false;
     bool         _gotTlmThisTick = false;
+    bool         _gotValidUplinkThisTick = false;
+    bool         _gotValidTelemetryThisTick = false;
     uint32_t     _consecutiveMissedUplinks = 0;
     uint32_t     _consecutiveMissedTelemetry = 0;
     StubbornSender   _tlmSender;

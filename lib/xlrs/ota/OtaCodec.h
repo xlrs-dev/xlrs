@@ -26,7 +26,7 @@ inline bool otaDecodeRc(const uint8_t* in, uint8_t len, uint16_t* ch, uint8_t n)
     return true;
 }
 
-// Sync beacon: [header][fhssIndex][rateIndex][nextRateIndex][switchTick:4][tlmRatioDenom][uidCrc] = 10 bytes.
+// Sync beacon: [header][fhssIndex][rateIndex][nextRateIndex][switchCycles:4][tlmRatioDenom][uidCrc] = 10 bytes.
 inline uint8_t otaEncodeSync(const SyncPayload& s, uint8_t* out) {
     out[0] = otaMakeHeader(OtaType::Sync);
     out[1] = s.fhssIndex;

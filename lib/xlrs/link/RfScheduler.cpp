@@ -107,7 +107,18 @@ bool RfScheduler::begin(IRadioPhy* phy, Fhss* fhss, Link* link, uint8_t rateInde
 void RfScheduler::onTick(uint32_t tick) {
     if (!_link) return;
 
-    // Dynamically adopt rate changes initiated by Link (either TX rate request or RX rate adoption)
+    _tick = tick;
+    if (_timer) {
+        _tickStartUs = _timer->nowUs();
+    } else {
+        _tickStartUs = 0;
+    }
+
+    // 1. Advance timing/hop position at the start of the tick slot.
+    _link->onTick(tick);
+
+    // Dynamically adopt rate changes initiated by Link after onTick(), because
+    // synchronized rate switches are applied exactly on the slot boundary.
     if (_link->stats().rateIndex != _rateIndex) {
         _rateIndex = _link->stats().rateIndex;
         _rate = kRates[_rateIndex];
@@ -121,16 +132,6 @@ void RfScheduler::onTick(uint32_t tick) {
             _phy->reconfigure(phyCfg);
         }
     }
-
-    _tick = tick;
-    if (_timer) {
-        _tickStartUs = _timer->nowUs();
-    } else {
-        _tickStartUs = 0;
-    }
-
-    // 1. Advance timing/hop position at the start of the tick slot.
-    _link->onTick(tick);
 
     // 2. Determine frequency and slot for this tick.
     float freq = _link->freqForTick(tick);

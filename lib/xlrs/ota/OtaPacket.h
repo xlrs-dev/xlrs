@@ -47,7 +47,7 @@ struct __attribute__((packed)) SyncPayload {
     uint8_t  fhssIndex;    // current hop index
     uint8_t  rateIndex;    // active rate index
     uint8_t  nextRateIndex;// pending rate index (switch target)
-    uint32_t switchTick;   // absolute tick boundary for activation (0 if none)
+    uint32_t switchTick;   // sequence cycles until activation (0 if none)
     uint8_t  tlmRatioDenom;// telemetry slot ratio (1:N)
     uint8_t  uidCrc;       // CRC of the bind UID
 };

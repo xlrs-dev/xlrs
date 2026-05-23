@@ -36,7 +36,8 @@ void Link::begin(Role role, const uint8_t uid[8], uint8_t rateIndex, int8_t maxP
     if (rateIndex >= kNumRates) rateIndex = 0;
     _rateIndex = rateIndex;
     _nextRateIndex = rateIndex;
-    _rateSwitchTick = 0;
+    _rateSwitchCycle = 0;
+    _switchCyclesRemaining = 0;
     _tick = 0;
     _rate     = kRates[rateIndex];
     _syncWord = syncWordFromUid(uid);
@@ -72,14 +73,16 @@ void Link::requestRate(uint8_t rateIndex) {
     if (rateIndex >= kNumRates) return;
     if (rateIndex == _rateIndex) {
         _nextRateIndex = _rateIndex;
-        _rateSwitchTick = 0;
+        _rateSwitchCycle = 0;
+        _switchCyclesRemaining = 0;
         return;
     }
     _nextRateIndex = rateIndex;
-    // Schedule the switch to happen in the future, aligned to an FHSS sequence boundary (pos == 0).
-    // An FHSS sequence period in ticks is hopInterval() * seqLen.
+    // Schedule by FHSS sequence cycle, not raw local tick. The TX announces a
+    // countdown in Sync, and the RX decrements it on its own synchronized pos-0
+    // boundaries, so independent boot-time tick offsets do not mistime the switch.
     const uint16_t seqPeriod = hopInterval() * _fhss.count();
-    _rateSwitchTick = ((_tick / seqPeriod) + 3) * seqPeriod;
+    _rateSwitchCycle = (_tick / seqPeriod) + 3;
 }
 
 uint16_t Link::hopInterval() const { return _rate.fhssHopInterval ? _rate.fhssHopInterval : 1; }
@@ -97,20 +100,37 @@ float Link::freqForPos(uint16_t pos) const {
 
 void Link::onTick(uint32_t tick) {
     _tick = tick;
-    
-    // Check if scheduled rate switch activation boundary is reached
-    if (_rateSwitchTick > 0 && tick >= _rateSwitchTick) {
-        _rateIndex = _nextRateIndex;
-        _rate = kRates[_rateIndex];
-        _stats.rateIndex = _rateIndex;
-        _rateSwitchTick = 0;
-    }
 
     const uint16_t hop = hopInterval();
     const uint8_t seqLen = _fhss.count();
-    if (_role == Role::Rx && _locked && (tick % hop) == 0) {
+    const bool atHopBoundary = (tick % hop) == 0;
+
+    if (_role == Role::Rx && _locked && atHopBoundary) {
         _rxPos = (uint16_t)((_rxPos + 1) % seqLen);
     }
+
+    const bool atSequenceBoundary = atHopBoundary &&
+        ((_role == Role::Tx) ? (txPos(tick) == 0) : (_locked && _rxPos == 0));
+
+    if (_role == Role::Tx) {
+        const uint16_t seqPeriod = hop * seqLen;
+        const uint32_t cycle = tick / seqPeriod;
+        if (_rateSwitchCycle > 0 && atSequenceBoundary && cycle >= _rateSwitchCycle) {
+            _rateIndex = _nextRateIndex;
+            _rate = kRates[_rateIndex];
+            _stats.rateIndex = _rateIndex;
+            _rateSwitchCycle = 0;
+            _switchCyclesRemaining = 0;
+        }
+    } else if (_locked && atSequenceBoundary && _switchCyclesRemaining > 0) {
+        _switchCyclesRemaining--;
+        if (_switchCyclesRemaining == 0 && _nextRateIndex < kNumRates && _nextRateIndex != _rateIndex) {
+            _rateIndex = _nextRateIndex;
+            _rate = kRates[_rateIndex];
+            _stats.rateIndex = _rateIndex;
+        }
+    }
+
     _stats.fhssIndex = (_role == Role::Tx) ? (uint8_t)txPos(tick) : (uint8_t)_rxPos;
     _stats.txPowerDbm = _txPowerDbm;
 }
@@ -141,7 +161,12 @@ bool Link::getTxPayload(uint32_t tick, uint16_t pos, uint8_t* outBuf, uint8_t& o
             s.fhssIndex     = (uint8_t)pos;
             s.rateIndex     = _rateIndex;
             s.nextRateIndex = _nextRateIndex;
-            s.switchTick    = _rateSwitchTick;
+            s.switchTick    = 0;
+            if (_rateSwitchCycle > 0) {
+                const uint16_t seqPeriod = hopInterval() * _fhss.count();
+                const uint32_t cycle = tick / seqPeriod;
+                s.switchTick = (_rateSwitchCycle > cycle) ? (_rateSwitchCycle - cycle) : 1;
+            }
             s.tlmRatioDenom = _rate.tlmRatioDenom;
             s.uidCrc        = _uidCrc;
             outLen = otaEncodeSync(s, outBuf);
@@ -235,25 +260,27 @@ bool Link::processRxPayload(uint32_t tick, uint16_t pos, const uint8_t* data, ui
             // Handle coordinated rate switch from sync packet
             if (s.switchTick > 0 && s.nextRateIndex < kNumRates) {
                 _nextRateIndex = s.nextRateIndex;
-                _rateSwitchTick = s.switchTick;
+                _switchCyclesRemaining = s.switchTick;
             } else {
                 _nextRateIndex = s.rateIndex;
-                _rateSwitchTick = 0;
+                _switchCyclesRemaining = 0;
             }
 
-            // Fallback: If RX boots late or was completely out of sync, adopt TX active rate immediately
-            if (s.rateIndex < kNumRates && s.rateIndex != _rateIndex && s.switchTick <= tick) {
+            // Fallback: If RX boots late or was completely out of sync, adopt TX active rate immediately.
+            if (s.rateIndex < kNumRates && s.rateIndex != _rateIndex && s.switchTick == 0) {
                 _rateIndex = s.rateIndex; _rate = kRates[s.rateIndex];
                 _stats.rateIndex = s.rateIndex;
                 _nextRateIndex = s.rateIndex;
-                _rateSwitchTick = 0;
+                _switchCyclesRemaining = 0;
             }
         }
         return true;
     } else if (otaDecodeTlmDown(data, len, &upLq, &upRssi, &upSnr)) {
         _gotTlmThisTick = true;
+        _gotValidTelemetryThisTick = true;
         if (_role == Role::Tx) {                   // RX-reported uplink view
             _stats.lqUp = upLq; _stats.rssiDbm = upRssi; _stats.snr = upSnr;
+            _lastRxTick = tick; _everRx = true;
             _txPowerDbm = _power.update(upLq, upRssi);
             if (len >= 5) {
                 _receivedAckSeq = data[4];
@@ -274,6 +301,11 @@ bool Link::processRxPayload(uint32_t tick, uint16_t pos, const uint8_t* data, ui
                 uint8_t ackSeq = 0;
                 _tlmReceiver.processChunk(chunk, ackSeq);
                 _localAckSeq = ackSeq;
+                if (_role == Role::Rx && slotKind(tick, pos) == SlotKind::Uplink) {
+                    _gotValidUplinkThisTick = true;
+                } else if (_role == Role::Tx && slotKind(tick, pos) == SlotKind::Telemetry) {
+                    _gotValidTelemetryThisTick = true;
+                }
                 _lastRxTick = tick; _everRx = true;
                 return true;
             }
@@ -290,6 +322,7 @@ bool Link::processRxPayload(uint32_t tick, uint16_t pos, const uint8_t* data, ui
                 uint8_t decSeq = 0;
                 if (unpackChannels8Byte(decBuf, rxch, decSeq)) {
                     _gotRcThisTick = true;
+                    _gotValidUplinkThisTick = true;
                     memcpy(_ch, rxch, sizeof(uint16_t) * RC_CHANNELS);
                     _lastRxTick = tick; _everRx = true;
                     _stats.rssiDbm = rssi; _stats.snr = snr;
@@ -308,6 +341,7 @@ bool Link::processRxPayload(uint32_t tick, uint16_t pos, const uint8_t* data, ui
             if (c->open(decBuf + 1, p, Nonce96::build(_sessionSalt, tick, pos))) {
                 if (otaDecodeRc(decBuf, len, rxch, RC_CHANNELS)) {
                     _gotRcThisTick = true;
+                    _gotValidUplinkThisTick = true;
                     memcpy(_ch, rxch, sizeof(uint16_t) * RC_CHANNELS);
                     _lastRxTick = tick; _everRx = true;
                     _stats.rssiDbm = rssi; _stats.snr = snr;
@@ -326,9 +360,9 @@ void Link::service(uint32_t tick) {
     if (_role == Role::Tx) {
         const uint16_t txPos = (uint16_t)((tick / hop) % seqLen);
         if (slotKind(tick, txPos) == SlotKind::Telemetry) {     // downlink LQ over tlm slots
-            _lqDown.update(_gotTlmThisTick);
+            _lqDown.update(_gotValidTelemetryThisTick);
             _stats.lqDown = _lqDown.lq();
-            if (_gotTlmThisTick) {
+            if (_gotValidTelemetryThisTick) {
                 _consecutiveMissedTelemetry = 0;
             } else {
                 _consecutiveMissedTelemetry++;
@@ -341,12 +375,13 @@ void Link::service(uint32_t tick) {
     } else {
         // RX uplink LQ: count UPLINK slots only (Sync/Telemetry excluded) — once locked.
         if (_locked && slotKind(tick, _rxPos) == SlotKind::Uplink) {
-            _lq.update(_gotRcThisTick);
+            _lq.update(_gotValidUplinkThisTick);
             _stats.lqUp = _lq.lq();
         }
     }
 
-    const bool     got    = _gotRcThisTick || _gotSyncThisTick;
+    const bool got = _gotRcThisTick || _gotSyncThisTick ||
+                     _gotValidUplinkThisTick || _gotValidTelemetryThisTick;
     
     if (got) {
         _consecutiveMissedUplinks = 0;
@@ -384,6 +419,8 @@ void Link::service(uint32_t tick) {
     _gotRcThisTick = false;
     _gotSyncThisTick = false;
     _gotTlmThisTick = false;
+    _gotValidUplinkThisTick = false;
+    _gotValidTelemetryThisTick = false;
     _stats.txPowerDbm = _txPowerDbm;
 }
 

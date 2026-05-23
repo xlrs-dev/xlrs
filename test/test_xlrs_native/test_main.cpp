@@ -531,6 +531,38 @@ static void test_link_stubborn_telemetry_integrated() {
     TEST_ASSERT_EQUAL_STRING_LEN(tlmData, (char*)rcvBuf, tlmLen);
 }
 
+static void test_msp_frames_count_toward_lq() {
+    uint8_t uid[LINK_UID_SIZE]; linkUidFromPhrase("Kikobot-02", uid);
+    SimEnvironment env;
+    env.setup(uid, 2);
+
+    for (uint32_t t = 1; t <= 120; ++t) simTick(env, t);
+    TEST_ASSERT_TRUE(env.rx.state() == LinkState::Connected);
+
+    const uint16_t baselineMisses = env.tx.stats().telemetryMisses;
+    const int8_t baselinePower = env.tx.txPowerDbm();
+
+    const char* downlink = "RX stubborn telemetry should not look like packet loss";
+    env.rx.queueTelemetry((const uint8_t*)downlink, strlen(downlink));
+    for (uint32_t t = 121; t <= 900; ++t) simTick(env, t);
+
+    uint8_t downBuf[128] = {0};
+    size_t downLen = 0;
+    TEST_ASSERT_TRUE(env.tx.getTelemetry(downBuf, downLen));
+    TEST_ASSERT_EQUAL_UINT16(baselineMisses, env.tx.stats().telemetryMisses);
+    TEST_ASSERT_TRUE(env.tx.txPowerDbm() <= baselinePower);
+    TEST_ASSERT_TRUE(env.tx.stats().lqDown >= 95);
+
+    const char* uplink = "TX MSP burst should not reduce uplink LQ";
+    env.tx.queueTelemetry((const uint8_t*)uplink, strlen(uplink));
+    for (uint32_t t = 901; t <= 1700; ++t) simTick(env, t);
+
+    uint8_t upBuf[128] = {0};
+    size_t upLen = 0;
+    TEST_ASSERT_TRUE(env.rx.getTelemetry(upBuf, upLen));
+    TEST_ASSERT_TRUE(env.rx.stats().lqUp >= 95);
+}
+
 // ---- M8: ChaCha20-Poly1305 against the RFC 8439 §2.8.2 known-answer vector ----
 static void test_chacha20poly1305_rfc8439() {
     uint8_t key[32];   for (int i = 0; i < 32; ++i) key[i] = (uint8_t)(0x80 + i);
@@ -692,6 +724,7 @@ int main(int, char**) {
     RUN_TEST(test_ota_8_byte_packing);
     RUN_TEST(test_stubborn_telemetry_reliability);
     RUN_TEST(test_link_stubborn_telemetry_integrated);
+    RUN_TEST(test_msp_frames_count_toward_lq);
     RUN_TEST(test_pfd_step_settles);
     RUN_TEST(test_pfd_nulls_drift);
     RUN_TEST(test_lq_tracker);

@@ -52,10 +52,14 @@ bool RfScheduler::begin(IRadioPhy* phy, Fhss* fhss, Link* link, uint8_t rateInde
     s_activeScheduler = this;
 
 #if defined(XLRS_PICO_SDK)
-    // On hardware, run a true Tiny ISR: only increment the event counter.
+    // On hardware, run a true Tiny ISR: latch the fire timestamp, then bump the event counter.
+    // The timestamp is captured HERE (in ISR context) — not later in onTick() — so the PFD's
+    // phase reference is the true tick time, free of task wake-latency jitter (debugging.md §1.1).
     if (_timer) {
         _timer->begin(_rate.intervalUs, []() {
             if (s_activeScheduler) {
+                s_activeScheduler->_lastTickFireUs.store((uint32_t)hal::nowUs(),
+                                                         std::memory_order_release);
                 s_activeScheduler->_tickEvents.fetch_add(1, std::memory_order_acq_rel);
             }
         });
@@ -105,11 +109,15 @@ void RfScheduler::onTick(uint32_t tick) {
     if (!_link) return;
 
     _tick = tick;
-    if (_timer) {
-        _tickStartUs = _timer->nowUs();
-    } else {
-        _tickStartUs = 0;
-    }
+#if defined(XLRS_PICO_SDK)
+    // Use the ISR-latched fire time (set in the timer callback above), not nowUs() sampled here:
+    // this slot is being processed some wake-latency after the timer actually fired.
+    _tickStartUs = _lastTickFireUs.load(std::memory_order_acquire);
+#else
+    // Sim/host: tests call onTick() directly with the clock already set, so nowUs() IS the
+    // expected tick time. (The timer ISR path isn't exercised for these direct calls.)
+    _tickStartUs = _timer ? _timer->nowUs() : 0;
+#endif
 
     // 1. Advance timing/hop position at the start of the tick slot.
     _link->onTick(tick);
@@ -260,11 +268,22 @@ void RfScheduler::poll() {
     uint32_t currentTicks = _tickEvents.load(std::memory_order_acquire);
     if (currentTicks > _lastProcessedTickEvent) {
         uint32_t diff = currentTicks - _lastProcessedTickEvent;
-        for (uint32_t i = 0; i < diff; ++i) {
-            uint32_t nextTick = _tick + 1;
-            onTick(nextTick);
-            if (_link) {
-                _link->service(nextTick);
+        if (diff > MAX_TICK_CATCHUP) {
+            // Core 1 fell badly behind (long stall). Replaying every backlogged slot would
+            // burst blocking SPI + TX_GUARD sleeps for stale FHSS positions and keep us behind.
+            // Fast-forward to the latest tick instead: TX FHSS is tick-derived so a jump stays
+            // correct, and an RX this far behind has lost its slot lock and re-acquires from the
+            // next Sync beacon. Record the gap as missed deadlines so the overrun is observable.
+            if (_link) _link->noteMissedDeadlines(diff);
+            onTick(currentTicks);
+            if (_link) _link->service(currentTicks);
+        } else {
+            for (uint32_t i = 0; i < diff; ++i) {
+                uint32_t nextTick = _tick + 1;
+                onTick(nextTick);
+                if (_link) {
+                    _link->service(nextTick);
+                }
             }
         }
         _lastProcessedTickEvent = currentTicks;

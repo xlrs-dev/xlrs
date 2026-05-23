@@ -712,6 +712,25 @@ static void test_scheduler_poll_drains_ticks() {
     TEST_ASSERT_EQUAL_UINT32(5, sched.processedTick());
 }
 
+// ---- M9: a huge tick backlog (core-1 stall) fast-forwards instead of replaying stale slots ----
+static void test_scheduler_poll_caps_backlog() {
+    uint8_t uid[LINK_UID_SIZE]; linkUidFromPhrase("Kikobot-02", uid);
+    MockPhy phy; PhyConfig cfg{}; cfg.freqMHz = 2420.0f; phy.init(cfg);
+    Link link; link.begin(Role::Tx, uid, 2);
+    RfScheduler sched; sched.begin(&phy, nullptr, &link, 2);
+
+    const uint32_t backlog = RfScheduler::MAX_TICK_CATCHUP + 20;   // well past the cap
+    for (uint32_t i = 0; i < backlog; ++i) fireSimTimerTick();
+    TEST_ASSERT_EQUAL_UINT32(backlog, sched.tickEvents());
+
+    sched.poll();                                          // does NOT replay all `backlog` slots
+    TEST_ASSERT_EQUAL_UINT32(backlog, sched.processedTick());        // jumped straight to latest
+    TEST_ASSERT_TRUE(link.stats().missedDeadlines >= backlog);      // overrun recorded for diag
+
+    sched.poll();                                          // idempotent once caught up
+    TEST_ASSERT_EQUAL_UINT32(backlog, sched.processedTick());
+}
+
 // ---- Soak: link stays locked and accurate over thousands of healthy slots ----
 static void test_link_long_soak() {
     uint8_t uid[LINK_UID_SIZE]; linkUidFromPhrase("Kikobot-02", uid);
@@ -819,6 +838,7 @@ int main(int, char**) {
     RUN_TEST(test_flash_boot_counter);
     RUN_TEST(test_scheduler_timing_pfd_lock);
     RUN_TEST(test_scheduler_poll_drains_ticks);
+    RUN_TEST(test_scheduler_poll_caps_backlog);
     RUN_TEST(test_link_long_soak);
     RUN_TEST(test_link_corrupt_rc_rejected);
     RUN_TEST(test_scheduler_phy_recovery_failure);

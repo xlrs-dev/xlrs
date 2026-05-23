@@ -42,6 +42,12 @@ class RfScheduler {
 public:
     static const uint32_t TX_GUARD_US = 150;
 
+    // If poll() ever finds more than this many timer ticks waiting (core 1 stalled — e.g. a
+    // long flash write), it stops replaying the backlog slot-by-slot (each replay drives
+    // blocking SPI + a TX_GUARD sleep for a now-stale FHSS slot) and fast-forwards to the
+    // latest tick instead. See poll().
+    static const uint32_t MAX_TICK_CATCHUP = 16;
+
     RfScheduler();
     ~RfScheduler();
 
@@ -72,6 +78,11 @@ private:
     std::atomic<uint32_t> _tickEvents{0};
     std::atomic<uint32_t> _rxDoneEvents{0};
     std::atomic<uint32_t> _txDoneEvents{0};
+    // Wall-clock (us) latched IN the timer ISR at each fire. onTick() uses this as the PFD's
+    // "expected tick" reference so the phase error is measured against the true fire time, not
+    // against when the core-1 task got around to processing the tick (which adds wake-latency
+    // jitter). See debugging.md §1.1.
+    std::atomic<uint32_t> _lastTickFireUs{0};
 
 private:
     IRadioPhy*   _phy = nullptr;

@@ -437,6 +437,11 @@ void Link::notePhyRecovery(bool success) {
     }
 }
 
+void Link::noteMissedDeadlines(uint16_t n) {
+    uint32_t v = (uint32_t)_stats.missedDeadlines + n;
+    _stats.missedDeadlines = (v > UINT16_MAX) ? UINT16_MAX : (uint16_t)v;
+}
+
 void Link::setChannels(const uint16_t* ch, uint8_t n) {
     if (!ch) return;
     if (n > RC_CHANNELS) n = RC_CHANNELS;

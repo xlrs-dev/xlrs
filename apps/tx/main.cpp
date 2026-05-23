@@ -73,6 +73,239 @@ static uint32_t lastStatusSent = 0;
 static constexpr uint32_t STATUS_INTERVAL = 1000;
 
 #if XLRS_TX_CONTROLLER_CRSF
+static constexpr uint8_t CRSF_PARAM_COUNT = 7; // Includes root folder at parameter 0.
+static constexpr uint8_t CRSF_PARAM_ROOT = 0;
+static constexpr uint8_t CRSF_PARAM_RATE = 1;
+static constexpr uint8_t CRSF_PARAM_MAX_POWER = 2;
+static constexpr uint8_t CRSF_PARAM_DYNAMIC_POWER = 3;
+static constexpr uint8_t CRSF_PARAM_REGION = 4;
+static constexpr uint8_t CRSF_PARAM_FAILSAFE = 5;
+static constexpr uint8_t CRSF_PARAM_REBOOT = 6;
+
+static bool crsfDestinationIsTxModule(uint8_t destination) {
+    return destination == CRSF_ADDRESS_BROADCAST || destination == CRSF_ADDRESS_CRSF_TRANSMITTER;
+}
+
+static void appendByte(uint8_t* payload, uint8_t& len, uint8_t value) {
+    if (len < CRSF_MAX_PAYLOAD_LEN) payload[len++] = value;
+}
+
+static void appendString(uint8_t* payload, uint8_t& len, const char* value) {
+    while (*value && len < CRSF_MAX_PAYLOAD_LEN) payload[len++] = (uint8_t)*value++;
+    appendByte(payload, len, 0);
+}
+
+static void appendBe32(uint8_t* payload, uint8_t& len, uint32_t value) {
+    appendByte(payload, len, (uint8_t)(value >> 24));
+    appendByte(payload, len, (uint8_t)(value >> 16));
+    appendByte(payload, len, (uint8_t)(value >> 8));
+    appendByte(payload, len, (uint8_t)value);
+}
+
+static void sendCrsfParameterEntry(uint8_t destination, const uint8_t* payload, uint8_t len) {
+    controllerCrsf.queueExtendedPacket(CRSF_SYNC_BYTE, CRSF_FRAMETYPE_PARAMETER_SETTINGS_ENTRY,
+                                       destination, CRSF_ADDRESS_CRSF_TRANSMITTER, payload, len);
+}
+
+static void sendCrsfParameterWriteAck(uint8_t destination, uint8_t parameterNumber,
+                                      const uint8_t* value, uint8_t valueLen) {
+    uint8_t payload[CRSF_MAX_PAYLOAD_LEN] = {};
+    uint8_t len = 0;
+    appendByte(payload, len, parameterNumber);
+    for (uint8_t i = 0; i < valueLen && len < CRSF_MAX_PAYLOAD_LEN; ++i) {
+        appendByte(payload, len, value[i]);
+    }
+    controllerCrsf.queueExtendedPacket(CRSF_SYNC_BYTE, CRSF_FRAMETYPE_PARAMETER_WRITE,
+                                       destination, CRSF_ADDRESS_CRSF_TRANSMITTER, payload, len);
+}
+
+static bool saveRfConfigFromCrsf() {
+    xlrs::RfConfig::refreshChecksum(g_rfConfig);
+    return xlrs::RfConfig::save(g_rfConfig);
+}
+
+static void buildRootParameter(uint8_t* payload, uint8_t& len) {
+    appendByte(payload, len, CRSF_PARAM_ROOT);
+    appendByte(payload, len, 0); // chunks remaining
+    appendByte(payload, len, 0); // parent
+    appendByte(payload, len, CRSF_PARAM_FOLDER);
+    appendString(payload, len, "ROOT");
+    appendByte(payload, len, CRSF_PARAM_RATE);
+    appendByte(payload, len, CRSF_PARAM_MAX_POWER);
+    appendByte(payload, len, CRSF_PARAM_DYNAMIC_POWER);
+    appendByte(payload, len, CRSF_PARAM_REGION);
+    appendByte(payload, len, CRSF_PARAM_FAILSAFE);
+    appendByte(payload, len, CRSF_PARAM_REBOOT);
+    appendByte(payload, len, 0xFF);
+}
+
+static void buildSelectionParameter(uint8_t* payload, uint8_t& len, uint8_t parameterNumber,
+                                    const char* label, uint8_t value, uint8_t maxValue,
+                                    const char* options) {
+    appendByte(payload, len, parameterNumber);
+    appendByte(payload, len, 0);
+    appendByte(payload, len, CRSF_PARAM_ROOT);
+    appendByte(payload, len, CRSF_PARAM_TEXT_SELECTION);
+    appendString(payload, len, label);
+    appendString(payload, len, options);
+    appendByte(payload, len, value);
+    appendByte(payload, len, 0);
+    appendByte(payload, len, maxValue);
+    appendByte(payload, len, value);
+    appendString(payload, len, "");
+}
+
+static void buildInt8Parameter(uint8_t* payload, uint8_t& len, uint8_t parameterNumber,
+                               const char* label, int8_t value, int8_t minValue,
+                               int8_t maxValue, const char* units) {
+    appendByte(payload, len, parameterNumber);
+    appendByte(payload, len, 0);
+    appendByte(payload, len, CRSF_PARAM_ROOT);
+    appendByte(payload, len, CRSF_PARAM_INT8);
+    appendString(payload, len, label);
+    appendByte(payload, len, (uint8_t)value);
+    appendByte(payload, len, (uint8_t)minValue);
+    appendByte(payload, len, (uint8_t)maxValue);
+    appendString(payload, len, units);
+}
+
+static void buildCommandParameter(uint8_t* payload, uint8_t& len, uint8_t parameterNumber,
+                                  const char* label, const char* info) {
+    appendByte(payload, len, parameterNumber);
+    appendByte(payload, len, 0);
+    appendByte(payload, len, CRSF_PARAM_ROOT);
+    appendByte(payload, len, CRSF_PARAM_COMMAND);
+    appendString(payload, len, label);
+    appendByte(payload, len, CRSF_COMMAND_READY);
+    appendByte(payload, len, 10); // poll/display timeout in 100 ms units
+    appendString(payload, len, info);
+}
+
+static void buildOutOfRangeParameter(uint8_t* payload, uint8_t& len, uint8_t parameterNumber) {
+    appendByte(payload, len, parameterNumber);
+    appendByte(payload, len, 0);
+    appendByte(payload, len, 0);
+    appendByte(payload, len, CRSF_PARAM_OUT_OF_RANGE);
+    appendString(payload, len, "Out of range");
+}
+
+static void sendCrsfParameter(uint8_t destination, uint8_t parameterNumber) {
+    uint8_t payload[CRSF_MAX_PAYLOAD_LEN] = {};
+    uint8_t len = 0;
+    switch (parameterNumber) {
+        case CRSF_PARAM_ROOT:
+            buildRootParameter(payload, len);
+            break;
+        case CRSF_PARAM_RATE:
+            buildSelectionParameter(payload, len, parameterNumber, "Rate", g_rfConfig.defaultRate,
+                                    xlrs::kNumRates - 1, "F1000;F500;D250;L150;L50");
+            break;
+        case CRSF_PARAM_MAX_POWER:
+            buildInt8Parameter(payload, len, parameterNumber, "Max Power", g_rfConfig.maxPowerDbm,
+                               -18, g_rfConfig.region == (uint8_t)xlrs::RfRegion::EU ? 10 : 13,
+                               "dBm");
+            break;
+        case CRSF_PARAM_DYNAMIC_POWER:
+            buildSelectionParameter(payload, len, parameterNumber, "Dynamic Power",
+                                    g_rfConfig.dynamicPower, 1, "Off;On");
+            break;
+        case CRSF_PARAM_REGION:
+            buildSelectionParameter(payload, len, parameterNumber, "Region", g_rfConfig.region,
+                                    1, "US;EU");
+            break;
+        case CRSF_PARAM_FAILSAFE:
+            buildSelectionParameter(payload, len, parameterNumber, "Failsafe",
+                                    g_rfConfig.failsafeMode, 1, "No Pulses;Hold");
+            break;
+        case CRSF_PARAM_REBOOT:
+            buildCommandParameter(payload, len, parameterNumber, "Reboot", "Apply saved config");
+            break;
+        default:
+            buildOutOfRangeParameter(payload, len, parameterNumber);
+            break;
+    }
+    sendCrsfParameterEntry(destination, payload, len);
+}
+
+void onCrsfDevicePing(uint8_t destination, uint8_t origin) {
+    if (!crsfDestinationIsTxModule(destination)) return;
+
+    uint8_t payload[CRSF_MAX_PAYLOAD_LEN] = {};
+    uint8_t len = 0;
+    appendString(payload, len, "XLRS TX");
+    appendBe32(payload, len, 0x584C5253UL); // "XLRS"
+    appendBe32(payload, len, 1);            // hardware id
+    appendBe32(payload, len, 1);            // firmware id
+    appendByte(payload, len, CRSF_PARAM_COUNT);
+    appendByte(payload, len, 1);            // parameter protocol version
+
+    controllerCrsf.queueExtendedPacket(CRSF_SYNC_BYTE, CRSF_FRAMETYPE_DEVICE_INFO,
+                                       origin, CRSF_ADDRESS_CRSF_TRANSMITTER, payload, len);
+}
+
+void onCrsfParameterRead(uint8_t parameterNumber, uint8_t chunkNumber,
+                         uint8_t destination, uint8_t origin) {
+    if (!crsfDestinationIsTxModule(destination) || chunkNumber != 0) return;
+    sendCrsfParameter(origin, parameterNumber);
+}
+
+void onCrsfParameterWrite(uint8_t parameterNumber, const uint8_t* value, uint8_t valueLen,
+                          uint8_t destination, uint8_t origin) {
+    if (!crsfDestinationIsTxModule(destination) || !value) return;
+
+    switch (parameterNumber) {
+        case CRSF_PARAM_RATE:
+            if (valueLen >= 1 && value[0] < xlrs::kNumRates) {
+                g_rfConfig.defaultRate = value[0];
+                saveRfConfigFromCrsf();
+                sendCrsfParameterWriteAck(origin, parameterNumber, &g_rfConfig.defaultRate, 1);
+            }
+            break;
+        case CRSF_PARAM_MAX_POWER:
+            if (valueLen >= 1) {
+                int8_t requested = (int8_t)value[0];
+                if (requested >= -18 && requested <= 13) {
+                    g_rfConfig.maxPowerDbm = requested;
+                    saveRfConfigFromCrsf();
+                    sendCrsfParameterWriteAck(origin, parameterNumber,
+                                              (const uint8_t*)&g_rfConfig.maxPowerDbm, 1);
+                }
+            }
+            break;
+        case CRSF_PARAM_DYNAMIC_POWER:
+            if (valueLen >= 1 && value[0] <= 1) {
+                g_rfConfig.dynamicPower = value[0];
+                saveRfConfigFromCrsf();
+                sendCrsfParameterWriteAck(origin, parameterNumber, &g_rfConfig.dynamicPower, 1);
+            }
+            break;
+        case CRSF_PARAM_REGION:
+            if (valueLen >= 1 && value[0] <= 1) {
+                g_rfConfig.region = value[0];
+                saveRfConfigFromCrsf();
+                sendCrsfParameterWriteAck(origin, parameterNumber, &g_rfConfig.region, 1);
+            }
+            break;
+        case CRSF_PARAM_FAILSAFE:
+            if (valueLen >= 1 && value[0] <= 1) {
+                g_rfConfig.failsafeMode = value[0];
+                saveRfConfigFromCrsf();
+                sendCrsfParameterWriteAck(origin, parameterNumber, &g_rfConfig.failsafeMode, 1);
+            }
+            break;
+        case CRSF_PARAM_REBOOT:
+            if (valueLen >= 1 && (value[0] == CRSF_COMMAND_START || value[0] == CRSF_COMMAND_CONFIRM)) {
+                sendCrsfParameter(origin, parameterNumber);
+                xlrs::hal::sleepMs(100);
+                watchdog_reboot(0, 0, 0);
+            }
+            break;
+        default:
+            sendCrsfParameter(origin, parameterNumber);
+            break;
+    }
+}
+
 void onCrsfChannelsReceived() {
     AppToRfData payload;
     for (int i = 0; i < 8; i++) {
@@ -188,6 +421,9 @@ static void setup_app_core() {
 #if XLRS_TX_CONTROLLER_CRSF
     controllerCrsf.begin(CRSF_BAUDRATE);
     controllerCrsf.onPacketChannels = onCrsfChannelsReceived;
+    controllerCrsf.onDevicePing = onCrsfDevicePing;
+    controllerCrsf.onParameterRead = onCrsfParameterRead;
+    controllerCrsf.onParameterWrite = onCrsfParameterWrite;
     printf("Controller CRSF initialized.\n");
 #else
     uartProto.begin(UART_PROTOCOL_BAUDRATE);

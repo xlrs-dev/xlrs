@@ -22,13 +22,23 @@ Implemented today:
   into the TX RF mailbox.
 - CRSF `LINK_STATISTICS` output from TX to the controller, built from internal
   `link_stats`.
+- CRSF device ping/device info for TX module discovery.
+- CRSF parameter read/write for critical TX RF configuration:
+  - Rate.
+  - Max power.
+  - Dynamic power.
+  - Region.
+  - Failsafe mode.
+  - Reboot command.
 
 Current limitations:
 
 - The default TX controller protocol is still the custom UART protocol unless
   `XLRS_TX_CONTROLLER_PROTOCOL=CRSF` is selected at configure time.
-- CRSF device discovery, parameter read/write, Lua configuration, and bind/config
-  commands are not implemented yet.
+- CRSF parameter writes persist config to flash. RF rate/region/power/failsafe
+  changes are applied after reboot.
+- A dedicated XLRS Lua script is not implemented yet.
+- CRSF bind phrase commands are not implemented yet.
 - XLRS currently carries 8 OTA `rc_channel` values. CRSF channels 9-16 are parsed
   by the CRSF decoder but are not transmitted over the XLRS uplink.
 

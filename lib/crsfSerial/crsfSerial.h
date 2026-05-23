@@ -21,6 +21,8 @@ public:
     void write(uint8_t b);
     void write(const uint8_t *buf, size_t len);
     void queuePacket(uint8_t addr, uint8_t type, const void *payload, uint8_t len);
+    void queueExtendedPacket(uint8_t addr, uint8_t type, uint8_t destination, uint8_t origin,
+                             const void *payload, uint8_t len);
 
     uint32_t getBaud() const { return _baud; };
     // Return current channel value (1-based) in us
@@ -54,6 +56,9 @@ public:
     void (*onDeviceInfo)(const uint8_t *serial4, const char *name, uint8_t sourceAddr);
     // PARAMETER_SETTINGS_ENTRY (0x2B) from 0xEE: fieldId, type (0x0A=STRING, 0x0D=COMMAND), label, value
     void (*onParameterEntry)(uint8_t fieldId, uint8_t paramType, uint8_t chunksRemaining, const char *label, const uint8_t *value, uint8_t valueLen);
+    void (*onDevicePing)(uint8_t destination, uint8_t origin);
+    void (*onParameterRead)(uint8_t parameterNumber, uint8_t chunkNumber, uint8_t destination, uint8_t origin);
+    void (*onParameterWrite)(uint8_t parameterNumber, const uint8_t *value, uint8_t valueLen, uint8_t destination, uint8_t origin);
 
 private:
     xlrs::hal::SerialPort &_port;
@@ -88,4 +93,5 @@ private:
     void packetBattery(const crsf_header_t *p);
     void packetDeviceInfo(const crsf_header_t *p);
     void packetParameterEntry(const crsf_header_t *p);
+    void packetExtendedHeader(const crsf_header_t *p);
 };

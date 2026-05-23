@@ -177,9 +177,13 @@ Implemented today:
   into the TX RF mailbox.
 - CRSF `LINK_STATISTICS` output from TX to the controller about every 200 ms when
   RF data is available.
+- CRSF device ping/device info for TX module discovery.
+- CRSF parameter read/write for Rate, Max Power, Dynamic Power, Region, Failsafe,
+  and Reboot.
 
-Current limitation: CRSF device discovery, parameter read/write, Lua
-configuration, and bind/config commands are not implemented yet. XLRS currently
+Current limitation: parameter writes persist config to flash, but RF
+rate/region/power/failsafe changes apply after reboot. A dedicated XLRS Lua
+script and CRSF bind phrase commands are not implemented yet. XLRS currently
 carries 8 OTA `rc_channel` values, so CRSF channels 9-16 are not transmitted over
 the XLRS uplink.
 
@@ -278,6 +282,8 @@ Implemented today:
 - TX UART telemetry/status output.
 - TX CRSF link-statistics output when `XLRS_TX_CONTROLLER_PROTOCOL=CRSF` is
   selected.
+- TX CRSF device info and critical RF config parameters when
+  `XLRS_TX_CONTROLLER_PROTOCOL=CRSF` is selected.
 - TX runtime binding phrase update.
 - RX CRSF RC and link-statistics output.
 - Flash-backed RF config with validated defaults.
@@ -286,9 +292,9 @@ Implemented today:
 Reserved or incomplete:
 
 - Runtime RX binding update.
-- Runtime RF config update.
+- Runtime RF config application without reboot.
 - True pair/bond workflow.
-- CRSF device discovery and parameter read/write for EdgeTX/OpenTX Lua
-  configuration.
+- Dedicated EdgeTX/OpenTX Lua script.
+- CRSF bind phrase commands.
 - External MSP/config passthrough API.
 - RX battery telemetry population into TX telemetry fields.

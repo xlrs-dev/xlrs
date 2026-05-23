@@ -38,6 +38,20 @@ public:
         cfg.checksum = calculateChecksum(cfg);
     }
 
+    static void refreshChecksum(RfConfigData& cfg) {
+        cfg.magic = RF_CONFIG_MAGIC;
+        cfg.version = RF_CONFIG_VERSION;
+        if (cfg.region > 1) cfg.region = 0;
+        if (cfg.defaultRate >= 5) cfg.defaultRate = 0;
+        if (cfg.maxPowerDbm < -18 || cfg.maxPowerDbm > 13) cfg.maxPowerDbm = 10;
+        if (cfg.region == (uint8_t)RfRegion::EU && cfg.maxPowerDbm > 10) cfg.maxPowerDbm = 10;
+        if (cfg.failsafeMode > 1) cfg.failsafeMode = 0;
+        if (cfg.dynamicPower > 1) cfg.dynamicPower = 1;
+        cfg.reserved[0] = 0;
+        cfg.reserved[1] = 0;
+        cfg.checksum = calculateChecksum(cfg);
+    }
+
     static bool validate(RfConfigData& cfg) {
         if (cfg.magic != RF_CONFIG_MAGIC) return false;
         if (cfg.version != RF_CONFIG_VERSION) return false;

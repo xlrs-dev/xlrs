@@ -11,17 +11,15 @@ Build-time parameters are hardcoded into the binary during compilation. They dic
 ### A. Environment Selection (`platformio.ini`)
 Firmware builds are configured into isolated environments to target different hardware blocks:
 
-* **`[env:tx_sx128x]` / `[env:rx_sx128x]`** — *legacy link (current shipping firmware)*
-  * Target the TX module (RP2040 Pico) and RX module (RP2040 Pico W); filter in
-    `tx_main_sx128x.cpp` / `rx_main_sx128x.cpp`. Remain buildable until the new-core cutover (M7).
-* **`[env:xlrs_tx]` / `[env:xlrs_rx]`** — *new link core (added at M2)*
-  * Will target the same modules but build the `lib/xlrs/` core (`RadioLibPhy` + `HwTimer`).
+* **`[env:xlrs_tx]` / `[env:xlrs_rx]`**
+  * Production TX/RX firmware using the `lib/xlrs/` core with `RadioLibPhy`.
+* **`[env:xlrs_tx_native]` / `[env:xlrs_rx_native]`**
+  * Production TX/RX firmware using the `lib/xlrs/` core with `Sx1280NativePhy`.
 * **`[env:rc-rp2350]`**
   * Targets the RC handset (RP2350 Pico 2). Configures native stick ADC inputs and display peripherals.
 * **`[env:native]`**
   * Host environment. Compiles the new core's pure-logic layers for Unity unit tests on the dev
-    machine (no hardware). **This is the only new-core env that exists today** — the firmware
-    envs land at M2.
+    machine (no hardware).
 
 ---
 
@@ -51,8 +49,6 @@ Configure high-level software settings:
 
 * **`DEFAULT_BINDING_PHRASE`** (e.g. `"Kikobot-02"`)
   * String literal used to seed the default **Link UID** if a customized bind phrase is not active.
-* **`AUTO_PAIR_TIMEOUT_SEC`** (e.g. `5`)
-  * Auto-pairing timeout in seconds. The receiver falls back to binding mode automatically if a connection is not established within this window.
 * **`DEBUG_LINK_STATS`**
   * Set to `1` to periodically output loop timings, serial rates, and link statistics over the hardware serial interface once per second.
 

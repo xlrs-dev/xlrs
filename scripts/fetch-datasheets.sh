@@ -30,7 +30,7 @@ curl -fL -A "$UA" -o "$OUT/bq25620-bq25622-ti.pdf" \
   "https://www.ti.com/lit/ds/symlink/bq25622.pdf"
 
 # ---------------------------------------------------------------------------
-# 2) Semtech SX1280 / SX1281 radio  (lib/SX128xLink)
+# 2) Semtech SX1280 / SX1281 radio  (XLRS PHY)
 # ---------------------------------------------------------------------------
 # Semtech does NOT host a static PDF. The "SX1280 Datasheet" link is a Salesforce
 # content-distribution page: GET sets a session cookie -> a JS auto-POST-back -> the

@@ -92,8 +92,8 @@ The RC board is a separate module that reads analog inputs and communicates with
    *Note: If you don't have `uv` installed, see instructions [here](https://astral.sh/uv).*
 
    Alternatively, you can build and upload manually:
-   - For TX Module: `pio run -e tx_sx128x -t upload`
-   - For RX Module: `pio run -e rx_sx128x -t upload`
+   - For TX Module: `pio run -e xlrs_tx_native -t upload` (native SX1280 PHY) or `pio run -e xlrs_tx -t upload` (RadioLib PHY)
+   - For RX Module: `pio run -e xlrs_rx_native -t upload` (native SX1280 PHY) or `pio run -e xlrs_rx -t upload` (RadioLib PHY)
    - For RC Board: `pio run -e rc-crsf -t upload` (RP2040 + ADS1115) or `pio run -e rc-rp2350 -t upload` / `pio run -e rc-HID-rp2350 -t upload` (RP2350 Dhanush; see [`docs/rc-build-flash.md`](docs/rc-build-flash.md))
 
 ### Developer Helper CLI (`scripts/xlrs_helper.py`)
@@ -182,39 +182,14 @@ The channel mapping is determined by the RC board implementation. Typical mappin
 
 ## Radio Protocol (SX1280)
 
-The system uses SX1280 radio modules with FLRC (Fast Long Range Communication) modulation:
+The production firmware uses the clean XLRS link core in `lib/xlrs/`: hardware-timed slots, UID-seeded FHSS, deterministic sync/telemetry/uplink scheduling, true packet-success LQ, dynamic power, and CRSF link statistics.
 
 **Radio Configuration:**
-- **Frequency:** 2420 MHz (default, configurable via `SX128X_FREQ_MHZ`)
-- **Modulation:** FLRC
-- **Bitrate:** 1300 kbps (configurable via `SX128X_FLRC_BR_KBPS`)
-- **Coding Rate:** 1/2 (configurable via `SX128X_FLRC_CR`)
-- **Output Power:** 10 dBm (configurable via `SX128X_OUTPUT_POWER_DBM`)
-- **Packet Length:** 33 bytes fixed (configurable via `SX128X_FIXED_PACKET_LEN`)
-
-**Message Types:**
-| Type | ID | Description |
-|------|-----|-------------|
-| MSG_CHANNELS | 0x01 | 8-channel control data (encrypted) |
-| MSG_BATTERY | 0x02 | Battery telemetry from RX to TX |
-| MSG_PAIRING | 0x03 | Pairing request with binding UID |
-| MSG_PAIRING_ACK | 0x04 | Pairing acknowledgment |
-| MSG_SYNC | 0x05 | Connection sync packet |
-| MSG_SYNC_ACK | 0x06 | Sync acknowledgment |
-
-**Frame Format (MSG_CHANNELS):**
-- Message type byte (1 byte)
-- Device ID (8 bytes)
-- Channel data (16 bytes: 8 channels × 2 bytes, big-endian)
-- Sequence number (2 bytes)
-- HMAC-SHA256 truncated to 4 bytes
-- Total: 31 bytes payload + 2 bytes overhead = 33 bytes
-
-**Security:**
-- AES-128 encryption (using pairing key)
-- HMAC-SHA256 authentication (truncated to 4 bytes)
-- Sequence number protection against replay attacks
-- Device ID validation
+- **Rates:** table-driven FLRC/LoRa options in `lib/xlrs/link/RateConfig.h`
+- **FHSS:** UID-seeded 2.4 GHz hop sequence with region plumbing
+- **Addressing/isolation:** binding phrase → 8-byte Link UID → FHSS seed + SX1280 sync word + sync UID CRC
+- **OTA:** versioned type-multiplexed frames with compact RC support and hardware CRC
+- **Optional cipher:** `ICipher`/AEAD hook exists, but the production control path uses UID-seeded isolation plus PHY CRC by default
 
 **Update Rate:**
 - Channel data: ~50Hz (20ms intervals, limited by radio half-duplex timing)
@@ -332,21 +307,17 @@ The RC board can send commands to the TX module:
 - Interrupt-driven packet reception (DIO1 pin)
 - Hardware SPI for radio communication
 
-### Security
-- Binding phrase-based pairing (default: "FPV_BIND_2024")
-- 16-byte shared encryption key derived from pairing
-- AES-128 encryption for channel data
-- HMAC-SHA256 authentication (truncated to 4 bytes)
-- Sequence number protection against replay attacks
-- Device ID validation (8 bytes per device)
-- Pairing key and device IDs stored in EEPROM
+### Binding Identity
+- Binding phrase-based Link UID derivation
+- UID seeds the FHSS sequence and SX1280 sync word
+- Sync beacons carry a UID CRC and mismatches are rejected before lock
+- Binding UID is stored by `xlrs::BindingStore`; legacy pairing keys/device IDs are not part of the production link
 
 ### Connection Management
-- SYNC/SYNC_ACK handshake for connection establishment
-- Connection state machine: DISCONNECTED → PAIRING → CONNECTING → CONNECTED
-- Automatic reconnection on power-up if paired
-- Connection loss detection via sync ACK timeout
-- Hysteresis to prevent false disconnects (requires 3 missed sync ACKs)
+- Hardware-timed sync, uplink, and telemetry slots
+- Connection state machine with sync/FHSS lock and valid-RC gating before output
+- Failsafe via CRSF NoPulses by default
+- True LQ from received-vs-expected packet windows
 
 ### CRSF Output
 - Standard CRSF protocol at 420000 baud
@@ -362,14 +333,11 @@ The RC board can send commands to the TX module:
 - Non-blocking state machine for reception
 - Callback-based message handling
 
-### Radio Configuration (Configurable via Build Flags)
-- **Frequency:** `SX128X_FREQ_MHZ` (default: 2420.0 MHz)
-- **Bandwidth:** `SX128X_BW_KHZ` (default: 812.5 kHz)
-- **Spreading Factor:** `SX128X_SF` (default: 7)
-- **Coding Rate:** `SX128X_FLRC_CR` (default: 2 = 1/2)
-- **Bitrate:** `SX128X_FLRC_BR_KBPS` (default: 1300 kbps)
-- **Output Power:** `SX128X_OUTPUT_POWER_DBM` (default: 10 dBm)
-- **Packet Length:** `SX128X_FIXED_PACKET_LEN` (default: 33 bytes)
+### Radio Configuration
+- Rate/modulation table: `lib/xlrs/link/RateConfig.h`
+- Persistent runtime RF config: `xlrs::RfConfigData`
+- Output power cap and dynamic-power enable are persisted in EEPROM
+- Region is persisted and passed into the link/FHSS layer
 
 ### Pin Configuration (Configurable via Build Flags)
 All SX1280 pins can be overridden in `platformio.ini`:
@@ -381,7 +349,7 @@ All SX1280 pins can be overridden in `platformio.ini`:
 
 - [arduino-pico](https://github.com/earlephilhower/arduino-pico) core
 - [RadioLib](https://github.com/jgromes/RadioLib) v7.4.0+ - SX1280 radio driver
-- EEPROM library (built-in) - For storing pairing keys and device IDs
+- EEPROM library (built-in) - For RF config, binding UID, and RC calibration
 
 **Note:** The RC board implementation (rc-crsf environment) has additional dependencies:
 - [Adafruit SH110X](https://github.com/adafruit/Adafruit_SH110X) - OLED display driver
@@ -396,36 +364,24 @@ The RC can bridge **USB CDC ↔ handset UART** so tools like [ELRS Buddy](https:
 
 The project includes multiple build environments in `platformio.ini`:
 
-- **`tx_sx128x`**: TX module (SX1280 radio, UART protocol)
-- **`rx_sx128x`**: RX module (SX1280 radio, CRSF output)
+- **`xlrs_tx` / `xlrs_tx_native`**: TX module, clean XLRS link core
+- **`xlrs_rx` / `xlrs_rx_native`**: RX module, clean XLRS link core with CRSF output
 - **`rc-crsf`**: RC board — RP2040, ADS1115 ADC, OLED, UART to TX / ELRS module
 - **`rc-rp2350`**: RC — RP2350 (Dhanush), internal ADC, Core1 CRSF handset path
 - **`rc-HID-rp2350`**: Same as `rc-rp2350` plus **USB HID gamepad** (composite with CDC)
 - **`rc-rp2350-debug`**: `rc-rp2350` with extra link-rate logging on Serial
-- **`tx-ble`**: Legacy BLE TX (deprecated)
-- **`rx-ble`**: Legacy BLE RX (deprecated)
 
 RC-centric details: **[`docs/rc-build-flash.md`](docs/rc-build-flash.md)**.
 
 ## Important Notes
 
 ### Radio Half-Duplex Operation
-The SX1280 radio operates in half-duplex mode, meaning it cannot transmit and receive simultaneously. The implementation includes timing logic to:
-- Pause channel transmission briefly after sending SYNC packets to allow SYNC_ACK reception
-- Alternate between TX and RX operations to maintain connection state
-- Use hysteresis (3 missed sync ACKs) to prevent false disconnects from timing collisions
+The SX1280 radio operates in half-duplex mode. XLRS schedules sync, uplink, and telemetry into deterministic slots so TX/RX do not collide.
 
-### Binding Phrase Security
-- The default binding phrase is `"FPV_BIND_2024"` - change this for production use
-- Both TX and RX must use the same binding phrase to pair
-- The binding phrase is hashed to create a binding UID that is exchanged during pairing
-- After pairing, devices use a shared encryption key derived from the pairing process
-
-### Auto-Pairing Timeout
-The RX module can automatically enter pairing mode after a timeout if not paired:
-- Configured via `AUTO_PAIR_TIMEOUT_SEC` build flag (default: 5 seconds in `rx_sx128x` environment)
-- Set to 0 to disable auto-pairing
-- Maximum timeout is 120 seconds
+### Binding Phrase
+- The default binding phrase is set with `DEFAULT_BINDING_PHRASE`
+- Both TX and RX must use the same binding phrase
+- The binding phrase is hashed into the Link UID used for FHSS, sync word, and sync UID CRC
 
 ### UART Protocol
 The UART protocol between RC board and TX module uses:

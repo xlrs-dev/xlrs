@@ -17,8 +17,8 @@ The **RC** board reads sticks and switches, shows status on an OLED, and talks t
 
 ### A) Custom Pico TX (XLRS-style UART)
 
-- The **TX** is another Pico running this repo’s `tx_sx128x` firmware.
-- It speaks the project’s **high-speed UART frame protocol** (420000 baud by default in older docs; check `tx_sx128x` / RC `platformio.ini` for the value you flashed).
+- The **TX** is another Pico running this repo’s `xlrs_tx` or `xlrs_tx_native` firmware.
+- It speaks the project’s **high-speed UART frame protocol** to the RC handset; check the active `xlrs_tx` / RC `platformio.ini` values for the baud you flashed.
 - The RC can send channel payloads and receive telemetry over that protocol.
 
 ### B) ELRS TX module (CRSF handset)

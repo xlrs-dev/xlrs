@@ -1,9 +1,8 @@
 # XLRS Link Core Architecture
 
 Clean-slate architecture for the XLRS 2.4 GHz radio link, optimised for **scalability**
-and **reliability**. **Not backward compatible** with the legacy `lib/SX128xLink` +
-`lib/Protocol` over-the-air format — the legacy link stays in-tree and buildable until
-the new core reaches parity, then we cut over and delete it.
+and **reliability**. The production firmware now builds around one XLRS core and OTA
+format; the older `SX128xLink`/`Protocol`/legacy SX128x mains were removed at cutover.
 
 ---
 
@@ -207,7 +206,7 @@ src/
 test/
   test_xlrs_native/            (Unity tests for pure logic)
 ```
-Legacy `lib/SX128xLink`, `lib/Protocol`, `src/{tx,rx}_main_sx128x.cpp` remain until cutover.
+Production role mains are `src/xlrs_tx.cpp` and `src/xlrs_rx.cpp`.
 
 ---
 
@@ -217,7 +216,8 @@ Legacy `lib/SX128xLink`, `lib/Protocol`, `src/{tx,rx}_main_sx128x.cpp` remain un
   runs unit tests — no hardware. Covers `ChannelPack`, `Fhss`, `Pfd` (step + PI drift-nulling),
   `RingBuffer`, `Mailbox`, and `RfScheduler` slot logic (8 cases). `OtaPacket` + cipher tests
   land with their implementations (M3 / M8).
-- New firmware envs `xlrs_tx` / `xlrs_rx` added once `RadioLibPhy` + `HwTimer` land.
+- Firmware envs `xlrs_tx` / `xlrs_rx` use `RadioLibPhy`; `xlrs_tx_native` /
+  `xlrs_rx_native` use `Sx1280NativePhy`.
 - Host soak script (`scripts/soak.py`) watches RX serial for dropouts over long runs.
 
 ---
@@ -226,9 +226,7 @@ Legacy `lib/SX128xLink`, `lib/Protocol`, `src/{tx,rx}_main_sx128x.cpp` remain un
 
 - **M0 — Scaffold (this commit):** layer contracts (headers), pure-logic implementations
   (channel packing, FHSS sequence, PFD math, ring buffer), native test env + tests.
-- **M0.5 — Legacy safety patch (do now, off the critical path):** flight safety can't wait
-  for the M7 cutover — patch the *current* RX (`src/rx_main_sx128x.cpp`) to stop stale CRSF on
-  data timeout (the failsafe presently commented out). Independent of the new core.
+- **M0.5 — Legacy safety patch:** superseded by the production cutover.
 - **M1 — PHY:** `RadioLibPhy` async (DIO-driven TX/RX, freq/power). Bench loopback.
 - **M2 — Timing:** `HwTimer` (RP2040/RP2350) + integrate `Pfd`; TX master cadence, RX lock.
   **Acceptance criteria (measured, with targets):** max scheduling jitter, missed-deadline
@@ -243,11 +241,8 @@ Legacy `lib/SX128xLink`, `lib/Protocol`, `src/{tx,rx}_main_sx128x.cpp` remain un
   tables and TX power are firmware-controlled — review against the target region (FCC §15.247 /
   ETSI EN 300 328: dwell time, occupied bandwidth, EIRP) before transmitting above bench levels.
   Certification stays a non-goal, but these firmware knobs gate it.
-- **M7 — Cutover (deletion authorized by user):** new role mains replace legacy; delete
-  `lib/SX128xLink` + `lib/Protocol` + legacy `src/{tx,rx}_main_sx128x.cpp`. Permission granted —
-  no re-ask. **Engineering gate still stands:** legacy is the only hardware-proven firmware, so
-  the delete happens only after the new core is bench-validated on real boards (RadioLibPhy +
-  timer/PFD lock + end-to-end link + failsafe), not on sim-pass alone. Recoverable via git.
+- **M7 — Cutover:** complete. New role mains replaced the legacy link; duplicated identity,
+  crypto, and OTA packet-format paths were removed. Recoverable via git history if needed.
 - **M8 (forked) — Security:** `AeadCipher` if pursuing the secure-link wedge.
 
 ---

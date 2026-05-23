@@ -11,7 +11,7 @@
 #include "fhss/Fhss.h"
 #include "util/Mailbox.h"
 #include "UARTProtocol.h"
-#include "Security.h"
+#include "link/BindingStore.h"
 #include "link/RfConfig.h"
 #include <EEPROM.h>
 
@@ -47,8 +47,8 @@ xlrs::Fhss g_fhss;
 
 UARTProtocol uartProto(&Serial2);
 
-// Security and RF Config globals
-Security security;
+// Binding identity and RF Config globals
+xlrs::BindingStore g_bindingStore;
 xlrs::RfConfigData g_rfConfig;
 
 // Telemetry/Status reporting timing
@@ -101,7 +101,7 @@ void onCommandPayloadReceived(UARTMsgType cmd, const uint8_t* payload, uint8_t l
         Serial.println(phrase);
         uartProto.sendAck(UART_MSG_CMD_SET_BIND_TX);
         delay(10);
-        if (security.setBindingPhrase(phrase)) {
+        if (g_bindingStore.setBindingPhrase(phrase)) {
             Serial.println("[UART] Binding phrase persisted. Rebooting TX...");
             delay(100);
             rp2040.restart();
@@ -119,12 +119,12 @@ void setup() {
     delay(1000);
     Serial.println("=== XLRS Dual-Core Transmitter ===");
     
-    // Initialize EEPROM and Security
+    // Initialize EEPROM and binding identity store
     EEPROM.begin(512);
-    if (security.begin()) {
-        Serial.println("Security system initialized.");
+    if (g_bindingStore.begin()) {
+        Serial.println("Binding identity store initialized.");
     } else {
-        Serial.println("ERROR: Security system initialization failed!");
+        Serial.println("ERROR: Binding identity store initialization failed!");
     }
     
     // Load or initialize RF Config
@@ -202,21 +202,21 @@ void loop() {
 // Core 1: Low-Jitter Microsecond RF Scheduling Core
 // ============================================================
 void setup1() {
-    // Core 1 local EEPROM & Security init to prevent startup races
+    // Core 1 local EEPROM & binding identity init to prevent startup races
     EEPROM.begin(512);
-    security.begin();
+    g_bindingStore.begin();
     if (!xlrs::RfConfig::load(g_rfConfig)) {
         xlrs::RfConfig::setDefaults(g_rfConfig);
     }
 
     uint8_t uid[8];
     // Load UID from EEPROM, or generate default if not present
-    if (security.getBindingUID(uid)) {
-        Serial.println("[Core 1] Binding UID loaded from Security store.");
+    if (g_bindingStore.getBindingUid(uid)) {
+        Serial.println("[Core 1] Binding UID loaded from XLRS binding store.");
     } else {
         Serial.println("[Core 1] No binding UID found. Creating from default phrase...");
-        security.generateBindingUID(DEFAULT_BINDING_PHRASE);
-        security.getBindingUID(uid);
+        g_bindingStore.setBindingPhrase(DEFAULT_BINDING_PHRASE);
+        g_bindingStore.getBindingUid(uid);
     }
     
     g_link.begin(xlrs::Role::Tx, uid, g_rfConfig.defaultRate, g_rfConfig.maxPowerDbm, g_rfConfig.dynamicPower == 1);

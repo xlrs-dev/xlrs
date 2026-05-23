@@ -8,7 +8,7 @@
 // Schema version for protocol and EEPROM
 #define RC_CONFIG_SCHEMA_VERSION 4
 
-// EEPROM layout: avoid Security (120-168) and legacy cal block (150-175)
+// EEPROM layout: avoid RfConfig (0-119), BindingStore (120-199), and legacy cal block (150-175)
 #define RC_CONFIG_EEPROM_BASE   200
 #define RC_CONFIG_MAGIC         0x43434658UL  // "XCFC"
 

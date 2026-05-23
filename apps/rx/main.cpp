@@ -10,6 +10,8 @@
 #include <pico/multicore.h>
 #include <pico/stdlib.h>
 
+#include "app/AppTelemetry.h"
+#include "app/CrsfChannels.h"
 #include "app/CrsfLinkStats.h"
 #include "crsfSerial.h"
 #include "fhss/Fhss.h"
@@ -23,6 +25,7 @@
 #include "link/Uid.h"
 #include "phy/Sx1280NativePhy.h"
 #include "util/Mailbox.h"
+#include "util/RingBuffer.h"
 
 #ifndef CRSF_TX_PIN
 #define CRSF_TX_PIN 8
@@ -49,9 +52,14 @@ struct RfToAppData {
     uint16_t channels[RC_CHANNELS];
     bool outputActive;
     bool hardwareError;
+    bool bindScanOpen;
+    bool bindPacketReceived;
+    uint32_t rfToAppQueueDrops;
 };
 
 xlrs::LatestValue<RfToAppData> g_rfToApp;
+xlrs::SpscRing<xlrs::AppTelemetryMessage, 4> g_appTelemetryToRf;
+xlrs::SpscRing<xlrs::AppTelemetryMessage, 4> g_rfTelemetryToApp;
 
 // Core 1 (RF) bumps this every loop; core 0 watches it to gate the hardware watchdog. A stall in
 // EITHER core stops the heartbeat-gated feed and lets the watchdog reboot the module.
@@ -59,6 +67,8 @@ static std::atomic<uint32_t> g_rfHeartbeat{0};
 static constexpr uint32_t WATCHDOG_TIMEOUT_MS    = 1000; // HW reboots if not fed within this
 static constexpr uint32_t RF_STALL_MS            = 500;  // stop feeding if RF core stalls this long
 static constexpr uint32_t WATCHDOG_BOOT_GRACE_MS = 3000; // feed unconditionally until RF core is up
+static constexpr uint32_t BIND_SCAN_NORMAL_WINDOW_MS = 4000;
+static constexpr uint32_t BIND_SCAN_WINDOW_MS = 1500;
 
 xlrs::Link g_link;
 xlrs::RfScheduler g_scheduler;
@@ -76,15 +86,71 @@ static uint16_t localChannels[RC_CHANNELS] = {
     RC_US_MID, RC_US_MID, RC_US_MID, RC_THROTTLE_FAILSAFE,
     RC_US_MID, RC_US_MID, RC_US_MID, RC_US_MID};
 static bool g_configFault = false;
+static uint32_t g_crsfRcFramesOut = 0;
+static uint32_t g_crsfLinkStatsOut = 0;
+static uint32_t g_fcCrsfFramesSeen = 0;
+static uint32_t g_fcCrsfFramesQueued = 0;
+static uint32_t g_fcCrsfFramesDropped = 0;
+static uint32_t g_lastFcCrsfFrameMs = 0;
+static uint32_t g_lastCrsfRcOutMs = 0;
 
-// Linear map with clamping: an out-of-range RC value must not extrapolate past the CRSF limits.
-static long mapRange(long value, long inMin, long inMax, long outMin, long outMax) {
-    if (value < inMin) value = inMin;
-    if (value > inMax) value = inMax;
-    return (value - inMin) * (outMax - outMin) / (inMax - inMin) + outMin;
+static void blinkStatusLedBlocking(uint8_t pulses, uint32_t onMs, uint32_t offMs) {
+    for (uint8_t i = 0; i < pulses; ++i) {
+        gpio_put(STATUS_LED_PIN, true);
+        xlrs::hal::sleepMs(onMs);
+        gpio_put(STATUS_LED_PIN, false);
+        xlrs::hal::sleepMs(offMs);
+    }
 }
 
-static void updateLED(xlrs::LinkState state, bool outputActive, bool hardwareError) {
+static void onCrsfFrameFromFlightController(const uint8_t *frame, uint8_t frameLen) {
+    if (!frame || frameLen < 3) return;
+    const uint8_t frameType = frame[2];
+    if (frameType == CRSF_FRAMETYPE_RC_CHANNELS_PACKED ||
+        frameType == CRSF_FRAMETYPE_LINK_STATISTICS) {
+        return;
+    }
+
+    g_fcCrsfFramesSeen++;
+    g_lastFcCrsfFrameMs = xlrs::hal::nowMs();
+    xlrs::AppTelemetryMessage message{};
+    if (xlrs::makeCrsfFrameMessage(frame, frameLen, message) &&
+        g_appTelemetryToRf.push(message)) {
+        g_fcCrsfFramesQueued++;
+    } else {
+        g_fcCrsfFramesDropped++;
+    }
+}
+
+static void applyRxAppTelemetry(const xlrs::AppTelemetryMessage& message) {
+    xlrs::RfConfigData pendingConfig = g_rfConfig;
+    if (xlrs::parseRxConfigMessage(message.data, message.len, pendingConfig)) {
+        g_rfConfig = pendingConfig;
+        xlrs::RfConfig::save(g_rfConfig);
+        printf("[RX CONFIG] RF config updated from TX. Reboot both modules to apply.\n");
+        return;
+    }
+
+    uint8_t uid[xlrs::LINK_UID_SIZE] = {};
+    if (xlrs::parseBindUidMessage(message.data, message.len, uid)) {
+        if (g_bindingStore.setBindingUid(uid)) {
+            printf("[RX CONFIG] Binding identity updated from TX. Rebooting RX...\n");
+            blinkStatusLedBlocking(5, 40, 40);
+            xlrs::hal::sleepMs(100);
+            watchdog_reboot(0, 0, 0);
+        }
+        return;
+    }
+
+    if (xlrs::appTelemetryHasPrefix(message.data, message.len, xlrs::AppTelemetryType::Reboot)) {
+        printf("[RX CONFIG] Reboot command received from TX.\n");
+        xlrs::hal::sleepMs(100);
+        watchdog_reboot(0, 0, 0);
+    }
+}
+
+static void updateLED(xlrs::LinkState state, bool outputActive, bool hardwareError,
+                      bool bindScanOpen, bool bindPacketReceived) {
     if (xlrs::hal::nowMs() - lastLedUpdate < LED_UPDATE_INTERVAL_MS) return;
     lastLedUpdate = xlrs::hal::nowMs();
 
@@ -94,6 +160,11 @@ static void updateLED(xlrs::LinkState state, bool outputActive, bool hardwareErr
     bool on = false;
     if (g_configFault || hardwareError) {
         on = true;
+    } else if (bindPacketReceived) {
+        on = (msCounter % 100) < 75;
+    } else if (bindScanOpen) {
+        const uint32_t phase = msCounter % 600;
+        on = phase < 70 || (phase >= 140 && phase < 210);
     } else if (state == xlrs::LinkState::Binding) {
         on = (msCounter % 100) < 50;
     } else if (state == xlrs::LinkState::Connected && outputActive) {
@@ -159,6 +230,7 @@ static void setup_app_core() {
     }
 
     crsf.begin(CRSF_BAUDRATE);
+    crsf.onPacketRaw = onCrsfFrameFromFlightController;
 
     gpio_init(STATUS_LED_PIN);
     gpio_set_dir(STATUS_LED_PIN, GPIO_OUT);
@@ -194,27 +266,16 @@ static void app_core_loop() {
 
         if (outputActive) {
             crsf_channels_t crsfChannels{};
-            crsfChannels.ch0 = mapRange(localChannels[0], RC_US_MIN, RC_US_MAX, CRSF_CHANNEL_VALUE_1000, CRSF_CHANNEL_VALUE_2000);
-            crsfChannels.ch1 = mapRange(localChannels[1], RC_US_MIN, RC_US_MAX, CRSF_CHANNEL_VALUE_1000, CRSF_CHANNEL_VALUE_2000);
-            crsfChannels.ch2 = mapRange(localChannels[2], RC_US_MIN, RC_US_MAX, CRSF_CHANNEL_VALUE_1000, CRSF_CHANNEL_VALUE_2000);
-            crsfChannels.ch3 = mapRange(localChannels[3], RC_US_MIN, RC_US_MAX, CRSF_CHANNEL_VALUE_1000, CRSF_CHANNEL_VALUE_2000);
-            crsfChannels.ch4 = mapRange(localChannels[4], RC_US_MIN, RC_US_MAX, CRSF_CHANNEL_VALUE_1000, CRSF_CHANNEL_VALUE_2000);
-            crsfChannels.ch5 = mapRange(localChannels[5], RC_US_MIN, RC_US_MAX, CRSF_CHANNEL_VALUE_1000, CRSF_CHANNEL_VALUE_2000);
-            crsfChannels.ch6 = mapRange(localChannels[6], RC_US_MIN, RC_US_MAX, CRSF_CHANNEL_VALUE_1000, CRSF_CHANNEL_VALUE_2000);
-            crsfChannels.ch7 = mapRange(localChannels[7], RC_US_MIN, RC_US_MAX, CRSF_CHANNEL_VALUE_1000, CRSF_CHANNEL_VALUE_2000);
-
-            uint16_t center = CRSF_CHANNEL_VALUE_MID;
-            crsfChannels.ch8 = center;
-            crsfChannels.ch9 = center;
-            crsfChannels.ch10 = center;
-            crsfChannels.ch11 = center;
-            crsfChannels.ch12 = center;
-            crsfChannels.ch13 = center;
-            crsfChannels.ch14 = center;
-            crsfChannels.ch15 = center;
+            uint16_t crsfRcUs[CRSF_NUM_CHANNELS] = {};
+            for (uint8_t i = 0; i < CRSF_NUM_CHANNELS; ++i) {
+                crsfRcUs[i] = i < RC_CHANNELS ? localChannels[i] : RC_US_MID;
+            }
+            xlrs::rcUsToCrsfChannels(crsfRcUs, crsfChannels);
 
             crsf.queuePacket(CRSF_ADDRESS_FLIGHT_CONTROLLER, CRSF_FRAMETYPE_RC_CHANNELS_PACKED,
                              &crsfChannels, CRSF_FRAME_RC_CHANNELS_PAYLOAD_SIZE);
+            g_crsfRcFramesOut++;
+            g_lastCrsfRcOutMs = now;
         }
     }
 
@@ -224,14 +285,34 @@ static void app_core_loop() {
         xlrs::buildCrsfLinkStatistics(rfData.stats, stats);
         crsf.queuePacket(CRSF_ADDRESS_FLIGHT_CONTROLLER, CRSF_FRAMETYPE_LINK_STATISTICS,
                          stats, sizeof(stats));
-        printf("[RX STATUS] State: %d LQ: %u%% RSSI: %d dBm | PHY timeouts: %lu CRC: %lu%s\n",
+        g_crsfLinkStatsOut++;
+        const uint32_t fcAge = g_lastFcCrsfFrameMs == 0 ? 0 : now - g_lastFcCrsfFrameMs;
+        const uint32_t rcOutAge = g_lastCrsfRcOutMs == 0 ? 0 : now - g_lastCrsfRcOutMs;
+        printf("[RX STATUS] State: %d LQ: %u%% RSSI: %d dBm | PHY timeouts: %lu CRC: %lu | out:%u crsf_rc:%lu age:%lums stats:%lu fc:%lu fcq:%lu fcdrop:%lu fcage:%lums qdrop:%lu%s\n",
                (int)state, (unsigned)rfData.stats.lqUp, (int)rfData.stats.rssiDbm,
                (unsigned long)g_phy.spiTimeouts(), (unsigned long)g_phy.crcErrors(),
-               rfData.hardwareError ? " [HW FAULT]" : "");
+               outputActive ? 1u : 0u,
+               (unsigned long)g_crsfRcFramesOut,
+               (unsigned long)rcOutAge,
+               (unsigned long)g_crsfLinkStatsOut,
+               (unsigned long)g_fcCrsfFramesSeen,
+               (unsigned long)g_fcCrsfFramesQueued,
+               (unsigned long)g_fcCrsfFramesDropped,
+               (unsigned long)fcAge,
+               (unsigned long)rfData.rfToAppQueueDrops,
+               rfData.hardwareError ? " [HW FAULT]" :
+               rfData.bindPacketReceived ? " [BIND RX]" :
+               rfData.bindScanOpen ? " [BIND SCAN]" : "");
     }
 
-    updateLED(state, outputActive, rfData.hardwareError);
+    updateLED(state, outputActive, rfData.hardwareError,
+              rfData.bindScanOpen, rfData.bindPacketReceived);
     crsf.loop();
+
+    xlrs::AppTelemetryMessage telemetryMessage{};
+    while (g_rfTelemetryToApp.pop(telemetryMessage)) {
+        applyRxAppTelemetry(telemetryMessage);
+    }
 }
 
 // RF core (core 1) does NOT touch stdio — printf over USB CDC is blocking and not multicore-safe,
@@ -272,6 +353,53 @@ static void rf_core_main() {
     }
 
     while (true) {
+        static bool bindScanning = false;
+        static uint32_t nextBindScanSwitchMs = xlrs::hal::nowMs() + BIND_SCAN_NORMAL_WINDOW_MS;
+        static bool bindPacketReceived = false;
+        static bool pendingBindMessageReady = false;
+        static xlrs::AppTelemetryMessage pendingBindMessage{};
+        static bool normalLinkSeen = false;
+        static bool telemetryPending = false;
+        static xlrs::AppTelemetryMessage pendingTelemetryMessage{};
+        xlrs::AppTelemetryMessage telemetryMessage{};
+        if (telemetryPending) {
+            telemetryPending = !g_link.queueTelemetry(pendingTelemetryMessage.data,
+                                                      pendingTelemetryMessage.len);
+        }
+        if (!telemetryPending && g_appTelemetryToRf.pop(telemetryMessage)) {
+            telemetryPending = !g_link.queueTelemetry(telemetryMessage.data, telemetryMessage.len);
+            if (telemetryPending) {
+                pendingTelemetryMessage = telemetryMessage;
+            }
+        }
+
+        // Bind-scan windowing only matters before the first link of this power cycle. Once
+        // connected, normalLinkSeen latches and the RX never re-enters bind scan, so the window
+        // timer — and its per-iteration nowMs() (a 64-bit divide on the RF-core spin loop) — is
+        // skipped in the steady-state hot path. processedTick() free-runs off the hardware timer
+        // regardless of link state, so the scan windows still toggle while disconnected.
+        const xlrs::LinkState linkState = g_link.state();
+        if (linkState == xlrs::LinkState::Connected || normalLinkSeen || bindPacketReceived) {
+            if (linkState == xlrs::LinkState::Connected) normalLinkSeen = true;
+            if (bindScanning) {
+                g_link.setLinkUid(uid);
+                bindScanning = false;
+            }
+        } else {
+            const uint32_t now = xlrs::hal::nowMs();
+            if ((int32_t)(now - nextBindScanSwitchMs) >= 0) {
+                if (bindScanning) {
+                    g_link.setLinkUid(uid);
+                    bindScanning = false;
+                    nextBindScanSwitchMs = now + BIND_SCAN_NORMAL_WINDOW_MS;
+                } else {
+                    g_link.startBindScan();
+                    bindScanning = true;
+                    nextBindScanSwitchMs = now + BIND_SCAN_WINDOW_MS;
+                }
+            }
+        }
+
         g_scheduler.poll();
 
         static uint32_t lastServiceTick = 0;
@@ -279,13 +407,34 @@ static void rf_core_main() {
         if (currentTick > lastServiceTick) {
             lastServiceTick = currentTick;
 
+            uint8_t receivedBindUid[xlrs::LINK_UID_SIZE] = {};
+            xlrs::AppTelemetryMessage bindMessage{};
+            if (g_link.takeReceivedBindUid(receivedBindUid) &&
+                xlrs::makeBindUidMessage(receivedBindUid, bindMessage)) {
+                bindPacketReceived = true;
+                bindScanning = false;
+                g_link.setLinkUid(receivedBindUid);
+                if (!g_rfTelemetryToApp.push(bindMessage)) {
+                    pendingBindMessage = bindMessage;
+                    pendingBindMessageReady = true;
+                }
+            }
+            if (pendingBindMessageReady && g_rfTelemetryToApp.push(pendingBindMessage)) {
+                pendingBindMessageReady = false;
+            }
+
             RfToAppData rfData;
             rfData.state = g_link.state();
             rfData.stats = g_link.stats();
             g_link.getChannels(rfData.channels, RC_CHANNELS);
             rfData.outputActive = g_link.outputActive();
             rfData.hardwareError = !g_phy.healthy();
+            rfData.bindScanOpen = bindScanning;
+            rfData.bindPacketReceived = bindPacketReceived;
+            rfData.rfToAppQueueDrops = g_rfTelemetryToApp.dropped();
             g_rfToApp.store(rfData);
+
+            xlrs::pumpLinkTelemetryToApp(g_link, g_rfTelemetryToApp);
         }
 
         g_rfHeartbeat.fetch_add(1, std::memory_order_release);

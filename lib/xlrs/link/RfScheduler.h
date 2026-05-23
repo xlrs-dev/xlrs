@@ -68,6 +68,7 @@ public:
 
 private:
     bool recoverPhyIfNeeded();
+    void syncPhyIdentity(bool force = false);
 
     std::atomic<uint32_t> _tickEvents{0};
     std::atomic<uint32_t> _rxDoneEvents{0};
@@ -94,6 +95,8 @@ private:
     uint32_t     _armedTickStartUs = 0;
     Pfd          _pfd{};
     HwTimer*     _timer = nullptr;
+    uint32_t     _syncedIdentityRevision = 0;
+    bool         _identitySynced = false;
 
     uint32_t _lastProcessedTickEvent = 0;
     uint32_t _lastProcessedRxEvent = 0;

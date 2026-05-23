@@ -6,7 +6,7 @@ built around an SX1280 2.4 GHz RF link.
 This repository is intentionally limited to the radio bridge:
 
 ```text
-Controller UART -> xlrs_tx -> SX1280 RF link -> xlrs_rx -> CRSF UART -> Flight controller
+Controller UART or CRSF -> xlrs_tx -> SX1280 RF link -> xlrs_rx -> CRSF UART -> Flight controller
 ```
 
 Handset firmware, RC controller UI, model memory, battery-management code, web
@@ -43,6 +43,19 @@ Expected startup banners:
 
 For the full workflow, see [Build, Test, Flash](docs/build-test-flash.md).
 
+## TX Controller Protocol
+
+The TX firmware supports two controller-facing protocols selected at build time:
+
+| Protocol | Build flag | Status |
+| --- | --- | --- |
+| Custom UART | `-DXLRS_TX_CONTROLLER_PROTOCOL=UART` | Default |
+| CRSF | `-DXLRS_TX_CONTROLLER_PROTOCOL=CRSF` | Supported |
+
+The CRSF build accepts controller RC channels, publishes link statistics,
+supports device discovery and RF config parameters, and exposes Bind RX for
+unconnected RX pairing. See [CRSF Features](docs/crsf/index.md).
+
 ## Repository Layout
 
 | Path | Purpose |
@@ -53,7 +66,7 @@ For the full workflow, see [Build, Test, Flash](docs/build-test-flash.md).
 | `lib/xlrs/phy/` | Native SX1280 PHY |
 | `lib/xlrs/hal/` | Pico SDK hardware adapters |
 | `lib/UARTProtocol/` | Controller UART protocol consumed by the TX module |
-| `lib/crsfSerial/` | CRSF output support used by the RX module |
+| `lib/crsfSerial/` | CRSF serial support used by TX controller mode and RX output |
 | `test/` | Host-native CMake/CTest suite |
 | `scripts/` | Build, test, flash, lint, and monitor helpers |
 | `docs/` | Developer, hardware, interface, and troubleshooting docs |
@@ -95,12 +108,16 @@ See [Pinout](docs/hardware/pinout.md) for the full list.
 - [Architecture](docs/developer/architecture.md)
 - [Terminology](docs/developer/terminology.md)
 - [Interfaces](docs/interfaces/index.md)
+- [CRSF Features](docs/crsf/index.md)
+- [CRSF Binding](docs/crsf/binding.md)
 - [Troubleshooting](docs/troubleshooting/index.md)
 
 ## Binding
 
-TX and RX must use the same binding phrase. The phrase is hashed into a Link UID
-used for FHSS seeding, SX1280 sync-word configuration, and sync-frame UID checks.
+TX and RX must use the same Link UID. The UID can be derived locally from a
+shared binding phrase or learned by RX through the CRSF Bind RX OTA workflow.
+The Link UID is used for FHSS seeding, SX1280 sync-word configuration, and
+sync-frame UID checks.
 
 Override the default phrase at configure time:
 
@@ -110,6 +127,10 @@ cmake --build build --target xlrs_tx xlrs_rx
 ```
 
 Flash both TX and RX from builds that use the same phrase.
+
+When TX is built with `-DXLRS_TX_CONTROLLER_PROTOCOL=CRSF`, Bind RX can pair an
+unconnected RX by sending the TX Link UID during a temporary OTA bind window.
+See [CRSF Binding](docs/crsf/binding.md).
 
 ## Failsafe
 

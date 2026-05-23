@@ -56,7 +56,7 @@ typedef enum
     // MSP commands
     CRSF_FRAMETYPE_MSP_REQ = 0x7A,   // response request using msp sequence as command
     CRSF_FRAMETYPE_MSP_RESP = 0x7B,  // reply with 58 byte chunked binary
-    CRSF_FRAMETYPE_MSP_WRITE = 0x7C, // write with 8 byte chunked binary (OpenTX outbound telemetry buffer limit)
+    CRSF_FRAMETYPE_MSP_WRITE = 0x7C, // write with 8 byte chunked binary (CRSF controller outbound telemetry buffer limit)
 } crsf_frame_type_e;
 
 typedef enum
@@ -75,6 +75,54 @@ typedef enum
     CRSF_ADDRESS_CRSF_RECEIVER = 0xEC,
     CRSF_ADDRESS_CRSF_TRANSMITTER = 0xEE,
 } crsf_addr_e;
+
+static inline bool isCrsfFrameAddress(uint8_t value)
+{
+    switch (value) {
+    case CRSF_ADDRESS_BROADCAST:
+    case CRSF_ADDRESS_USB:
+    case CRSF_ADDRESS_TBS_CORE_PNP_PRO:
+    case CRSF_ADDRESS_RESERVED1:
+    case CRSF_ADDRESS_CURRENT_SENSOR:
+    case CRSF_ADDRESS_GPS:
+    case CRSF_ADDRESS_TBS_BLACKBOX:
+    case CRSF_ADDRESS_FLIGHT_CONTROLLER:
+    case CRSF_ADDRESS_RESERVED2:
+    case CRSF_ADDRESS_RACE_TAG:
+    case CRSF_ADDRESS_RADIO_TRANSMITTER:
+    case CRSF_ADDRESS_CRSF_RECEIVER:
+    case CRSF_ADDRESS_CRSF_TRANSMITTER:
+        return true;
+    default:
+        return false;
+    }
+}
+
+typedef enum
+{
+    CRSF_PARAM_UINT8 = 0x00,
+    CRSF_PARAM_INT8 = 0x01,
+    CRSF_PARAM_UINT16 = 0x02,
+    CRSF_PARAM_INT16 = 0x03,
+    CRSF_PARAM_FLOAT = 0x08,
+    CRSF_PARAM_TEXT_SELECTION = 0x09,
+    CRSF_PARAM_STRING = 0x0A,
+    CRSF_PARAM_FOLDER = 0x0B,
+    CRSF_PARAM_INFO = 0x0C,
+    CRSF_PARAM_COMMAND = 0x0D,
+    CRSF_PARAM_OUT_OF_RANGE = 0x7F,
+} crsf_parameter_type_e;
+
+typedef enum
+{
+    CRSF_COMMAND_READY = 0,
+    CRSF_COMMAND_START = 1,
+    CRSF_COMMAND_PROGRESS = 2,
+    CRSF_COMMAND_CONFIRMATION_NEEDED = 3,
+    CRSF_COMMAND_CONFIRM = 4,
+    CRSF_COMMAND_CANCEL = 5,
+    CRSF_COMMAND_POLL = 6,
+} crsf_command_status_e;
 
 typedef struct crsf_header_s
 {

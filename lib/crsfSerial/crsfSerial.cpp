@@ -1,12 +1,7 @@
 #include "crsfSerial.h"
+#include "app/CrsfChannels.h"
 #include "hal/Time.h"
 #include <cstring>
-
-namespace {
-static int32_t mapRange(int32_t value, int32_t inMin, int32_t inMax, int32_t outMin, int32_t outMax) {
-    return (value - inMin) * (outMax - outMin) / (inMax - inMin) + outMin;
-}
-} // namespace
 
 // static void hexdump(void *p, size_t len)
 // {
@@ -39,11 +34,33 @@ static int32_t mapRange(int32_t value, int32_t inMin, int32_t inMax, int32_t out
 // }
 
 CrsfSerial::CrsfSerial(xlrs::hal::SerialPort &port, uint32_t baud) :
-    _port(port), _crc(0xd5), _baud(baud),
-    _lastReceive(0), _lastChannelsPacket(0), _linkIsUp(false),
-    _passthroughBaud(0), _batteryVoltage(0), _batteryCurrent(0),
-    _batteryCapacity(0), _batteryRemaining(0)
-{}
+    _port(port), _rxBufPos(0), _crc(0xd5),
+    _batteryVoltage(0), _batteryCurrent(0), _batteryCapacity(0), _batteryRemaining(0),
+    _baud(baud), _lastReceive(0), _lastChannelsPacket(0), _linkIsUp(false),
+    _passthroughBaud(0)
+{
+    memset(_rxBuf, 0, sizeof(_rxBuf));
+    memset(&_linkStatistics, 0, sizeof(_linkStatistics));
+    memset(&_gpsSensor, 0, sizeof(_gpsSensor));
+    memset(&_batterySensor, 0, sizeof(_batterySensor));
+    for (unsigned int i = 0; i < CRSF_NUM_CHANNELS; ++i) {
+        _channels[i] = 1500;
+    }
+
+    onLinkUp = nullptr;
+    onLinkDown = nullptr;
+    onOobData = nullptr;
+    onPacketChannels = nullptr;
+    onPacketLinkStatistics = nullptr;
+    onPacketGps = nullptr;
+    onPacketBattery = nullptr;
+    onDeviceInfo = nullptr;
+    onParameterEntry = nullptr;
+    onDevicePing = nullptr;
+    onParameterRead = nullptr;
+    onParameterWrite = nullptr;
+    onPacketRaw = nullptr;
+}
 
 void CrsfSerial::begin(uint32_t baud)
 {
@@ -95,7 +112,12 @@ void CrsfSerial::handleByteReceived()
     do
     {
         reprocess = false;
-        if (_rxBufPos > 1)
+        if (_rxBufPos > 0 && !isCrsfFrameAddress(_rxBuf[0]))
+        {
+            shiftRxBuffer(1);
+            reprocess = true;
+        }
+        else if (_rxBufPos > 1)
         {
             uint8_t len = _rxBuf[1];
             // Sanity check the declared length isn't outside Type + X{1,CRSF_MAX_PAYLOAD_LEN} + CRC
@@ -112,6 +134,9 @@ void CrsfSerial::handleByteReceived()
                 uint8_t crc = _crc.calc(&_rxBuf[2], len - 1);
                 if (crc == inCrc)
                 {
+                    if (onPacketRaw) {
+                        onPacketRaw(_rxBuf, (uint8_t)(len + 2));
+                    }
                     processPacketIn(len);
                     shiftRxBuffer(len + 2);
                     reprocess = true;
@@ -128,10 +153,15 @@ void CrsfSerial::handleByteReceived()
 
 void CrsfSerial::checkPacketTimeout()
 {
-    // If we haven't received data in a long time, flush the buffer a byte at a time (to trigger shiftyByte)
     if (_rxBufPos > 0 && xlrs::hal::nowMs() - _lastReceive > CRSF_PACKET_TIMEOUT_MS)
-        while (_rxBufPos)
-            shiftRxBuffer(1);
+    {
+        if (onOobData) {
+            for (uint8_t i = 0; i < _rxBufPos; ++i) {
+                onOobData(_rxBuf[i]);
+            }
+        }
+        _rxBufPos = 0;
+    }
 }
 
 void CrsfSerial::checkLinkDown()
@@ -144,9 +174,28 @@ void CrsfSerial::checkLinkDown()
     }
 }
 
+uint8_t CrsfSerial::standardPayloadLen(const crsf_header_t *p) const
+{
+    if (!p || p->frame_size < CRSF_FRAME_LENGTH_TYPE_CRC) return 0;
+    return (uint8_t)(p->frame_size - CRSF_FRAME_LENGTH_TYPE_CRC);
+}
+
+uint8_t CrsfSerial::extendedPayloadLen(const crsf_header_t *p) const
+{
+    if (!p || p->frame_size < CRSF_FRAME_LENGTH_EXT_TYPE_CRC) return 0;
+    return (uint8_t)(p->frame_size - CRSF_FRAME_LENGTH_EXT_TYPE_CRC);
+}
+
 void CrsfSerial::processPacketIn(uint8_t len)
 {
+    (void)len;
     const crsf_header_t *hdr = (crsf_header_t *)_rxBuf;
+    if (hdr->type >= CRSF_FRAMETYPE_DEVICE_PING && hdr->type <= CRSF_FRAMETYPE_COMMAND)
+    {
+        packetExtendedHeader(hdr);
+        return;
+    }
+
     if ((hdr->device_addr == CRSF_ADDRESS_CRSF_TRANSMITTER || hdr->device_addr == CRSF_ADDRESS_CRSF_RECEIVER) && hdr->type == CRSF_FRAMETYPE_DEVICE_INFO)
     {
         packetDeviceInfo(hdr);
@@ -182,6 +231,40 @@ void CrsfSerial::processPacketIn(uint8_t len)
     } // CRSF_ADDRESS_FLIGHT_CONTROLLER
 }
 
+void CrsfSerial::packetExtendedHeader(const crsf_header_t *p)
+{
+    if (p->frame_size < CRSF_FRAME_LENGTH_EXT_TYPE_CRC) return;
+    uint8_t payloadLen = extendedPayloadLen(p);
+
+    uint8_t destination = p->data[0];
+    uint8_t origin = p->data[1];
+    const uint8_t *payload = &p->data[2];
+
+    switch (p->type)
+    {
+    case CRSF_FRAMETYPE_DEVICE_PING:
+        if (payloadLen == 0 && onDevicePing)
+            onDevicePing(destination, origin);
+        break;
+    case CRSF_FRAMETYPE_DEVICE_INFO:
+        packetDeviceInfo(p);
+        break;
+    case CRSF_FRAMETYPE_PARAMETER_SETTINGS_ENTRY:
+        packetParameterEntry(p);
+        break;
+    case CRSF_FRAMETYPE_PARAMETER_READ:
+        if (payloadLen >= 2 && onParameterRead)
+            onParameterRead(payload[0], payload[1], destination, origin);
+        break;
+    case CRSF_FRAMETYPE_PARAMETER_WRITE:
+        if (payloadLen >= 1 && onParameterWrite)
+            onParameterWrite(payload[0], &payload[1], (uint8_t)(payloadLen - 1), destination, origin);
+        break;
+    default:
+        break;
+    }
+}
+
 // Shift the bytes in the RxBuf down by cnt bytes
 void CrsfSerial::shiftRxBuffer(uint8_t cnt)
 {
@@ -206,26 +289,14 @@ void CrsfSerial::shiftRxBuffer(uint8_t cnt)
 
 void CrsfSerial::packetChannelsPacked(const crsf_header_t *p)
 {
-    crsf_channels_t *ch = (crsf_channels_t *)&p->data;
-    _channels[0] = ch->ch0;
-    _channels[1] = ch->ch1;
-    _channels[2] = ch->ch2;
-    _channels[3] = ch->ch3;
-    _channels[4] = ch->ch4;
-    _channels[5] = ch->ch5;
-    _channels[6] = ch->ch6;
-    _channels[7] = ch->ch7;
-    _channels[8] = ch->ch8;
-    _channels[9] = ch->ch9;
-    _channels[10] = ch->ch10;
-    _channels[11] = ch->ch11;
-    _channels[12] = ch->ch12;
-    _channels[13] = ch->ch13;
-    _channels[14] = ch->ch14;
-    _channels[15] = ch->ch15;
+    if (standardPayloadLen(p) != CRSF_FRAME_RC_CHANNELS_PAYLOAD_SIZE) return;
 
-    for (unsigned int i=0; i<CRSF_NUM_CHANNELS; ++i)
-        _channels[i] = mapRange(_channels[i], CRSF_CHANNEL_VALUE_1000, CRSF_CHANNEL_VALUE_2000, 1000, 2000);
+    const crsf_channels_t *crsfChannels = (const crsf_channels_t *)&p->data;
+    uint16_t rcChannels[CRSF_NUM_CHANNELS];
+    xlrs::crsfChannelsToRcUs(*crsfChannels, rcChannels);
+    for (unsigned int i = 0; i < CRSF_NUM_CHANNELS; ++i) {
+        _channels[i] = rcChannels[i];
+    }
 
     if (!_linkIsUp && onLinkUp)
         onLinkUp();
@@ -238,6 +309,8 @@ void CrsfSerial::packetChannelsPacked(const crsf_header_t *p)
 
 void CrsfSerial::packetLinkStatistics(const crsf_header_t *p)
 {
+    if (standardPayloadLen(p) != CRSF_FRAME_LINK_STATISTICS_PAYLOAD_SIZE) return;
+
     const crsfLinkStatistics_t *link = (crsfLinkStatistics_t *)p->data;
     memcpy(&_linkStatistics, link, sizeof(_linkStatistics));
 
@@ -247,6 +320,8 @@ void CrsfSerial::packetLinkStatistics(const crsf_header_t *p)
 
 void CrsfSerial::packetGps(const crsf_header_t *p)
 {
+    if (standardPayloadLen(p) != CRSF_FRAME_GPS_PAYLOAD_SIZE) return;
+
     const crsf_sensor_gps_t *gps = (crsf_sensor_gps_t *)p->data;
     _gpsSensor.latitude = be32toh(gps->latitude);
     _gpsSensor.longitude = be32toh(gps->longitude);
@@ -259,27 +334,41 @@ void CrsfSerial::packetGps(const crsf_header_t *p)
         onPacketGps(&_gpsSensor);
 }
 
-// DEVICE_INFO payload: 1 version, 1 param_count, 2 sw, 2 hw, 4 serial, null-term name
+// DEVICE_INFO payload: null-term name, then 14 trailing bytes: 4 serial, 4 hw, 4 fw,
+// 1 param_count, 1 version. Only name + serial are surfaced via onDeviceInfo.
 void CrsfSerial::packetDeviceInfo(const crsf_header_t *p)
 {
-    uint8_t payloadLen = p->frame_size >= 2 ? (uint8_t)(p->frame_size - 2) : 0;
-    if (payloadLen < 10 || !p->data) return;
-    const uint8_t *serial4 = &p->data[6];
-    const char *name = (const char *)&p->data[10];
-    if (name - (const char *)p->data >= (int)payloadLen) return;
+    bool extended = p->type >= CRSF_FRAMETYPE_DEVICE_PING;
+    uint8_t payloadOffset = extended ? 2 : 0;
+    uint8_t payloadLen = p->frame_size >= (uint8_t)(CRSF_FRAME_LENGTH_TYPE_CRC + payloadOffset)
+        ? (uint8_t)(p->frame_size - CRSF_FRAME_LENGTH_TYPE_CRC - payloadOffset)
+        : 0;
+    if (payloadLen < 15) return;
+
+    const uint8_t *payload = &p->data[payloadOffset];
+    const char *name = (const char *)payload;
+    size_t nameLen = 0;
+    while (nameLen < payloadLen && name[nameLen] != '\0') nameLen++;
+    if (nameLen >= payloadLen || payloadLen < nameLen + 1 + 14) return;
+    const uint8_t *serial4 = (const uint8_t *)&payload[nameLen + 1];
     if (onDeviceInfo)
-        onDeviceInfo(serial4, name, p->device_addr);  // source: 0xEE=TX, 0xEC=RX
+        onDeviceInfo(serial4, name, extended ? p->data[1] : p->device_addr);  // source: 0xEE=TX, 0xEC=RX
 }
 
 // PARAMETER_SETTINGS_ENTRY: [fieldId, chunksRemaining, parent, type/hidden, label\0, value...]
 void CrsfSerial::packetParameterEntry(const crsf_header_t *p)
 {
-    uint8_t payloadLen = p->frame_size >= 2 ? (uint8_t)(p->frame_size - 2) : 0;
-    if (payloadLen < 5 || !p->data) return;
-    uint8_t fieldId = p->data[0];
-    uint8_t chunksRemaining = p->data[1];
-    uint8_t paramType = p->data[3] & 0x7F;
-    const char *label = (const char *)&p->data[4];
+    uint8_t payloadOffset = (p->type >= CRSF_FRAMETYPE_DEVICE_PING) ? 2 : 0;
+    uint8_t payloadLen = p->frame_size >= (uint8_t)(CRSF_FRAME_LENGTH_TYPE_CRC + payloadOffset)
+        ? (uint8_t)(p->frame_size - CRSF_FRAME_LENGTH_TYPE_CRC - payloadOffset)
+        : 0;
+    if (payloadLen < 5) return;
+
+    const uint8_t *payload = &p->data[payloadOffset];
+    uint8_t fieldId = payload[0];
+    uint8_t chunksRemaining = payload[1];
+    uint8_t paramType = payload[3] & 0x7F;
+    const char *label = (const char *)&payload[4];
     size_t labelMax = payloadLen - 4;
     size_t labelLen = 0;
     while (labelLen < labelMax && label[labelLen] != '\0') labelLen++;
@@ -292,6 +381,8 @@ void CrsfSerial::packetParameterEntry(const crsf_header_t *p)
 
 void CrsfSerial::packetBattery(const crsf_header_t *p)
 {
+    if (standardPayloadLen(p) != CRSF_FRAME_BATTERY_SENSOR_PAYLOAD_SIZE) return;
+
     // Battery sensor data is 8 bytes, big-endian
     // Format: voltage (16-bit), current (16-bit), capacity (24-bit), remaining (8-bit)
     const uint8_t *data = p->data;
@@ -333,6 +424,8 @@ void CrsfSerial::queuePacket(uint8_t addr, uint8_t type, const void *payload, ui
         return;
     if (len > CRSF_MAX_PAYLOAD_LEN)
         return;
+    if (len > 0 && !payload)
+        return;
 
     uint8_t buf[CRSF_MAX_PACKET_SIZE];
     buf[0] = addr;
@@ -342,6 +435,28 @@ void CrsfSerial::queuePacket(uint8_t addr, uint8_t type, const void *payload, ui
     buf[len+3] = _crc.calc(&buf[2], len + 1);
 
     write(buf, len + 4);
+}
+
+void CrsfSerial::queueExtendedPacket(uint8_t addr, uint8_t type, uint8_t destination,
+                                     uint8_t origin, const void *payload, uint8_t len)
+{
+    if (getPassthroughMode())
+        return;
+    if (len > (CRSF_MAX_PAYLOAD_LEN - 2))
+        return;
+
+    uint8_t buf[CRSF_MAX_PACKET_SIZE];
+    buf[0] = addr;
+    buf[1] = len + CRSF_FRAME_LENGTH_EXT_TYPE_CRC; // type + dest + origin + payload + crc
+    buf[2] = type;
+    buf[3] = destination;
+    buf[4] = origin;
+    if (len > 0 && payload) {
+        memcpy(&buf[5], payload, len);
+    }
+    buf[len + 5] = _crc.calc(&buf[2], len + 3);
+
+    write(buf, len + 6);
 }
 
 /**

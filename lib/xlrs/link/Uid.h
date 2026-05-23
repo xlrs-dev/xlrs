@@ -23,6 +23,12 @@ inline void linkUidFromPhrase(const char* phrase, uint8_t out[LINK_UID_SIZE]) {
     for (int i = 0; i < LINK_UID_SIZE; ++i) out[i] = (uint8_t)(h >> (56 - 8 * i));
 }
 
+// Well-known temporary identity used only while an RX is explicitly scanning for a
+// bind frame. The bind frame carries the real Link UID that should be persisted.
+inline void bindModeUid(uint8_t out[LINK_UID_SIZE]) {
+    linkUidFromPhrase("XLRS-BIND-V1", out);
+}
+
 // FHSS PRNG seed = the lower 32 bits of the Link UID (docs/developer/configuration.md §2.C).
 inline uint32_t fhssSeedFromUid(const uint8_t uid[LINK_UID_SIZE]) {
     return ((uint32_t)uid[4] << 24) | ((uint32_t)uid[5] << 16) |

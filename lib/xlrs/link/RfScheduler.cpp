@@ -36,6 +36,8 @@ bool RfScheduler::begin(IRadioPhy* phy, Link* link, uint8_t rateIndex) {
     _armedTick = 0;
     _armedPos = 0;
     _armedTickStartUs = 0;
+    _syncedIdentityRevision = 0;
+    _identitySynced = false;
     _tickEvents.store(0, std::memory_order_release);
     _rxDoneEvents.store(0, std::memory_order_release);
     _txDoneEvents.store(0, std::memory_order_release);
@@ -43,9 +45,7 @@ bool RfScheduler::begin(IRadioPhy* phy, Link* link, uint8_t rateIndex) {
     _lastProcessedRxEvent = 0;
     _lastProcessedTxEvent = 0;
 
-    if (_phy && _link) {
-        _phy->setSyncWord(_link->syncWord());
-    }
+    syncPhyIdentity(true);
 
     if (!_timer) {
         _timer = createHwTimer();
@@ -123,6 +123,7 @@ void RfScheduler::onTick(uint32_t tick) {
 
     // 1. Advance timing/hop position at the start of the tick slot.
     _link->onTick(tick);
+    syncPhyIdentity();
 
     // Dynamically adopt rate changes initiated by Link after onTick(), because
     // synchronized rate switches are applied exactly on the slot boundary.
@@ -240,10 +241,23 @@ Slot RfScheduler::currentSlot() const {
 bool RfScheduler::recoverPhyIfNeeded() {
     if (!_phy || _phy->healthy()) return true;
     const bool ok = _phy->recover();
+    if (ok) {
+        syncPhyIdentity(true);
+    }
     if (_link) {
         _link->notePhyRecovery(ok);
     }
     return ok;
+}
+
+void RfScheduler::syncPhyIdentity(bool force) {
+    if (!_phy || !_link) return;
+    const uint32_t revision = _link->identityRevision();
+    if (!force && _identitySynced && revision == _syncedIdentityRevision) return;
+
+    _phy->setSyncWord(_link->syncWord());
+    _syncedIdentityRevision = revision;
+    _identitySynced = true;
 }
 
 void RfScheduler::poll() {

@@ -8,7 +8,7 @@ current XLRS TX and RX firmware.
 The firmware in this repository is only the radio bridge:
 
 ```text
-Controller UART -> xlrs_tx -> SX1280 RF link -> xlrs_rx -> CRSF UART -> Flight controller
+Controller UART or CRSF RC -> xlrs_tx -> SX1280 RF link -> xlrs_rx -> CRSF UART -> Flight controller
 ```
 
 Handset UI, model memory, web configuration, battery management, and flight
@@ -41,12 +41,25 @@ Default SX1280 interface:
 RX status LED defaults to GP13.
 
 All defaults are CMake cache variables and can be overridden when configuring
-the build.
+the build. The TX controller protocol is selected with
+`XLRS_TX_CONTROLLER_PROTOCOL`:
+
+| Value | Controller-facing behavior |
+| --- | --- |
+| `UART` | Custom XLRS controller UART protocol. This is the default. |
+| `CRSF` | Controller-facing CRSF RC for any compatible CRSF RC controller or module bay. |
+
+Examples:
+
+```bash
+cmake -S . -B build -G Ninja -DXLRS_TX_CONTROLLER_PROTOCOL=UART
+cmake -S . -B build-crsf -G Ninja -DXLRS_TX_CONTROLLER_PROTOCOL=CRSF
+```
 
 ## Binding
 
-Binding is phrase-based. There is no implemented over-the-air pairing exchange
-where TX and RX trade hardware IDs.
+Binding is Link-UID based. A Link UID can be derived from a local binding phrase
+or learned through the OTA bind workflow.
 
 Both modules must have the same binding phrase. On boot each module:
 
@@ -60,6 +73,20 @@ Both modules must have the same binding phrase. On boot each module:
 
 If the phrases differ, the modules use different sync words and FHSS sequences,
 and the RX rejects sync frames whose UID CRC does not match.
+
+### OTA Bind
+
+When the controller-facing CRSF Bind RX command is triggered, TX temporarily
+switches to a shared XLRS bind identity for about 30 seconds and transmits a
+bind frame containing its current Link UID. An RX that has not yet connected
+normally in the current boot periodically alternates between normal acquisition
+and short bind-scan windows on that shared bind identity. If it receives a valid
+bind frame while scanning, it persists the offered Link UID and reboots.
+
+The RX does not check the normal binding phrase during bind scan; doing so would
+prevent first-time pairing. It only accepts bind frames while explicitly in
+bind-scan mode on the shared bind identity. This is discovery/pairing, not a
+cryptographic ownership proof.
 
 ### Compile-Time Binding
 
@@ -91,7 +118,7 @@ binding phrase at runtime.
 
 ## TX Controller UART Protocol
 
-The TX-side controller protocol is a simple framed UART protocol:
+The default TX-side controller protocol is a simple framed UART protocol:
 
 ```text
 [sync 0xA5][payload_length][message_type][payload bytes...][crc8]
@@ -158,11 +185,48 @@ The TX sends `UART_MSG_STATUS` about every 1000 ms when RF data is available:
 struct StatusData {
     uint8_t  connectionState; // 0 Disconnected, 1 Binding, 2 Connecting,
                               // 3 Connected, 4 Failsafe
-    uint8_t  pairingState;    // currently always 1
+    uint8_t  pairingState;    // 0 Unpaired, 1 Normal, 2 Bind TX active
     uint32_t packetsReceived; // currently not populated by TX app
     uint32_t packetsLost;     // currently mapped from missedDeadlines
 } __attribute__((packed));
 ```
+
+## TX Controller CRSF RC Protocol
+
+When built with `-DXLRS_TX_CONTROLLER_PROTOCOL=CRSF`, the TX module uses the same
+controller UART pins and baud for CRSF.
+
+Implemented today:
+
+- `CRSF_FRAMETYPE_RC_CHANNELS_PACKED` input from the controller.
+- Channels 1-8 are translated from CRSF channel units to 1000-2000 us and copied
+  into the TX RF mailbox.
+- CRSF `LINK_STATISTICS` output from TX to the controller about every 200 ms when
+  RF data is available.
+- CRSF device ping/device info for TX module discovery.
+- CRSF parameter read/write for Rate, Max Power, Dynamic Power, Region, Failsafe,
+  Bind RX, and Reboot.
+- TX forwards critical RF config writes to RX over XLRS uplink telemetry. RX
+  persists them to flash.
+- RX forwards valid flight-controller CRSF telemetry frames to TX over XLRS
+  downlink telemetry. TX writes those frames back to the controller CRSF port.
+
+CRSF RC debug counters are printed in the TX status line:
+
+```text
+CRSF rc:<n> age:<ms> ping:<n> pr:<n> pw:<n> fc:<n> bad:<n> qdrop:<n> dldrop:<n>
+```
+
+`rc` proves controller RC frames are reaching TX. `ping`, `pr`, and `pw` prove
+device discovery and parameter traffic. `fc` proves flight-controller CRSF
+telemetry completed the RX -> TX -> controller bridge.
+
+Current limitation: parameter writes persist config to flash, but RF
+rate/region/power/failsafe changes apply after reboot. A dedicated XLRS CRSF RC
+configuration script is not implemented yet. XLRS currently carries 8 OTA
+`rc_channel` values, so CRSF channels 9-16 are not transmitted over the XLRS
+uplink. See [CRSF Features](../crsf/index.md) and [CRSF Binding](../crsf/binding.md)
+for the CRSF-specific support matrix.
 
 ## RX Flight Controller Interface
 
@@ -173,6 +237,17 @@ mapped from 1000-2000 us into CRSF channel units. Channels 9-16 are held at CRSF
 midpoint.
 
 RX also emits CRSF `LINK_STATISTICS` about every 500 ms.
+
+RX status logs include CRSF output and flight-controller telemetry counters:
+
+```text
+out:<0|1> crsf_rc:<n> age:<ms> stats:<n> fc:<n> fcq:<n> fcdrop:<n> fcage:<ms> qdrop:<n>
+```
+
+`out` gates CRSF RC output. `crsf_rc` proves RX is sending CRSF RC frames to the
+flight controller. `fc` proves the flight controller is sending telemetry back to
+the RX CRSF UART, and `fcq`/`fcdrop` show whether those frames entered XLRS
+downlink telemetry.
 
 Failsafe behavior is controlled by RF config:
 
@@ -244,26 +319,35 @@ Rate table:
 | 3 | `L150` | 6666 us | 1:8 | LoRa |
 | 4 | `L50` | 20000 us | 1:4 | LoRa |
 
-Current limitation: there is no implemented external UART/CRSF/MSP command that
-edits `RfConfigData`. The firmware loads it on boot, writes defaults if invalid,
-and uses it to initialize the link. A configuration tool would need a new command
-path or a separate flashing/provisioning step.
+RF config can be changed through CRSF RC parameters when the TX is built with
+`XLRS_TX_CONTROLLER_PROTOCOL=CRSF`. The TX persists the config and forwards it to
+RX, where RX persists it too. Runtime application is still limited: RF
+rate/region/power/failsafe changes take effect after reboot.
 
 ## Implemented vs Reserved
 
 Implemented today:
 
 - TX controller channel input over UART.
+- TX controller channel input over CRSF when `XLRS_TX_CONTROLLER_PROTOCOL=CRSF`
+  is selected.
 - TX UART telemetry/status output.
+- TX CRSF link-statistics output when `XLRS_TX_CONTROLLER_PROTOCOL=CRSF` is
+  selected.
+- TX CRSF device info and critical RF config parameters when
+  `XLRS_TX_CONTROLLER_PROTOCOL=CRSF` is selected.
+- TX-mediated RX RF config persistence and RX-to-TX CRSF telemetry bridge.
 - TX runtime binding phrase update.
+- CRSF Bind RX for an unconnected RX using temporary OTA bind scan/transmit.
 - RX CRSF RC and link-statistics output.
 - Flash-backed RF config with validated defaults.
 - Flash-backed binding UID with validated defaults.
 
 Reserved or incomplete:
 
-- Runtime RX binding update.
-- Runtime RF config update.
-- True pair/bond workflow.
+- Runtime RF config application without reboot.
+- Cryptographic pair/bond ownership proof.
+- Dedicated CRSF RC configuration script.
+- CRSF bind phrase commands.
 - External MSP/config passthrough API.
 - RX battery telemetry population into TX telemetry fields.

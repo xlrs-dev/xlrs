@@ -29,6 +29,8 @@ struct LinkStats {
     uint8_t  lqDown;          // downlink LQ 0..100 (TX-measured)
     int16_t  rssiDbm;         // smoothed (EMA) RSSI
     int8_t   snr;             // LoRa only; 0 in FLRC
+    int16_t  downlinkRssiDbm; // TX-local RSSI of RX->TX downlink telemetry packets
+    int8_t   downlinkSnr;     // TX-local SNR of RX->TX downlink telemetry packets
     uint8_t  rateIndex;       // index into kRates
     uint16_t missedDeadlines; // slot prep that missed the RF slot deadline (timing health)
     uint16_t rxQueueDrops;    // RfToApp ring overflow count
@@ -87,6 +89,12 @@ public:
     void requestRate(uint8_t rateIndex);   // TX: switch rate (conveyed to RX via the Sync beacon)
     void setCipher(ICipher* c) { _cipher = c; }              // opt-in AEAD over the RC payload
     void setSessionSalt(uint32_t salt) { _sessionSalt = salt; }  // negotiated at Connect (real); fixed in sim
+    void setLinkUid(const uint8_t uid[LINK_UID_SIZE]);
+    void startBindTransmit(const uint8_t targetUid[LINK_UID_SIZE]);
+    void startBindScan();
+    bool bindTransmitActive() const { return _bindTransmitActive; }
+    bool bindScanActive() const { return _bindScanActive; }
+    bool takeReceivedBindUid(uint8_t uid[LINK_UID_SIZE]);
 
     void onTick(uint32_t tick);
     float freqForTick(uint32_t tick) const;
@@ -110,10 +118,11 @@ public:
     uint8_t          tlmRatioDenom() const { return _rate.tlmRatioDenom; }
     uint16_t         syncEveryNTicks() const { return _fhss.count() * hopInterval(); }
     uint16_t         syncWord() const { return _syncWord; }
+    uint32_t         identityRevision() const { return _identityRevision; }
     int8_t           txPowerDbm() const { return _txPowerDbm; }
     Role             role() const { return _role; }
 
-    void queueTelemetry(const uint8_t* data, size_t len) { _tlmSender.queuePayload(data, len); }
+    bool queueTelemetry(const uint8_t* data, size_t len) { return _tlmSender.queuePayload(data, len); }
     bool getTelemetry(uint8_t* outBuf, size_t& outLen) { return _tlmReceiver.getPayload(outBuf, outLen); }
 
 private:
@@ -121,6 +130,8 @@ private:
     uint16_t hopInterval() const;
     SlotKind slotKind(uint32_t tick, uint16_t pos) const;
     float    freqForPos(uint16_t pos) const;
+    void     configureIdentity(const uint8_t uid[LINK_UID_SIZE]);
+    void     resetAcquisition(LinkState state);
 
     Role         _role      = Role::Rx;
     RateConfig   _rate{};
@@ -131,6 +142,7 @@ private:
     uint32_t     _tick = 0;
     DynamicPower _power;                // TX-side dynamic power
     uint16_t     _syncWord  = 0;
+    uint32_t     _identityRevision = 0;
     ICipher*     _cipher    = nullptr;  // null ⇒ NullCipher (plaintext); opt-in AEAD (M8)
     uint32_t     _sessionSalt = 0;      // nonce salt; negotiated at Connect on real hardware
     Fhss         _fhss;                 // UID-seeded hop sequence (M4)
@@ -162,6 +174,11 @@ private:
     uint8_t          _localAckSeq = 0;
     bool             _txUseCompact = false;     // compact-frame hysteresis state (TX)
     uint16_t         _auxCenteredFrames = 0;    // consecutive RC frames eligible for compact pack
+    bool             _bindTransmitActive = false;
+    bool             _bindScanActive = false;
+    uint8_t          _bindTargetUid[LINK_UID_SIZE] = {};
+    uint8_t          _receivedBindUid[LINK_UID_SIZE] = {};
+    bool             _receivedBindUidReady = false;
 };
 
 } // namespace xlrs

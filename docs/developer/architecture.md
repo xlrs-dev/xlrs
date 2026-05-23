@@ -40,8 +40,39 @@ Strict layering; each layer depends only on the interface of the one below.
 | PHY | `phy/IRadioPhy` (`Sx1280NativePhy`) | Async radio chip control (TX/RX/freq/power) | yes (interface) |
 | Util | `util/RingBuffer` (events), `util/Mailbox` (latest-value) | Lock-free inter-core handoff | — |
 
+```mermaid
+graph TD
+    classDef app fill:#4f46e5,stroke:#312e81,stroke-width:2px,color:#fff;
+    classDef core fill:#0284c7,stroke:#075985,stroke-width:2px,color:#fff;
+    classDef timing fill:#0d9488,stroke:#115e59,stroke-width:2px,color:#fff;
+    classDef ota fill:#d97706,stroke:#9a3412,stroke-width:2px,color:#fff;
+    classDef low fill:#4b5563,stroke:#1f2937,stroke-width:2px,color:#fff;
+
+    App["Application Layer<br/>(apps/tx, apps/rx)"]:::app
+    Link["Link Layer<br/>(link/Link)"]:::core
+    Scheduler["RF Scheduler Layer<br/>(link/RfScheduler)"]:::core
+    Timing["Timing / PFD Layer<br/>(timing/HwTimer, timing/Pfd)"]:::timing
+    FHSS["FHSS Layer<br/>(fhss/Fhss)"]:::timing
+    OTA["OTA Layer<br/>(ota/OtaPacket)"]:::ota
+    Crypto["Crypto Layer<br/>(crypto/ICipher)"]:::ota
+    PHY["PHY Layer<br/>(phy/IRadioPhy)"]:::low
+    Util["Util Layer<br/>(util/RingBuffer, util/Mailbox)"]:::low
+
+    App --> Link
+    Link --> Scheduler
+    Scheduler --> Timing
+    Scheduler --> FHSS
+    Scheduler --> OTA
+    Scheduler --> Crypto
+    Scheduler --> PHY
+    App -.-> Util
+    Link -.-> Util
+    Scheduler -.-> Util
+```
+
 Timing / FHSS / OTA are **not independent peers** — they are coordinated by `RfScheduler`,
 which owns the per-tick sequence. Without a single owner, "clean" modules still race.
+
 
 ---
 
@@ -76,7 +107,54 @@ which owns the per-tick sequence. Without a single owner, "clean" modules still 
    hardware barrier, so Core 0 could publish the seqlock counter before the payload is
    visible to Core 1 (torn read). Atomics compile to `dmb` on M0+/M33 and stay host-testable.
    *(Implemented in M0 in `util/Mailbox.h` + `util/RingBuffer.h`.)*
+
+```mermaid
+graph LR
+    subgraph Core0["Core 0: Application Core"]
+        AppTask["Application Loop<br/>(apps/tx or apps/rx)"]
+        CRSF["CRSF/UART Transport"]
+        Telemetry["Telemetry Aggregation"]
+        Display["Display/Status Logs"]
+        AppTask --> CRSF
+        AppTask --> Telemetry
+        AppTask --> Display
+    end
+
+    subgraph CrossCore["Cross-Core IPC (Lock-Free Atomics)"]
+        Mailbox["Latest-Value Mailbox<br/>(util/Mailbox - Channels)"]
+        RingBufferAppToRf["RingBuffer: App -> RF<br/>(Config, Bind)"]
+        RingBufferRfToApp["RingBuffer: RF -> App<br/>(Stats, Telemetry)"]
+    end
+
+    subgraph Core1["Core 1: RF Cadence Core"]
+        RfTask["RfTask::poll() Loop"]
+        Scheduler["RfScheduler"]
+        TimerISR["Timer ISR<br/>(HwTimer)"]
+        DioISR["DIO Pin ISR"]
+
+        TimerISR -- "Monotonic Count" --> RfTask
+        DioISR -- "Monotonic Count" --> RfTask
+        RfTask --> Scheduler
+    end
+
+    AppTask -- "load/store (acquire/release)" --> Mailbox
+    AppTask -- "push" --> RingBufferAppToRf
+    RingBufferRfToApp -- "pop" --> AppTask
+
+    Mailbox -- "loadOrKeep" --> RfTask
+    RingBufferAppToRf -- "pop" --> RfTask
+    RfTask -- "push" --> RingBufferRfToApp
+
+    classDef core0 fill:#eff6ff,stroke:#2563eb,stroke-width:2px;
+    classDef core1 fill:#f0fdf4,stroke:#16a34a,stroke-width:2px;
+    classDef ipc fill:#fff7ed,stroke:#ea580c,stroke-width:2px;
+    class Core0,AppTask,CRSF,Telemetry,Display core0;
+    class Core1,RfTask,Scheduler,TimerISR,DioISR core1;
+    class CrossCore,Mailbox,RingBufferAppToRf,RingBufferRfToApp ipc;
+```
+
 5. **Versioned, type-multiplexed OTA frame** (`ota/OtaPacket`). One small frame format
+
    (target 8 bytes, 16-byte variant) carries RC / sync / telemetry / bind / MSP via a
    type field, with an explicit version. Addressing is by FHSS sequence + radio sync
    word seeded from the UID — **no per-packet device ID**, unlike the legacy format.
@@ -142,12 +220,57 @@ which owns the per-tick sequence. Without a single owner, "clean" modules still 
 
 Driven by `RfScheduler` on every timer tick (the central sequence both roles follow):
 
+```mermaid
+sequenceDiagram
+    autonumber
+    participant HW as Hardware (Timer / DIO)
+    participant ISR as ISR Context (Tiny)
+    participant RF as RfTask::poll() (Core 1)
+    participant PHY as IRadioPhy (SPI Async)
+    participant Link as Link & PFD Loop
+
+    Note over HW, RF: Phase 1: Slot Cadence (Timer)
+    HW->>ISR: Timer fires (intervalUs)
+    activate ISR
+    ISR->>ISR: Latch hardware timestamp
+    ISR->>RF: Increment event counter (Release Atomic)
+    deactivate ISR
+
+    activate RF
+    RF->>RF: Observe counter change (Acquire Atomic)
+    RF->>RF: Select Slot (Uplink/Telemetry/Sync)
+    RF->>RF: Advance FHSS Hop if due
+    RF->>RF: Codec: Encode OTA Frame
+    RF->>PHY: startTx() or startRx() (Async SPI)
+    deactivate RF
+
+    Note over HW, RF: Phase 2: Transceiver Action (DIO)
+    HW->>ISR: DIO Interrupt (TX Done or RX Done)
+    activate ISR
+    ISR->>ISR: Latch DIO timestamp
+    ISR->>RF: Increment DIO event counter
+    deactivate ISR
+
+    activate RF
+    RF->>RF: Observe DIO event
+    rect rgb(240, 253, 244)
+        Note over RF, Link: If RX Done (Packet Received)
+        RF->>PHY: readRx() (Pull payload over SPI)
+        RF->>RF: Recover packet-start = timestampUs - airtime
+        RF->>Link: Feed arrival offset to PFD (PI Loop)
+        Link->>HW: Adjust Hardware Timer period
+        RF->>Link: Update connection state & LinkStats
+    end
+    deactivate RF
+```
+
 A. **ISR Context (`onTimerIsr` / DIO interrupts):**
-   1. Timer fires at `RateConfig.intervalUs` → Capture timer tick timestamp, set timer flag.
-   2. DIO pin interrupt fires (TX-done or RX-done) → Capture DIO timestamp, set DIO flag.
-   *No SPI transactions, codec work, or state machine updates occur here.*
+    1. Timer fires at `RateConfig.intervalUs` → Capture timer tick timestamp, set timer flag.
+    2. DIO pin interrupt fires (TX-done or RX-done) → Capture DIO timestamp, set DIO flag.
+    *No SPI transactions, codec work, or state machine updates occur here.*
 
 B. **Task Context (`RfTask::poll()` on Core 1):**
+
    1. When the timer flag is observed, the task:
       a. Increments the packet tick counter.
       b. Picks the slot for this tick (`slotForTick`): Uplink / Telemetry / Sync / Bind / Idle.

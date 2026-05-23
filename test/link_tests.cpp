@@ -7,6 +7,29 @@
 using namespace xlrs;
 using namespace xlrs_test;
 
+static void simTickWithPhaseOffset(SimEnvironment& env, uint32_t txTick, uint32_t rxTick,
+                                   bool txOn = true) {
+    g_txSched = &env.txSched;
+    g_rxSched = &env.rxSched;
+
+    env.txPhy.setOnRxDone(onTxRxDone);
+    env.txPhy.setOnTxDone(onTxTxDone);
+    env.rxPhy.setOnRxDone(onRxRxDone);
+    env.rxPhy.setOnTxDone(onRxTxDone);
+
+    Slot slot = env.tx.slotForTick(txTick);
+    if (slot == Slot::Telemetry) {
+        if (txOn) env.txSched.onTick(txTick);
+        env.rxSched.onTick(rxTick);
+    } else {
+        env.rxSched.onTick(rxTick);
+        if (txOn) env.txSched.onTick(txTick);
+    }
+
+    if (txOn) env.tx.service(txTick);
+    env.rx.service(rxTick);
+}
+
 static void test_link_connect_flow_failsafe() {
     uint8_t uid[LINK_UID_SIZE];
     linkUidFromPhrase("Kikobot-02", uid);
@@ -56,6 +79,89 @@ static void test_link_mismatched_phrase_no_connect() {
     TEST_ASSERT_FALSE(env.rx.outputActive());
 }
 
+static void test_link_bind_scan_accepts_offered_uid() {
+    uint8_t txUid[LINK_UID_SIZE], rxUid[LINK_UID_SIZE];
+    linkUidFromPhrase("CraftA", txUid);
+    linkUidFromPhrase("CraftB", rxUid);
+
+    SimEnvironment env;
+    PhyConfig cfg{};
+    cfg.freqMHz = 2420.0f;
+    cfg.payloadLen = OTA16_LEN;
+    env.txPhy.init(cfg);
+    env.rxPhy.init(cfg);
+    MockPhy::connect(env.txPhy, env.rxPhy);
+
+    env.tx.begin(Role::Tx, txUid, 2);
+    env.rx.begin(Role::Rx, rxUid, 2);
+    env.txSched.begin(&env.txPhy, &env.tx, 2);
+    env.rxSched.begin(&env.rxPhy, &env.rx, 2);
+
+    env.tx.startBindTransmit(txUid);
+    env.rx.startBindScan();
+
+    for (uint32_t t = 1; t <= 80; ++t) simTick(env, t);
+
+    uint8_t receivedUid[LINK_UID_SIZE] = {};
+    TEST_ASSERT_TRUE(env.rx.takeReceivedBindUid(receivedUid));
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(txUid, receivedUid, LINK_UID_SIZE);
+}
+
+static void test_link_bind_scan_accepts_offered_uid_with_tick_phase_offset() {
+    uint8_t txUid[LINK_UID_SIZE], rxUid[LINK_UID_SIZE];
+    linkUidFromPhrase("CraftA", txUid);
+    linkUidFromPhrase("CraftB", rxUid);
+
+    SimEnvironment env;
+    PhyConfig cfg{};
+    cfg.freqMHz = 2420.0f;
+    cfg.payloadLen = OTA16_LEN;
+    env.txPhy.init(cfg);
+    env.rxPhy.init(cfg);
+    MockPhy::connect(env.txPhy, env.rxPhy);
+
+    env.tx.begin(Role::Tx, txUid, 2);
+    env.rx.begin(Role::Rx, rxUid, 2);
+    env.txSched.begin(&env.txPhy, &env.tx, 2);
+    env.rxSched.begin(&env.rxPhy, &env.rx, 2);
+
+    env.tx.startBindTransmit(txUid);
+    env.rx.startBindScan();
+
+    const uint32_t txPhaseOffset = 137;
+    for (uint32_t t = 1; t <= 80; ++t) {
+        simTickWithPhaseOffset(env, t + txPhaseOffset, t);
+    }
+
+    uint8_t receivedUid[LINK_UID_SIZE] = {};
+    TEST_ASSERT_TRUE(env.rx.takeReceivedBindUid(receivedUid));
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(txUid, receivedUid, LINK_UID_SIZE);
+}
+
+static void test_link_bind_scan_rejects_padded_bind_frame() {
+    uint8_t txUid[LINK_UID_SIZE], rxUid[LINK_UID_SIZE];
+    linkUidFromPhrase("CraftA", txUid);
+    linkUidFromPhrase("CraftB", rxUid);
+
+    Link tx;
+    Link rx;
+    tx.begin(Role::Tx, txUid, 2);
+    rx.begin(Role::Rx, rxUid, 2);
+    tx.startBindTransmit(txUid);
+    rx.startBindScan();
+
+    uint8_t frame[OTA16_LEN + 1] = {};
+    uint8_t frameLen = 0;
+    const uint32_t tick = 1;
+    TEST_ASSERT_TRUE(tx.getTxPayload(tick, tx.txPos(tick), frame, frameLen));
+    TEST_ASSERT_TRUE(frameLen < sizeof(frame));
+    frame[frameLen] = 0xA5;
+
+    TEST_ASSERT_FALSE(rx.processRxPayload(tick, rx.rxPos(), frame, (uint8_t)(frameLen + 1), -50, 0));
+    uint8_t receivedUid[LINK_UID_SIZE] = {};
+    TEST_ASSERT_FALSE(rx.takeReceivedBindUid(receivedUid));
+}
+
 static void test_link_fhss_acquire_and_recover() {
     uint8_t uid[LINK_UID_SIZE];
     linkUidFromPhrase("Kikobot-02", uid);
@@ -87,7 +193,9 @@ static void test_link_telemetry_downlink() {
     linkUidFromPhrase("Kikobot-02", uid);
     SimEnvironment env;
     env.setup(uid, 2);
-    env.txPhy.setRssi(-72);
+    env.txPhy.setRssi(-72);  // TX->RX uplink RSSI measured by RX.
+    env.rxPhy.setRssi(-64);  // RX->TX downlink RSSI measured by TX.
+    env.rxPhy.setSnr(6);
 
     uint16_t ch[4] = {300, 1500, 2047, 0};
     env.tx.setChannels(ch, 4);
@@ -101,6 +209,8 @@ static void test_link_telemetry_downlink() {
 
     TEST_ASSERT_TRUE(env.tx.stats().lqDown > 0);
     TEST_ASSERT_EQUAL_INT16(-72, env.tx.stats().rssiDbm);
+    TEST_ASSERT_EQUAL_INT16(-64, env.tx.stats().downlinkRssiDbm);
+    TEST_ASSERT_EQUAL_INT8(6, env.tx.stats().downlinkSnr);
     TEST_ASSERT_TRUE(env.tx.stats().lqUp >= 90);
 }
 
@@ -238,6 +348,9 @@ int main() {
     UNITY_BEGIN();
     RUN_TEST(test_link_connect_flow_failsafe);
     RUN_TEST(test_link_mismatched_phrase_no_connect);
+    RUN_TEST(test_link_bind_scan_accepts_offered_uid);
+    RUN_TEST(test_link_bind_scan_accepts_offered_uid_with_tick_phase_offset);
+    RUN_TEST(test_link_bind_scan_rejects_padded_bind_frame);
     RUN_TEST(test_link_fhss_acquire_and_recover);
     RUN_TEST(test_link_telemetry_downlink);
     RUN_TEST(test_link_rate_switch_and_power);

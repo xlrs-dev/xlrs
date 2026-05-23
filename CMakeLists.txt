@@ -10,6 +10,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 pico_sdk_init()
 
 set(XLRS_DEFAULT_BINDING_PHRASE "Kikobot-02" CACHE STRING "Default TX/RX binding phrase")
+set(XLRS_TX_CONTROLLER_PROTOCOL "UART" CACHE STRING "TX controller protocol: UART or CRSF")
+set_property(CACHE XLRS_TX_CONTROLLER_PROTOCOL PROPERTY STRINGS UART CRSF)
 set(XLRS_UART_TX_PIN 8 CACHE STRING "TX firmware UART TX pin toward controller")
 set(XLRS_UART_RX_PIN 9 CACHE STRING "TX firmware UART RX pin from controller")
 set(XLRS_CRSF_TX_PIN 8 CACHE STRING "RX firmware CRSF TX pin toward flight controller")
@@ -65,6 +67,12 @@ target_compile_definitions(xlrs_core PUBLIC
     SX128X_RXEN=${XLRS_SX128X_RXEN}
     SX128X_TXEN=${XLRS_SX128X_TXEN}
 )
+
+if(XLRS_TX_CONTROLLER_PROTOCOL STREQUAL "CRSF")
+    target_compile_definitions(xlrs_core PUBLIC XLRS_TX_CONTROLLER_CRSF=1)
+else()
+    target_compile_definitions(xlrs_core PUBLIC XLRS_TX_CONTROLLER_CRSF=0)
+endif()
 
 target_link_libraries(xlrs_core PUBLIC
     pico_stdlib

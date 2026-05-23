@@ -149,10 +149,15 @@ void CrsfSerial::handleByteReceived()
 
 void CrsfSerial::checkPacketTimeout()
 {
-    // If we haven't received data in a long time, flush the buffer a byte at a time (to trigger shiftyByte)
     if (_rxBufPos > 0 && xlrs::hal::nowMs() - _lastReceive > CRSF_PACKET_TIMEOUT_MS)
-        while (_rxBufPos)
-            shiftRxBuffer(1);
+    {
+        if (onOobData) {
+            for (uint8_t i = 0; i < _rxBufPos; ++i) {
+                onOobData(_rxBuf[i]);
+            }
+        }
+        _rxBufPos = 0;
+    }
 }
 
 void CrsfSerial::checkLinkDown()

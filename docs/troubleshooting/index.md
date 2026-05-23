@@ -321,12 +321,17 @@ Current RX LED behavior:
 | Condition | LED |
 | --- | --- |
 | Config fault or hardware fault | Solid on |
-| Binding | Fast blink |
+| Bind scan open | Double flash, pause |
+| Valid bind frame received | Very fast blink until flash persistence/reboot |
+| Bind UID persisted | Five short flashes, then reboot |
+| Generic binding state | Fast blink |
 | Connected and output active | Solid on |
 | Connecting | Medium blink |
 | Other/disconnected | Slow blink |
 
-The LED is only a coarse hint. Trust serial logs and counters first.
+During CRSF Bind RX, periodic RX status lines also append `[BIND SCAN]` while
+the RX is open to bind packets and `[BIND RX]` after a valid bind frame has been
+received. The LED is only a coarse hint. Trust serial logs and counters first.
 
 ---
 

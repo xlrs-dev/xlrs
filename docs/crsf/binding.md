@@ -61,6 +61,28 @@ Use the same phrase on both modules when relying on compile-time binding.
 5. Wait for the RX to receive the bind frame, persist the UID, and reboot.
 6. After reboot, TX and RX should acquire normally using the same Link UID.
 
+## RX Debug Indicators
+
+The RX status LED exposes binding progress during bench bring-up:
+
+| Binding phase | RX LED |
+| --- | --- |
+| Bind scan window open, listening for bind packets | Double flash, pause |
+| Valid bind frame received | Very fast blink |
+| Link UID persisted successfully | Five short flashes, then reboot |
+
+RX serial status lines also append:
+
+| Marker | Meaning |
+| --- | --- |
+| `[BIND SCAN]` | RX is in a bind-scan window and open to bind packets |
+| `[BIND RX]` | RX received a valid bind frame and is handing it to the app core |
+
+If the LED never shows the bind-scan pattern while unconnected, the RX is not
+entering bind scan. If it shows bind scan but never `[BIND RX]`, check that TX
+entered Bind RX mode, both modules are powered, antennas are attached, and the
+RX is within range.
+
 ## Current Limits
 
 - There is no physical bind-button workflow yet.

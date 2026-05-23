@@ -51,6 +51,8 @@ struct RfToAppData {
     uint16_t channels[RC_CHANNELS];
     bool outputActive;
     bool hardwareError;
+    bool bindScanOpen;
+    bool bindPacketReceived;
 };
 
 xlrs::LatestValue<RfToAppData> g_rfToApp;
@@ -83,6 +85,15 @@ static uint16_t localChannels[RC_CHANNELS] = {
     RC_US_MID, RC_US_MID, RC_US_MID, RC_US_MID};
 static bool g_configFault = false;
 
+static void blinkStatusLedBlocking(uint8_t pulses, uint32_t onMs, uint32_t offMs) {
+    for (uint8_t i = 0; i < pulses; ++i) {
+        gpio_put(STATUS_LED_PIN, true);
+        xlrs::hal::sleepMs(onMs);
+        gpio_put(STATUS_LED_PIN, false);
+        xlrs::hal::sleepMs(offMs);
+    }
+}
+
 static void onCrsfFrameFromFlightController(const uint8_t *frame, uint8_t frameLen) {
     if (!frame || frameLen < 3) return;
     const uint8_t frameType = frame[2];
@@ -110,6 +121,7 @@ static void applyRxAppTelemetry(const xlrs::AppTelemetryMessage& message) {
     if (xlrs::parseBindUidMessage(message.data, message.len, uid)) {
         if (g_bindingStore.setBindingUid(uid)) {
             printf("[RX CONFIG] Binding identity updated from TX. Rebooting RX...\n");
+            blinkStatusLedBlocking(5, 40, 40);
             xlrs::hal::sleepMs(100);
             watchdog_reboot(0, 0, 0);
         }
@@ -130,7 +142,8 @@ static long mapRange(long value, long inMin, long inMax, long outMin, long outMa
     return (value - inMin) * (outMax - outMin) / (inMax - inMin) + outMin;
 }
 
-static void updateLED(xlrs::LinkState state, bool outputActive, bool hardwareError) {
+static void updateLED(xlrs::LinkState state, bool outputActive, bool hardwareError,
+                      bool bindScanOpen, bool bindPacketReceived) {
     if (xlrs::hal::nowMs() - lastLedUpdate < LED_UPDATE_INTERVAL_MS) return;
     lastLedUpdate = xlrs::hal::nowMs();
 
@@ -140,6 +153,11 @@ static void updateLED(xlrs::LinkState state, bool outputActive, bool hardwareErr
     bool on = false;
     if (g_configFault || hardwareError) {
         on = true;
+    } else if (bindPacketReceived) {
+        on = (msCounter % 100) < 75;
+    } else if (bindScanOpen) {
+        const uint32_t phase = msCounter % 600;
+        on = phase < 70 || (phase >= 140 && phase < 210);
     } else if (state == xlrs::LinkState::Binding) {
         on = (msCounter % 100) < 50;
     } else if (state == xlrs::LinkState::Connected && outputActive) {
@@ -274,10 +292,13 @@ static void app_core_loop() {
         printf("[RX STATUS] State: %d LQ: %u%% RSSI: %d dBm | PHY timeouts: %lu CRC: %lu%s\n",
                (int)state, (unsigned)rfData.stats.lqUp, (int)rfData.stats.rssiDbm,
                (unsigned long)g_phy.spiTimeouts(), (unsigned long)g_phy.crcErrors(),
-               rfData.hardwareError ? " [HW FAULT]" : "");
+               rfData.hardwareError ? " [HW FAULT]" :
+               rfData.bindPacketReceived ? " [BIND RX]" :
+               rfData.bindScanOpen ? " [BIND SCAN]" : "");
     }
 
-    updateLED(state, outputActive, rfData.hardwareError);
+    updateLED(state, outputActive, rfData.hardwareError,
+              rfData.bindScanOpen, rfData.bindPacketReceived);
     crsf.loop();
 
     xlrs::AppTelemetryMessage telemetryMessage{};
@@ -326,6 +347,7 @@ static void rf_core_main() {
     while (true) {
         static bool bindScanning = false;
         static uint32_t nextBindScanSwitchMs = xlrs::hal::nowMs() + BIND_SCAN_NORMAL_WINDOW_MS;
+        static bool bindPacketReceived = false;
         static bool telemetryPending = false;
         static xlrs::AppTelemetryMessage pendingTelemetryMessage{};
         xlrs::AppTelemetryMessage telemetryMessage{};
@@ -373,6 +395,7 @@ static void rf_core_main() {
             xlrs::AppTelemetryMessage bindMessage{};
             if (g_link.takeReceivedBindUid(receivedBindUid) &&
                 xlrs::makeBindUidMessage(receivedBindUid, bindMessage)) {
+                bindPacketReceived = true;
                 g_rfTelemetryToApp.push(bindMessage);
             }
 
@@ -382,6 +405,8 @@ static void rf_core_main() {
             g_link.getChannels(rfData.channels, RC_CHANNELS);
             rfData.outputActive = g_link.outputActive();
             rfData.hardwareError = !g_phy.healthy();
+            rfData.bindScanOpen = bindScanning;
+            rfData.bindPacketReceived = bindPacketReceived;
             g_rfToApp.store(rfData);
 
             size_t telemetryLen = 0;

@@ -1,7 +1,11 @@
 #include "phy/Sx1280NativePhy.h"
 
-#if defined(ARDUINO)
-#include <SPI.h>
+#if defined(XLRS_PICO_SDK)
+#include "hal/Time.h"
+
+#include <hardware/gpio.h>
+#include <hardware/spi.h>
+#include <pico/stdlib.h>
 
 // Default pin configurations matching hardware build flags
 #ifndef SX128X_SPI_SCK
@@ -36,13 +40,23 @@ namespace xlrs {
 
 Sx1280NativePhy* Sx1280NativePhy::s_self = nullptr;
 
+namespace {
+static spi_inst_t* kRadioSpi = spi0;
+
+static uint8_t spiTransfer(uint8_t value) {
+    uint8_t rx = 0;
+    spi_write_read_blocking(kRadioSpi, &value, &rx, 1);
+    return rx;
+}
+} // namespace
+
 bool Sx1280NativePhy::waitBusy() {
-    uint32_t start = micros();
-    while (digitalRead(SX128X_SPI_BUSY) == HIGH) {
-        if (micros() - start > 100000) { // 100ms timeout
+    uint32_t start = hal::nowUs();
+    while (gpio_get(SX128X_SPI_BUSY)) {
+        if (hal::nowUs() - start > 100000) { // 100ms timeout
             return false;
         }
-        delayMicroseconds(1);
+        hal::sleepUs(1);
     }
     return true;
 }
@@ -52,16 +66,14 @@ void Sx1280NativePhy::spiCommand(uint8_t opcode, const uint8_t* params, uint8_t 
         _hardwareError.store(true, std::memory_order_release);
         return;
     }
-    digitalWrite(SX128X_SPI_CS, LOW);
-    delayMicroseconds(2);
-    SPI.beginTransaction(SPISettings(10000000, MSBFIRST, SPI_MODE0));
-    SPI.transfer(opcode);
+    gpio_put(SX128X_SPI_CS, false);
+    hal::sleepUs(2);
+    spiTransfer(opcode);
     for (uint8_t i = 0; i < len; i++) {
-        SPI.transfer(params[i]);
+        spiTransfer(params[i]);
     }
-    SPI.endTransaction();
-    digitalWrite(SX128X_SPI_CS, HIGH);
-    delayMicroseconds(2);
+    gpio_put(SX128X_SPI_CS, true);
+    hal::sleepUs(2);
     if (!waitBusy()) {
         _hardwareError.store(true, std::memory_order_release);
     }
@@ -72,18 +84,16 @@ void Sx1280NativePhy::writeRegister(uint16_t addr, const uint8_t* data, uint8_t 
         _hardwareError.store(true, std::memory_order_release);
         return;
     }
-    digitalWrite(SX128X_SPI_CS, LOW);
-    delayMicroseconds(2);
-    SPI.beginTransaction(SPISettings(10000000, MSBFIRST, SPI_MODE0));
-    SPI.transfer(SX1280_OP_WRITE_REGISTER);
-    SPI.transfer((addr >> 8) & 0xFF);
-    SPI.transfer(addr & 0xFF);
+    gpio_put(SX128X_SPI_CS, false);
+    hal::sleepUs(2);
+    spiTransfer(SX1280_OP_WRITE_REGISTER);
+    spiTransfer((addr >> 8) & 0xFF);
+    spiTransfer(addr & 0xFF);
     for (uint8_t i = 0; i < len; i++) {
-        SPI.transfer(data[i]);
+        spiTransfer(data[i]);
     }
-    SPI.endTransaction();
-    digitalWrite(SX128X_SPI_CS, HIGH);
-    delayMicroseconds(2);
+    gpio_put(SX128X_SPI_CS, true);
+    hal::sleepUs(2);
     if (!waitBusy()) {
         _hardwareError.store(true, std::memory_order_release);
     }
@@ -94,19 +104,17 @@ void Sx1280NativePhy::readRegister(uint16_t addr, uint8_t* data, uint8_t len) {
         _hardwareError.store(true, std::memory_order_release);
         return;
     }
-    digitalWrite(SX128X_SPI_CS, LOW);
-    delayMicroseconds(2);
-    SPI.beginTransaction(SPISettings(10000000, MSBFIRST, SPI_MODE0));
-    SPI.transfer(SX1280_OP_READ_REGISTER);
-    SPI.transfer((addr >> 8) & 0xFF);
-    SPI.transfer(addr & 0xFF);
-    SPI.transfer(0x00); // dummy status byte
+    gpio_put(SX128X_SPI_CS, false);
+    hal::sleepUs(2);
+    spiTransfer(SX1280_OP_READ_REGISTER);
+    spiTransfer((addr >> 8) & 0xFF);
+    spiTransfer(addr & 0xFF);
+    spiTransfer(0x00); // dummy status byte
     for (uint8_t i = 0; i < len; i++) {
-        data[i] = SPI.transfer(0x00);
+        data[i] = spiTransfer(0x00);
     }
-    SPI.endTransaction();
-    digitalWrite(SX128X_SPI_CS, HIGH);
-    delayMicroseconds(2);
+    gpio_put(SX128X_SPI_CS, true);
+    hal::sleepUs(2);
     if (!waitBusy()) {
         _hardwareError.store(true, std::memory_order_release);
     }
@@ -117,17 +125,15 @@ void Sx1280NativePhy::writeBuffer(uint8_t offset, const uint8_t* data, uint8_t l
         _hardwareError.store(true, std::memory_order_release);
         return;
     }
-    digitalWrite(SX128X_SPI_CS, LOW);
-    delayMicroseconds(2);
-    SPI.beginTransaction(SPISettings(10000000, MSBFIRST, SPI_MODE0));
-    SPI.transfer(SX1280_OP_WRITE_BUFFER);
-    SPI.transfer(offset);
+    gpio_put(SX128X_SPI_CS, false);
+    hal::sleepUs(2);
+    spiTransfer(SX1280_OP_WRITE_BUFFER);
+    spiTransfer(offset);
     for (uint8_t i = 0; i < len; i++) {
-        SPI.transfer(data[i]);
+        spiTransfer(data[i]);
     }
-    SPI.endTransaction();
-    digitalWrite(SX128X_SPI_CS, HIGH);
-    delayMicroseconds(2);
+    gpio_put(SX128X_SPI_CS, true);
+    hal::sleepUs(2);
     if (!waitBusy()) {
         _hardwareError.store(true, std::memory_order_release);
     }
@@ -138,30 +144,29 @@ void Sx1280NativePhy::readBuffer(uint8_t offset, uint8_t* data, uint8_t len) {
         _hardwareError.store(true, std::memory_order_release);
         return;
     }
-    digitalWrite(SX128X_SPI_CS, LOW);
-    delayMicroseconds(2);
-    SPI.beginTransaction(SPISettings(10000000, MSBFIRST, SPI_MODE0));
-    SPI.transfer(SX1280_OP_READ_BUFFER);
-    SPI.transfer(offset);
-    SPI.transfer(0x00); // dummy status byte
+    gpio_put(SX128X_SPI_CS, false);
+    hal::sleepUs(2);
+    spiTransfer(SX1280_OP_READ_BUFFER);
+    spiTransfer(offset);
+    spiTransfer(0x00); // dummy status byte
     for (uint8_t i = 0; i < len; i++) {
-        data[i] = SPI.transfer(0x00);
+        data[i] = spiTransfer(0x00);
     }
-    SPI.endTransaction();
-    digitalWrite(SX128X_SPI_CS, HIGH);
-    delayMicroseconds(2);
+    gpio_put(SX128X_SPI_CS, true);
+    hal::sleepUs(2);
     if (!waitBusy()) {
         _hardwareError.store(true, std::memory_order_release);
     }
 }
 
 void Sx1280NativePhy::resetRadio() {
-    pinMode(SX128X_SPI_RST, OUTPUT);
-    digitalWrite(SX128X_SPI_RST, LOW);
-    delay(10);
-    digitalWrite(SX128X_SPI_RST, HIGH);
-    delay(10);
-    pinMode(SX128X_SPI_RST, INPUT);
+    gpio_init(SX128X_SPI_RST);
+    gpio_set_dir(SX128X_SPI_RST, GPIO_OUT);
+    gpio_put(SX128X_SPI_RST, false);
+    hal::sleepMs(10);
+    gpio_put(SX128X_SPI_RST, true);
+    hal::sleepMs(10);
+    gpio_set_dir(SX128X_SPI_RST, GPIO_IN);
     if (!waitBusy()) {
         _hardwareError.store(true, std::memory_order_release);
     }
@@ -169,20 +174,22 @@ void Sx1280NativePhy::resetRadio() {
 
 void Sx1280NativePhy::setRfSwitch(Mode mode) {
     if (mode == Mode::Rx) {
-        digitalWrite(SX128X_RXEN, HIGH);
-        digitalWrite(SX128X_TXEN, LOW);
+        gpio_put(SX128X_RXEN, true);
+        gpio_put(SX128X_TXEN, false);
     } else if (mode == Mode::Tx) {
-        digitalWrite(SX128X_RXEN, LOW);
-        digitalWrite(SX128X_TXEN, HIGH);
+        gpio_put(SX128X_RXEN, false);
+        gpio_put(SX128X_TXEN, true);
     } else {
-        digitalWrite(SX128X_RXEN, LOW);
-        digitalWrite(SX128X_TXEN, LOW);
+        gpio_put(SX128X_RXEN, false);
+        gpio_put(SX128X_TXEN, false);
     }
 }
 
-void Sx1280NativePhy::onDio1() {
+void Sx1280NativePhy::onDio1(uint gpio, uint32_t events) {
+    (void)gpio;
+    (void)events;
     if (!s_self) return;
-    s_self->_lastIrqUs.store(micros(), std::memory_order_release);
+    s_self->_lastIrqUs.store(hal::nowUs(), std::memory_order_release);
     Mode mode = s_self->_mode.load(std::memory_order_acquire);
     if (mode == Mode::Rx) {
         s_self->_rxReady.store(true, std::memory_order_release);
@@ -197,18 +204,22 @@ bool Sx1280NativePhy::init(const PhyConfig& cfg) {
     s_self = this;
     _hardwareError.store(false, std::memory_order_release); // reset state
 
-    SPI.setSCK(SX128X_SPI_SCK);
-    SPI.setTX(SX128X_SPI_MOSI);
-    SPI.setRX(SX128X_SPI_MISO);
-    SPI.setCS(SX128X_SPI_CS);
-    SPI.begin();
+    spi_init(kRadioSpi, 10000000);
+    gpio_set_function(SX128X_SPI_SCK, GPIO_FUNC_SPI);
+    gpio_set_function(SX128X_SPI_MOSI, GPIO_FUNC_SPI);
+    gpio_set_function(SX128X_SPI_MISO, GPIO_FUNC_SPI);
 
-    pinMode(SX128X_SPI_CS, OUTPUT);
-    digitalWrite(SX128X_SPI_CS, HIGH);
-    pinMode(SX128X_SPI_BUSY, INPUT);
-    pinMode(SX128X_SPI_DIO1, INPUT);
-    pinMode(SX128X_RXEN, OUTPUT);
-    pinMode(SX128X_TXEN, OUTPUT);
+    gpio_init(SX128X_SPI_CS);
+    gpio_set_dir(SX128X_SPI_CS, GPIO_OUT);
+    gpio_put(SX128X_SPI_CS, true);
+    gpio_init(SX128X_SPI_BUSY);
+    gpio_set_dir(SX128X_SPI_BUSY, GPIO_IN);
+    gpio_init(SX128X_SPI_DIO1);
+    gpio_set_dir(SX128X_SPI_DIO1, GPIO_IN);
+    gpio_init(SX128X_RXEN);
+    gpio_set_dir(SX128X_RXEN, GPIO_OUT);
+    gpio_init(SX128X_TXEN);
+    gpio_set_dir(SX128X_TXEN, GPIO_OUT);
     setRfSwitch(Mode::Idle);
 
     resetRadio();
@@ -283,7 +294,7 @@ bool Sx1280NativePhy::init(const PhyConfig& cfg) {
     if (_hardwareError.load(std::memory_order_acquire)) return false;
 
     // 10. Attach interrupt
-    attachInterrupt(digitalPinToInterrupt(SX128X_SPI_DIO1), onDio1, RISING);
+    gpio_set_irq_enabled_with_callback(SX128X_SPI_DIO1, GPIO_IRQ_EDGE_RISE, true, onDio1);
 
     startRx(cfg.freqMHz);
     return !_hardwareError.load(std::memory_order_acquire);
@@ -384,16 +395,14 @@ bool Sx1280NativePhy::readRx(RxPacket& out) {
         _hardwareError.store(true, std::memory_order_release);
         return false;
     }
-    digitalWrite(SX128X_SPI_CS, LOW);
-    delayMicroseconds(2);
-    SPI.beginTransaction(SPISettings(10000000, MSBFIRST, SPI_MODE0));
-    SPI.transfer(SX1280_OP_GET_IRQ_STATUS);
-    SPI.transfer(0x00); // dummy status
-    irqData[0] = SPI.transfer(0x00);
-    irqData[1] = SPI.transfer(0x00);
-    SPI.endTransaction();
-    digitalWrite(SX128X_SPI_CS, HIGH);
-    delayMicroseconds(2);
+    gpio_put(SX128X_SPI_CS, false);
+    hal::sleepUs(2);
+    spiTransfer(SX1280_OP_GET_IRQ_STATUS);
+    spiTransfer(0x00); // dummy status
+    irqData[0] = spiTransfer(0x00);
+    irqData[1] = spiTransfer(0x00);
+    gpio_put(SX128X_SPI_CS, true);
+    hal::sleepUs(2);
     if (!waitBusy()) {
         _hardwareError.store(true, std::memory_order_release);
     }
@@ -413,16 +422,14 @@ bool Sx1280NativePhy::readRx(RxPacket& out) {
         _hardwareError.store(true, std::memory_order_release);
         return false;
     }
-    digitalWrite(SX128X_SPI_CS, LOW);
-    delayMicroseconds(2);
-    SPI.beginTransaction(SPISettings(10000000, MSBFIRST, SPI_MODE0));
-    SPI.transfer(SX1280_OP_GET_RX_BUFFER_STATUS);
-    SPI.transfer(0x00); // dummy status
-    rxBufStatus[0] = SPI.transfer(0x00); // payload length
-    rxBufStatus[1] = SPI.transfer(0x00); // start buffer pointer offset
-    SPI.endTransaction();
-    digitalWrite(SX128X_SPI_CS, HIGH);
-    delayMicroseconds(2);
+    gpio_put(SX128X_SPI_CS, false);
+    hal::sleepUs(2);
+    spiTransfer(SX1280_OP_GET_RX_BUFFER_STATUS);
+    spiTransfer(0x00); // dummy status
+    rxBufStatus[0] = spiTransfer(0x00); // payload length
+    rxBufStatus[1] = spiTransfer(0x00); // start buffer pointer offset
+    gpio_put(SX128X_SPI_CS, true);
+    hal::sleepUs(2);
     if (!waitBusy()) {
         _hardwareError.store(true, std::memory_order_release);
     }
@@ -448,17 +455,15 @@ bool Sx1280NativePhy::readRx(RxPacket& out) {
         _hardwareError.store(true, std::memory_order_release);
         return false;
     }
-    digitalWrite(SX128X_SPI_CS, LOW);
-    delayMicroseconds(2);
-    SPI.beginTransaction(SPISettings(10000000, MSBFIRST, SPI_MODE0));
-    SPI.transfer(SX1280_OP_GET_PACKET_STATUS);
-    SPI.transfer(0x00); // dummy status
+    gpio_put(SX128X_SPI_CS, false);
+    hal::sleepUs(2);
+    spiTransfer(SX1280_OP_GET_PACKET_STATUS);
+    spiTransfer(0x00); // dummy status
     for (uint8_t i = 0; i < 5; i++) {
-        packetStatus[i] = SPI.transfer(0x00);
+        packetStatus[i] = spiTransfer(0x00);
     }
-    SPI.endTransaction();
-    digitalWrite(SX128X_SPI_CS, HIGH);
-    delayMicroseconds(2);
+    gpio_put(SX128X_SPI_CS, true);
+    hal::sleepUs(2);
     if (!waitBusy()) {
         _hardwareError.store(true, std::memory_order_release);
     }
@@ -602,7 +607,7 @@ uint32_t Sx1280NativePhy::txLatencyUs() const {
 
 bool Sx1280NativePhy::recover() {
     PhyConfig cfg = _cfg;
-    detachInterrupt(digitalPinToInterrupt(SX128X_SPI_DIO1));
+    gpio_set_irq_enabled(SX128X_SPI_DIO1, GPIO_IRQ_EDGE_RISE, false);
     _rxReady.store(false, std::memory_order_release);
     _mode.store(Mode::Idle, std::memory_order_release);
     return init(cfg);

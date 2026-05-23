@@ -27,7 +27,7 @@ public:
 
 HwTimer* createHwTimer();
 
-#if !defined(ARDUINO) && !defined(PICO_BOARD) && !defined(ARDUINO_ARCH_RP2040)
+#if !defined(XLRS_PICO_SDK) && !defined(PICO_BOARD)
 void setSimulatedTimeUs(uint32_t us);
 uint32_t getSimulatedIntervalUs();
 // Sim-only: invoke the registered timer callback once (mirrors one hardware timer ISR), so a

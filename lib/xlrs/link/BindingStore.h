@@ -3,7 +3,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
-#include <EEPROM.h>
+#include "hal/FlashStore.h"
 #include "link/Uid.h"
 
 #ifndef DEFAULT_BINDING_PHRASE
@@ -36,16 +36,16 @@ public:
         if (len == 0 || len > 32) return false;
 
         linkUidFromPhrase(phrase, _uid);
-        EEPROM.write(BINDING_STORE_MAGIC_ADDR + 0, (BINDING_STORE_MAGIC >> 24) & 0xFF);
-        EEPROM.write(BINDING_STORE_MAGIC_ADDR + 1, (BINDING_STORE_MAGIC >> 16) & 0xFF);
-        EEPROM.write(BINDING_STORE_MAGIC_ADDR + 2, (BINDING_STORE_MAGIC >> 8) & 0xFF);
-        EEPROM.write(BINDING_STORE_MAGIC_ADDR + 3, BINDING_STORE_MAGIC & 0xFF);
-        EEPROM.write(BINDING_STORE_VERSION_ADDR, BINDING_STORE_VERSION);
+        hal::FlashStore::write(BINDING_STORE_MAGIC_ADDR + 0, (BINDING_STORE_MAGIC >> 24) & 0xFF);
+        hal::FlashStore::write(BINDING_STORE_MAGIC_ADDR + 1, (BINDING_STORE_MAGIC >> 16) & 0xFF);
+        hal::FlashStore::write(BINDING_STORE_MAGIC_ADDR + 2, (BINDING_STORE_MAGIC >> 8) & 0xFF);
+        hal::FlashStore::write(BINDING_STORE_MAGIC_ADDR + 3, BINDING_STORE_MAGIC & 0xFF);
+        hal::FlashStore::write(BINDING_STORE_VERSION_ADDR, BINDING_STORE_VERSION);
         for (uint8_t i = 0; i < LINK_UID_SIZE; ++i) {
-            EEPROM.write(BINDING_STORE_UID_ADDR + i, _uid[i]);
+            hal::FlashStore::write(BINDING_STORE_UID_ADDR + i, _uid[i]);
         }
         writeChecksum(checksum());
-        EEPROM.commit();
+        hal::FlashStore::commit();
         _loaded = true;
         return true;
     }
@@ -59,12 +59,12 @@ public:
 private:
     bool valid() const {
         uint32_t magic = 0;
-        magic |= (uint32_t)EEPROM.read(BINDING_STORE_MAGIC_ADDR + 0) << 24;
-        magic |= (uint32_t)EEPROM.read(BINDING_STORE_MAGIC_ADDR + 1) << 16;
-        magic |= (uint32_t)EEPROM.read(BINDING_STORE_MAGIC_ADDR + 2) << 8;
-        magic |= (uint32_t)EEPROM.read(BINDING_STORE_MAGIC_ADDR + 3);
+        magic |= (uint32_t)hal::FlashStore::read(BINDING_STORE_MAGIC_ADDR + 0) << 24;
+        magic |= (uint32_t)hal::FlashStore::read(BINDING_STORE_MAGIC_ADDR + 1) << 16;
+        magic |= (uint32_t)hal::FlashStore::read(BINDING_STORE_MAGIC_ADDR + 2) << 8;
+        magic |= (uint32_t)hal::FlashStore::read(BINDING_STORE_MAGIC_ADDR + 3);
         if (magic != BINDING_STORE_MAGIC) return false;
-        if (EEPROM.read(BINDING_STORE_VERSION_ADDR) != BINDING_STORE_VERSION) return false;
+        if (hal::FlashStore::read(BINDING_STORE_VERSION_ADDR) != BINDING_STORE_VERSION) return false;
 
         uint8_t uid[LINK_UID_SIZE];
         loadUid(uid);
@@ -81,7 +81,7 @@ private:
 
     void loadUid(uint8_t uid[LINK_UID_SIZE]) const {
         for (uint8_t i = 0; i < LINK_UID_SIZE; ++i) {
-            uid[i] = EEPROM.read(BINDING_STORE_UID_ADDR + i);
+            uid[i] = hal::FlashStore::read(BINDING_STORE_UID_ADDR + i);
         }
     }
 
@@ -93,7 +93,7 @@ private:
         };
         for (unsigned r = 0; r < sizeof(ranges) / sizeof(ranges[0]); ++r) {
             for (int i = 0; i < ranges[r][1]; ++i) {
-                crc ^= EEPROM.read(ranges[r][0] + i);
+                crc ^= hal::FlashStore::read(ranges[r][0] + i);
                 crc *= 0x01000193UL;
             }
         }
@@ -102,18 +102,18 @@ private:
 
     uint32_t storedChecksum() const {
         uint32_t value = 0;
-        value |= (uint32_t)EEPROM.read(BINDING_STORE_CHECKSUM_ADDR + 0) << 24;
-        value |= (uint32_t)EEPROM.read(BINDING_STORE_CHECKSUM_ADDR + 1) << 16;
-        value |= (uint32_t)EEPROM.read(BINDING_STORE_CHECKSUM_ADDR + 2) << 8;
-        value |= (uint32_t)EEPROM.read(BINDING_STORE_CHECKSUM_ADDR + 3);
+        value |= (uint32_t)hal::FlashStore::read(BINDING_STORE_CHECKSUM_ADDR + 0) << 24;
+        value |= (uint32_t)hal::FlashStore::read(BINDING_STORE_CHECKSUM_ADDR + 1) << 16;
+        value |= (uint32_t)hal::FlashStore::read(BINDING_STORE_CHECKSUM_ADDR + 2) << 8;
+        value |= (uint32_t)hal::FlashStore::read(BINDING_STORE_CHECKSUM_ADDR + 3);
         return value;
     }
 
     void writeChecksum(uint32_t value) {
-        EEPROM.write(BINDING_STORE_CHECKSUM_ADDR + 0, (value >> 24) & 0xFF);
-        EEPROM.write(BINDING_STORE_CHECKSUM_ADDR + 1, (value >> 16) & 0xFF);
-        EEPROM.write(BINDING_STORE_CHECKSUM_ADDR + 2, (value >> 8) & 0xFF);
-        EEPROM.write(BINDING_STORE_CHECKSUM_ADDR + 3, value & 0xFF);
+        hal::FlashStore::write(BINDING_STORE_CHECKSUM_ADDR + 0, (value >> 24) & 0xFF);
+        hal::FlashStore::write(BINDING_STORE_CHECKSUM_ADDR + 1, (value >> 16) & 0xFF);
+        hal::FlashStore::write(BINDING_STORE_CHECKSUM_ADDR + 2, (value >> 8) & 0xFF);
+        hal::FlashStore::write(BINDING_STORE_CHECKSUM_ADDR + 3, value & 0xFF);
     }
 
     uint8_t _uid[LINK_UID_SIZE] = {};

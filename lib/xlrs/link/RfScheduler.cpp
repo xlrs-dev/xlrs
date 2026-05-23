@@ -3,10 +3,7 @@
 #include "link/Link.h"
 #include "phy/IRadioPhy.h"
 #include "fhss/Fhss.h"
-
-#if defined(ARDUINO)
-#include <Arduino.h>
-#endif
+#include "hal/Time.h"
 
 namespace xlrs {
 
@@ -54,7 +51,7 @@ bool RfScheduler::begin(IRadioPhy* phy, Fhss* fhss, Link* link, uint8_t rateInde
 
     s_activeScheduler = this;
 
-#if defined(ARDUINO) || defined(PICO_BOARD)
+#if defined(XLRS_PICO_SDK)
     // On hardware, run a true Tiny ISR: only increment the event counter.
     if (_timer) {
         _timer->begin(_rate.intervalUs, []() {
@@ -150,11 +147,11 @@ void RfScheduler::onTick(uint32_t tick) {
             uint16_t pos = _link->txPos(tick);
             if (_link->getTxPayload(tick, pos, buf, len)) {
                 if (_phy) {
-#if defined(ARDUINO) || defined(PICO_BOARD)
+#if defined(XLRS_PICO_SDK)
                     uint32_t latency = _phy->txLatencyUs();
                     uint32_t delayUs = (TX_GUARD_US > latency) ? (TX_GUARD_US - latency) : 0;
                     if (delayUs > 0) {
-                        delayMicroseconds(delayUs);
+                        hal::sleepUs(delayUs);
                     }
 #endif
                     _phy->startTx(freq, buf, len);
@@ -178,11 +175,11 @@ void RfScheduler::onTick(uint32_t tick) {
                 uint16_t pos = _link->rxPos();
                 if (_link->getTxPayload(tick, pos, buf, len)) {
                     if (_phy) {
-#if defined(ARDUINO) || defined(PICO_BOARD)
+#if defined(XLRS_PICO_SDK)
                         uint32_t latency = _phy->txLatencyUs();
                         uint32_t delayUs = (TX_GUARD_US > latency) ? (TX_GUARD_US - latency) : 0;
                         if (delayUs > 0) {
-                            delayMicroseconds(delayUs);
+                            hal::sleepUs(delayUs);
                         }
 #endif
                         _phy->startTx(freq, buf, len);
@@ -205,7 +202,7 @@ void RfScheduler::onRxDone() {
             if (_link->role() == Role::Rx) {
                 uint32_t airtime = (pkt.len <= 8) ? _rate.airtime8Us : _rate.airtime16Us;
                 // Correct PFD negative feedback sign: offsetUs = actual - expected
-#if defined(ARDUINO) || defined(PICO_BOARD)
+#if defined(XLRS_PICO_SDK)
                 int32_t offsetUs = (int32_t)(pkt.timestampUs - airtime - TX_GUARD_US) - (int32_t)_tickStartUs;
 #else
                 int32_t offsetUs = (int32_t)(pkt.timestampUs - airtime) - (int32_t)_tickStartUs;

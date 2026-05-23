@@ -20,17 +20,7 @@ UA="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, l
 say() { printf '\n==> %s\n' "$*"; }
 
 # ---------------------------------------------------------------------------
-# 1) TI BQ25620 / BQ25622 charger  (src/bq2562x.*)
-# ---------------------------------------------------------------------------
-# TI serves static PDFs at ti.com/lit/ds/symlink/<part>.pdf. The 403 the fetch tool
-# hits is purely a User-Agent block. TI ships ONE combined BQ25620/BQ25622 datasheet,
-# so either part symlink returns the same file.
-say "TI BQ25620/BQ25622 datasheet"
-curl -fL -A "$UA" -o "$OUT/bq25620-bq25622-ti.pdf" \
-  "https://www.ti.com/lit/ds/symlink/bq25622.pdf"
-
-# ---------------------------------------------------------------------------
-# 2) Semtech SX1280 / SX1281 radio  (XLRS PHY)
+# 1) Semtech SX1280 / SX1281 radio  (XLRS PHY)
 # ---------------------------------------------------------------------------
 # Semtech does NOT host a static PDF. The "SX1280 Datasheet" link is a Salesforce
 # content-distribution page: GET sets a session cookie -> a JS auto-POST-back -> the

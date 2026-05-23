@@ -1,4 +1,12 @@
-#include "CrsfSerial.h"
+#include "crsfSerial.h"
+#include "hal/Time.h"
+#include <cstring>
+
+namespace {
+static int32_t mapRange(int32_t value, int32_t inMin, int32_t inMax, int32_t outMin, int32_t outMax) {
+    return (value - inMin) * (outMax - outMin) / (inMax - inMin) + outMin;
+}
+} // namespace
 
 // static void hexdump(void *p, size_t len)
 // {
@@ -30,7 +38,7 @@
 //     }
 // }
 
-CrsfSerial::CrsfSerial(HardwareSerial &port, uint32_t baud) :
+CrsfSerial::CrsfSerial(xlrs::hal::SerialPort &port, uint32_t baud) :
     _port(port), _crc(0xd5), _baud(baud),
     _lastReceive(0), _lastChannelsPacket(0), _linkIsUp(false),
     _passthroughBaud(0), _batteryVoltage(0), _batteryCurrent(0),
@@ -55,8 +63,10 @@ void CrsfSerial::handleSerialIn()
 {
     while (_port.available())
     {
-        uint8_t b = _port.read();
-        _lastReceive = millis();
+        int value = _port.read();
+        if (value < 0) break;
+        uint8_t b = (uint8_t)value;
+        _lastReceive = xlrs::hal::nowMs();
 
         if (getPassthroughMode())
         {
@@ -119,14 +129,14 @@ void CrsfSerial::handleByteReceived()
 void CrsfSerial::checkPacketTimeout()
 {
     // If we haven't received data in a long time, flush the buffer a byte at a time (to trigger shiftyByte)
-    if (_rxBufPos > 0 && millis() - _lastReceive > CRSF_PACKET_TIMEOUT_MS)
+    if (_rxBufPos > 0 && xlrs::hal::nowMs() - _lastReceive > CRSF_PACKET_TIMEOUT_MS)
         while (_rxBufPos)
             shiftRxBuffer(1);
 }
 
 void CrsfSerial::checkLinkDown()
 {
-    if (_linkIsUp && millis() - _lastChannelsPacket > CRSF_FAILSAFE_STAGE1_MS)
+    if (_linkIsUp && xlrs::hal::nowMs() - _lastChannelsPacket > CRSF_FAILSAFE_STAGE1_MS)
     {
         if (onLinkDown)
             onLinkDown();
@@ -215,12 +225,12 @@ void CrsfSerial::packetChannelsPacked(const crsf_header_t *p)
     _channels[15] = ch->ch15;
 
     for (unsigned int i=0; i<CRSF_NUM_CHANNELS; ++i)
-        _channels[i] = map(_channels[i], CRSF_CHANNEL_VALUE_1000, CRSF_CHANNEL_VALUE_2000, 1000, 2000);
+        _channels[i] = mapRange(_channels[i], CRSF_CHANNEL_VALUE_1000, CRSF_CHANNEL_VALUE_2000, 1000, 2000);
 
     if (!_linkIsUp && onLinkUp)
         onLinkUp();
     _linkIsUp = true;
-    _lastChannelsPacket = millis();
+    _lastChannelsPacket = xlrs::hal::nowMs();
 
     if (onPacketChannels)
         onPacketChannels();

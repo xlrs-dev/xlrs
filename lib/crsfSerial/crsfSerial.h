@@ -1,7 +1,9 @@
 #pragma once
 
-#include <Arduino.h>
+#include <stdint.h>
+#include <stddef.h>
 #include <../crc8/crc8.h>
+#include "hal/SerialPort.h"
 #include "crsf_protocol.h"
 
 enum eFailsafeAction { fsaNoPulses, fsaHold };
@@ -13,7 +15,7 @@ public:
     static const unsigned int CRSF_PACKET_TIMEOUT_MS = 100;
     static const unsigned int CRSF_FAILSAFE_STAGE1_MS = 300;
 
-    CrsfSerial(HardwareSerial &port, uint32_t baud = CRSF_BAUDRATE);
+    CrsfSerial(xlrs::hal::SerialPort &port, uint32_t baud = CRSF_BAUDRATE);
     void begin(uint32_t baud = 0);
     void loop();
     void write(uint8_t b);
@@ -54,7 +56,7 @@ public:
     void (*onParameterEntry)(uint8_t fieldId, uint8_t paramType, uint8_t chunksRemaining, const char *label, const uint8_t *value, uint8_t valueLen);
 
 private:
-    HardwareSerial &_port;
+    xlrs::hal::SerialPort &_port;
     uint8_t _rxBuf[CRSF_MAX_PACKET_SIZE];
     uint8_t _rxBufPos;
     Crc8 _crc;

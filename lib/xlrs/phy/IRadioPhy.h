@@ -1,8 +1,8 @@
 // IRadioPhy — abstract async radio PHY contract. Deliberately NARROW.
 //
-// The layers above depend ONLY on this interface, never on RadioLib or a specific chip —
-// that is what makes a future lean native SX1280 driver a realistic drop-in swap. Do not
-// leak RadioLib concepts (or types) across this line.
+// The layers above depend only on this interface, never on a specific radio chip.
+// That keeps the link core host-testable and lets us swap PHY implementations without
+// leaking driver concepts or types across this line.
 //
 // Async + tiny-ISR model:
 //   - startTx/startRx return immediately.
@@ -13,9 +13,9 @@
 //     start (RxPacket.timestampUs - airtime), not when the RF task wakes.
 //   - The TxDone/RxDone callbacks run in ISR context and must do ONLY minimal work: publish
 //     a MONOTONIC event counter via a release-ordered atomic (a boolean would coalesce
-//     back-to-back TX/RX events and lose one). No RadioLib calls, no logging, no allocation.
+//     back-to-back TX/RX events and lose one). No SPI work, no logging, no allocation.
 //   - The RF task (core-1 loop), after observing the counter (acquire), calls readRx() to
-//     drain the packet via RadioLib. All RadioLib/SPI work happens here, never in the ISR.
+//     drain the packet from the radio. All SPI work happens here, never in the ISR.
 //
 // Frequency is passed per-operation (not a separate setter) so the FHSS hop is atomic with
 // arming RX/TX and can never be forgotten.

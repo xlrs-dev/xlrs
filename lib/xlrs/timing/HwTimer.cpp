@@ -1,7 +1,7 @@
 // HwTimer target-specific implementation for RP2040 using Pico SDK.
 #include "timing/HwTimer.h"
 
-#if defined(ARDUINO) || defined(PICO_BOARD)
+#if defined(XLRS_PICO_SDK) || defined(PICO_BOARD)
 #include <pico/time.h>
 #include <hardware/timer.h>
 

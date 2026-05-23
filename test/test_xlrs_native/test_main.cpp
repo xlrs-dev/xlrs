@@ -1,5 +1,4 @@
 // Native (host) unit tests for the XLRS pure-logic layers.
-//   pio test -e native
 #include <unity.h>
 #include "ota/ChannelPack.h"
 #include "ota/OtaFrameShrink.h"

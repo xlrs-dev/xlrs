@@ -1,7 +1,8 @@
 #pragma once
 
-#include <Arduino.h>
+#include <stdint.h>
 #include "../crc8/crc8.h"
+#include "hal/SerialPort.h"
 
 // UART Protocol Message Types
 enum UARTMsgType : uint8_t {
@@ -24,11 +25,7 @@ enum UARTMsgType : uint8_t {
 #define UART_PROTOCOL_SYNC_BYTE 0xA5
 #define UART_PROTOCOL_MAX_PAYLOAD 60
 #define UART_PROTOCOL_MAX_FRAME_SIZE (1 + 1 + 1 + UART_PROTOCOL_MAX_PAYLOAD + 1)  // SYNC + LEN + TYPE + PAYLOAD + CRC
-#if defined(RC_TX_MODULE_UART_BAUD)
-#define UART_PROTOCOL_BAUDRATE RC_TX_MODULE_UART_BAUD
-#else
 #define UART_PROTOCOL_BAUDRATE 420000
-#endif
 
 // Data structures
 struct ChannelData {
@@ -62,7 +59,7 @@ typedef void (*OnPongCallback)();  // PONG received (device is alive)
 
 class UARTProtocol {
 public:
-    UARTProtocol(HardwareSerial* serial);
+    UARTProtocol(xlrs::hal::SerialPort* serial);
     
     // Initialization
     void begin(uint32_t baud = UART_PROTOCOL_BAUDRATE);
@@ -98,7 +95,7 @@ public:
     void resetStats() { packetsSent = 0; packetsReceived = 0; packetsDropped = 0; }
 
 private:
-    HardwareSerial* serial;
+    xlrs::hal::SerialPort* serial;
     Crc8 crc8;
     
     // RX state machine
@@ -115,8 +112,8 @@ private:
     uint8_t rxBufferPos;
     uint8_t rxExpectedLength;
     UARTMsgType rxMessageType;
-    unsigned long rxTimeout;
-    static const unsigned long RX_TIMEOUT_MS = 100;
+    uint32_t rxTimeout;
+    static const uint32_t RX_TIMEOUT_MS = 100;
     
     // Statistics
     uint32_t packetsSent;

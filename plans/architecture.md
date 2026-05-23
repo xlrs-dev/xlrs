@@ -20,7 +20,7 @@ format; the older `SX128xLink`/`Protocol`/legacy SX128x mains were removed at cu
 - Regulatory certification, RF/hardware validation, manufacturing — out of firmware scope.
   (But the firmware *controls* the FHSS region tables and TX power, so there is a compliance
   review gate before high-power / range testing — see roadmap.)
-- The handset/RC application and WebUI — they sit *above* the link via adapters.
+- Controller input hardware and configuration tools — they sit outside this TX/RX repository.
 
 ---
 
@@ -30,14 +30,14 @@ Strict layering; each layer depends only on the interface of the one below.
 
 | Layer | Module (`lib/xlrs/...`) | Responsibility | Swappable? |
 |-------|-------------------------|----------------|------------|
-| Application | `app/` (or `src/`) | CRSF out + link stats + failsafe (RX); channel source (TX) | yes |
+| Application | `apps/tx`, `apps/rx` | CRSF out + link stats + failsafe (RX); channel source (TX) | yes |
 | Link | `link/Link` | Connection LIFECYCLE (bind/connect/failsafe); LinkStats consumer | — |
 | RF scheduler | `link/RfScheduler` | **Per-tick coordinator**: slot timing, FHSS-advance, TX/RX turnaround, feeds LinkStats | — |
 | Timing | `timing/HwTimer`, `timing/Pfd` | Packet cadence; RX PLL locking to TX | impl per MCU |
 | FHSS | `fhss/Fhss` | UID-seeded hop sequence over a region channel table | tables per region |
 | OTA | `ota/OtaPacket`, `ota/ChannelPack` | Versioned, type-multiplexed frame; channel (un)packing | format versioned |
 | Crypto | `crypto/ICipher` (`NullCipher`, future `AeadCipher`) | Optional seal/open over OTA payload | yes (pluggable) |
-| PHY | `phy/IRadioPhy` (`RadioLibPhy`, future `Sx1280NativePhy`) | Async radio chip control (TX/RX/freq/power) | yes (interface) |
+| PHY | `phy/IRadioPhy` (`Sx1280NativePhy`) | Async radio chip control (TX/RX/freq/power) | yes (interface) |
 | Util | `util/RingBuffer` (events), `util/Mailbox` (latest-value) | Lock-free inter-core handoff | — |
 
 Timing / FHSS / OTA are **not independent peers** — they are coordinated by `RfScheduler`,
@@ -47,11 +47,9 @@ which owns the per-tick sequence. Without a single owner, "clean" modules still 
 
 ## 3. Key design decisions
 
-1. **PHY is an interface (`IRadioPhy`).** First implementation `RadioLibPhy` wraps the
-   existing RadioLib SX1280 driver in **non-blocking** mode (`startTransmit` /
-   `startReceive` + DIO1 done IRQ) — removes the blocking `transmit()` while reusing a
-   proven driver. A lean `Sx1280NativePhy` can replace it later for the highest rates
-   with no changes above the PHY line.
+1. **PHY is an interface (`IRadioPhy`).** The production implementation is
+   `Sx1280NativePhy`, a Pico SDK SX1280 driver using SPI and DIO1 interrupts. Keeping the
+   interface narrow prevents radio-driver details from leaking above the PHY line.
 2. **Crypto is a pluggable layer (`ICipher`), default `NullCipher`.** This defers the
    "secure-link wedge vs. drop crypto" decision: ship plaintext now, slot in real AEAD
    later by swapping the cipher — link/PHY untouched (CTR alone lacks authenticity).
@@ -96,7 +94,7 @@ which owns the per-tick sequence. Without a single owner, "clean" modules still 
    but sync metadata is **piggybacked into RC frames where the 8-byte budget allows** (no RC
    gap); a dedicated `Sync` slot is used only when it doesn't fit — and since it is infrequent,
    the one displaced RC frame is negligible.
-8. **Three-tier execution; the ISR stays tiny.** The hardware-timer ISR (`onTimerIsr()`) and DIO interrupt do only minimal work: latch the hardware timestamp and publish a **monotonic event counter** via a release-ordered atomic — never a bare boolean, which would coalesce back-to-back TX/RX events and lose one (no RadioLib, no SPI, no logging, no allocation). The core-1 RF task (`RfTask::poll()`) observes the counter (acquire) and runs the slot decision, codec, and async RadioLib commands. ISRs are bound to core 1. **Timing reference — one canonical point, used everywhere:** the PFD locks to **packet start, recovered as `RxPacket.timestampUs − airtime`**, compared against the expected scheduler tick. Airtime is the *full* on-air time — preamble + sync word + header + payload + CRC, per modulation/rate — precomputed per rate and frame size in `RateConfig.airtime8Us` / `airtime16Us`. Because it differs by frame length, feeding the PFD from a **single frame type (RC)** lets the constant bias self-cancel and avoids needing the per-frame correction at all.
+8. **Three-tier execution; the ISR stays tiny.** The hardware-timer ISR (`onTimerIsr()`) and DIO interrupt do only minimal work: latch the hardware timestamp and publish a **monotonic event counter** via a release-ordered atomic — never a bare boolean, which would coalesce back-to-back TX/RX events and lose one (no SPI, no logging, no allocation). The core-1 RF task (`RfTask::poll()`) observes the counter (acquire) and runs the slot decision, codec, and async native PHY commands. ISRs are bound to core 1. **Timing reference — one canonical point, used everywhere:** the PFD locks to **packet start, recovered as `RxPacket.timestampUs − airtime`**, compared against the expected scheduler tick. Airtime is the *full* on-air time — preamble + sync word + header + payload + CRC, per modulation/rate — precomputed per rate and frame size in `RateConfig.airtime8Us` / `airtime16Us`. Because it differs by frame length, feeding the PFD from a **single frame type (RC)** lets the constant bias self-cancel and avoids needing the per-frame correction at all.
 9. **Channels use a latest-value mailbox, not a FIFO** (`util/Mailbox`). The RF side wants
    the freshest sticks, never a backlog of stale ones; FIFO rings (`util/RingBuffer`) are
    only for discrete events (config, bind, telemetry frames). Separate typed rings per
@@ -194,40 +192,36 @@ must be used everywhere or they disagree.
 
 ```
 lib/xlrs/
-  phy/      IRadioPhy.h        (RadioLibPhy.{h,cpp} — impl, later)
-  timing/   Pfd.h              (HwTimer.{h,cpp} — MCU impl, later)
+  phy/      IRadioPhy.h  Sx1280NativePhy.{h,cpp}
+  timing/   Pfd.h  HwTimer.{h,cpp}
   fhss/     Fhss.h
   ota/      OtaPacket.h  ChannelPack.h
   crypto/   ICipher.h
   link/     Link.h  RfScheduler.h  RateConfig.h
   util/     RingBuffer.h  Mailbox.h
-src/
-  xlrs_tx.cpp   xlrs_rx.cpp    (role mains — later)
+apps/
+  tx/main.cpp   rx/main.cpp
 test/
   test_xlrs_native/            (Unity tests for pure logic)
 ```
-Production role mains are `src/xlrs_tx.cpp` and `src/xlrs_rx.cpp`.
+Production role mains are `apps/tx/main.cpp` and `apps/rx/main.cpp`.
 
 ---
 
 ## 6. Build & test
 
-- New `[env:native]` (PlatformIO + Unity) compiles the pure-logic headers on the host and
-  runs unit tests — no hardware. Covers `ChannelPack`, `Fhss`, `Pfd` (step + PI drift-nulling),
-  `RingBuffer`, `Mailbox`, and `RfScheduler` slot logic (8 cases). `OtaPacket` + cipher tests
-  land with their implementations (M3 / M8).
-- Firmware envs `xlrs_tx` / `xlrs_rx` use `RadioLibPhy`; `xlrs_tx_native` /
-  `xlrs_rx_native` use `Sx1280NativePhy`.
-- Host soak script (`scripts/soak.py`) watches RX serial for dropouts over long runs.
+- Pico SDK CMake builds `xlrs_tx` and `xlrs_rx`.
+- Host tests are kept as pure-logic coverage and should move to a CMake/CTest runner.
+- Hardware soak tooling should watch RX serial for dropouts over long runs.
 
 ---
 
 ## 7. Implementation roadmap (milestones)
 
-- **M0 — Scaffold (this commit):** layer contracts (headers), pure-logic implementations
-  (channel packing, FHSS sequence, PFD math, ring buffer), native test env + tests.
+- **M0 — Scaffold:** layer contracts (headers), pure-logic implementations
+  (channel packing, FHSS sequence, PFD math, ring buffer), native test coverage.
 - **M0.5 — Legacy safety patch:** superseded by the production cutover.
-- **M1 — PHY:** `RadioLibPhy` async (DIO-driven TX/RX, freq/power). Bench loopback.
+- **M1 — PHY:** `Sx1280NativePhy` async (DIO-driven TX/RX, freq/power). Bench loopback.
 - **M2 — Timing:** `HwTimer` (RP2040/RP2350) + integrate `Pfd`; TX master cadence, RX lock.
   **Acceptance criteria (measured, with targets):** max scheduling jitter, missed-deadline
   rate, RX lock convergence time, drift tolerance (ppm), telemetry-slot turnaround margin.

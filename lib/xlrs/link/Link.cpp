@@ -1,6 +1,6 @@
 // Link — lifecycle + slotted TDM (RC uplink / Sync beacon / telemetry downlink) + FHSS.
-// Host-safe (no Arduino): runs in the native sim against MockPhy and on hardware against
-// RadioLibPhy. The cipher (M8) layers on top.
+// Host-safe core: runs in the native sim against MockPhy and on hardware against
+// Sx1280NativePhy. The cipher (M8) layers on top.
 //
 // Slotting (both ends agree per tick): pos = (tick/hop) % seqLen.
 //   pos == 0                       → Sync slot      (TX→RX beacon, on the acquisition channel)

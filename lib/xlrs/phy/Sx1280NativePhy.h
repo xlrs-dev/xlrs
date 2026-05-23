@@ -2,10 +2,7 @@
 #include "phy/IRadioPhy.h"
 #include "phy/Sx1280Regs.h"
 #include <atomic>
-
-#if defined(ARDUINO)
-#include <Arduino.h>
-#endif
+#include <pico/types.h>
 
 namespace xlrs {
 
@@ -38,8 +35,8 @@ public:
 private:
     enum class Mode : uint8_t { Idle, Rx, Tx };
 
-#if defined(ARDUINO)
-    static void onDio1();              // single DIO1 ISR: TX-done or RX-done (mode-routed)
+#if defined(XLRS_PICO_SDK)
+    static void onDio1(uint gpio, uint32_t events); // single DIO1 ISR: TX-done or RX-done
     static Sx1280NativePhy* s_self;    // single radio instance per build
 
     void resetRadio();

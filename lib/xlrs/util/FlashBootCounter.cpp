@@ -2,7 +2,7 @@
 #include "util/FlashBootCounter.h"
 #include <string.h>
 
-#if defined(ARDUINO_ARCH_RP2040) || defined(PICO_BOARD)
+#if defined(XLRS_PICO_SDK) || defined(PICO_BOARD)
 #include <hardware/flash.h>
 #include <hardware/sync.h>
 #include <hardware/address_mapped.h>
@@ -29,7 +29,7 @@ struct BootEntry {
 static constexpr int ENTRIES_PER_SECTOR = FLASH_SECTOR_SIZE / sizeof(BootEntry); // 4096 / 8 = 512
 static constexpr int ENTRIES_PER_PAGE = FLASH_PAGE_SIZE / sizeof(BootEntry);     // 256 / 8 = 32
 
-#if !defined(ARDUINO_ARCH_RP2040) && !defined(PICO_BOARD)
+#if !defined(XLRS_PICO_SDK) && !defined(PICO_BOARD)
 // Host-native in-memory fallback.
 static uint32_t s_simCounter = 0;
 

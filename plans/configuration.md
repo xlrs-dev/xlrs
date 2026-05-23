@@ -8,23 +8,18 @@ This document provides a comprehensive guide to the compile-time (build) and run
 
 Build-time parameters are hardcoded into the binary during compilation. They dictate hardware targets, pin connections, SPI/UART assignments, and default software features.
 
-### A. Environment Selection (`platformio.ini`)
-Firmware builds are configured into isolated environments to target different hardware blocks:
+### A. CMake Targets
+Firmware builds are configured as Pico SDK CMake targets:
 
-* **`[env:xlrs_tx]` / `[env:xlrs_rx]`**
-  * Production TX/RX firmware using the `lib/xlrs/` core with `RadioLibPhy`.
-* **`[env:xlrs_tx_native]` / `[env:xlrs_rx_native]`**
-  * Production TX/RX firmware using the `lib/xlrs/` core with `Sx1280NativePhy`.
-* **`[env:rc-rp2350]`**
-  * Targets the RC handset (RP2350 Pico 2). Configures native stick ADC inputs and display peripherals.
-* **`[env:native]`**
-  * Host environment. Compiles the new core's pure-logic layers for Unity unit tests on the dev
-    machine (no hardware).
+* **`xlrs_tx`**
+  * Production TX module firmware using the `lib/xlrs/` core with `Sx1280NativePhy`.
+* **`xlrs_rx`**
+  * Production RX module firmware using the `lib/xlrs/` core with `Sx1280NativePhy`.
 
 ---
 
-### B. Hardware & Pinout Macros (Build-Flags)
-Passed as preprocessor flags (`-D`) in `platformio.ini` to map physical microcontroller pins to the `IRadioPhy` layer:
+### B. Hardware & Pinout Macros
+Passed as Pico SDK target compile definitions to map physical microcontroller pins to the `IRadioPhy` layer:
 
 #### 1. Radio Module SPI Configuration (SX1280)
 * **`SX128X_SPI_SCK`** (e.g. `18`) — SPI clock pin.
@@ -36,11 +31,8 @@ Passed as preprocessor flags (`-D`) in `platformio.ini` to map physical microcon
 * **`SX128X_SPI_RST`** (e.g. `22`) — Reset pin.
 * **`SX128X_RXEN`** (e.g. `14`) / **`SX128X_TXEN`** (e.g. `15`) — Front-end LNA/PA active switching pins.
 
-#### 2. Handset Interface Configuration
-* **`UART_PROTOCOL_TX`** (e.g. `8`) / **`UART_PROTOCOL_RX`** (e.g. `9`) — UART serial routing pins for communicating with the handset controller using CRSF.
-* **`INTERNAL_ADC`** — Set to `1` on RP2350 targets to enable stick ADC inputs.
-* **`RC_STICK_ADC_12BIT`** — Set to `1` to enable 12-bit ADC reading resolution.
-* **`CRSF_CORE1_CHANNELS`** — Set to `1` to delegate CRSF channel generation tasks to Core 1.
+#### 2. TX UART Interface Configuration
+* **`UART_PROTOCOL_TX`** (e.g. `8`) / **`UART_PROTOCOL_RX`** (e.g. `9`) — UART serial routing pins for the TX module channel/control input.
 
 ---
 
@@ -158,7 +150,7 @@ random `session_salt` at Connect (vs. the fixed sim value) are follow-ups.
   → **Telemetry** (RX→TX downlink); else → **Uplink** (TX→RC→RX). Each slot has exactly one sender
   and one receiver, computed identically on both ends — **collision-free TDM**, no legacy "holdoff."
 * **Telemetry downlink (`OtaType::TlmDown`, RX→TX):** on telemetry slots the RX transmits its
-  uplink measurement (LQ / RSSI / SNR) so the TX/handset can show "how well the craft hears me."
+  uplink measurement (LQ / RSSI / SNR) so the TX side can show "how well the craft hears me."
   The TX tracks the downlink reception ratio as `LinkStats.lqDown`.
 * **Link statistics to the FC:** the RX packs `LinkStats` into a CRSF `LINK_STATISTICS` (0x14)
   10-byte frame via `buildCrsfLinkStatistics()`

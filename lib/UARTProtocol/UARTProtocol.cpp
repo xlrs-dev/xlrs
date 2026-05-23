@@ -1,7 +1,8 @@
 #include "UARTProtocol.h"
+#include "hal/Time.h"
 #include <string.h>
 
-UARTProtocol::UARTProtocol(HardwareSerial* serial)
+UARTProtocol::UARTProtocol(xlrs::hal::SerialPort* serial)
     : serial(serial)
     , crc8(0xD5)  // CRC8 polynomial for CRSF (same as used in crsfSerial)
     , rxState(RX_STATE_SYNC)
@@ -34,20 +35,22 @@ void UARTProtocol::loop() {
     if (!serial) return;
     
     // Check for RX timeout
-    if (rxState != RX_STATE_SYNC && (millis() - rxTimeout) > RX_TIMEOUT_MS) {
+    if (rxState != RX_STATE_SYNC && (xlrs::hal::nowMs() - rxTimeout) > RX_TIMEOUT_MS) {
         packetsDropped++;
         resetRxState();
     }
     
     // Process incoming bytes
     while (serial->available()) {
-        uint8_t byte = serial->read();
+        int value = serial->read();
+        if (value < 0) break;
+        uint8_t byte = (uint8_t)value;
         processRxByte(byte);
     }
 }
 
 void UARTProtocol::processRxByte(uint8_t byte) {
-    rxTimeout = millis();
+    rxTimeout = xlrs::hal::nowMs();
     
     switch (rxState) {
         case RX_STATE_SYNC:
@@ -112,7 +115,7 @@ void UARTProtocol::resetRxState() {
     rxState = RX_STATE_SYNC;
     rxBufferPos = 0;
     rxExpectedLength = 0;
-    rxTimeout = millis();
+    rxTimeout = xlrs::hal::nowMs();
 }
 
 void UARTProtocol::processMessage(UARTMsgType type, const uint8_t* payload, uint8_t length) {

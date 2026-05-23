@@ -46,6 +46,7 @@ function(add_xlrs_test suite)
         ${CMAKE_CURRENT_LIST_DIR}
         ${XLRS_LIB_DIR}
         ${XLRS_LIB_DIR}/xlrs
+        ${XLRS_LIB_DIR}/crsfSerial
     )
     target_link_libraries(xlrs_${suite}_tests PRIVATE unity)
     if(NOT MSVC)

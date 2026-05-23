@@ -1,6 +1,6 @@
 # TX Controller UART
 
-The TX-side controller protocol is a framed UART protocol:
+The default TX-side controller protocol is a framed UART protocol:
 
 ```text
 [sync 0xA5][payload_length][message_type][payload bytes...][crc8]
@@ -27,3 +27,6 @@ Default UART:
 mailbox, and the link layer masks values to 11 bits before OTA packing.
 
 See [index.md](index.md) for the complete current interface reference.
+
+For controller-facing CRSF, build with `-DXLRS_TX_CONTROLLER_PROTOCOL=CRSF` and
+see [tx-controller-crsf.md](tx-controller-crsf.md).

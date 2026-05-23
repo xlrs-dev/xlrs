@@ -41,7 +41,8 @@ Default SX1280 interface:
 RX status LED defaults to GP13.
 
 All defaults are CMake cache variables and can be overridden when configuring
-the build.
+the build. The TX controller protocol defaults to the custom UART protocol. Build
+with `-DXLRS_TX_CONTROLLER_PROTOCOL=CRSF` to use controller-facing CRSF instead.
 
 ## Binding
 
@@ -91,7 +92,7 @@ binding phrase at runtime.
 
 ## TX Controller UART Protocol
 
-The TX-side controller protocol is a simple framed UART protocol:
+The default TX-side controller protocol is a simple framed UART protocol:
 
 ```text
 [sync 0xA5][payload_length][message_type][payload bytes...][crc8]
@@ -163,6 +164,24 @@ struct StatusData {
     uint32_t packetsLost;     // currently mapped from missedDeadlines
 } __attribute__((packed));
 ```
+
+## TX Controller CRSF Protocol
+
+When built with `-DXLRS_TX_CONTROLLER_PROTOCOL=CRSF`, the TX module uses the same
+controller UART pins and baud for CRSF.
+
+Implemented today:
+
+- `CRSF_FRAMETYPE_RC_CHANNELS_PACKED` input from the controller.
+- Channels 1-8 are translated from CRSF channel units to 1000-2000 us and copied
+  into the TX RF mailbox.
+- CRSF `LINK_STATISTICS` output from TX to the controller about every 200 ms when
+  RF data is available.
+
+Current limitation: CRSF device discovery, parameter read/write, Lua
+configuration, and bind/config commands are not implemented yet. XLRS currently
+carries 8 OTA `rc_channel` values, so CRSF channels 9-16 are not transmitted over
+the XLRS uplink.
 
 ## RX Flight Controller Interface
 
@@ -254,7 +273,11 @@ path or a separate flashing/provisioning step.
 Implemented today:
 
 - TX controller channel input over UART.
+- TX controller channel input over CRSF when `XLRS_TX_CONTROLLER_PROTOCOL=CRSF`
+  is selected.
 - TX UART telemetry/status output.
+- TX CRSF link-statistics output when `XLRS_TX_CONTROLLER_PROTOCOL=CRSF` is
+  selected.
 - TX runtime binding phrase update.
 - RX CRSF RC and link-statistics output.
 - Flash-backed RF config with validated defaults.
@@ -265,5 +288,7 @@ Reserved or incomplete:
 - Runtime RX binding update.
 - Runtime RF config update.
 - True pair/bond workflow.
+- CRSF device discovery and parameter read/write for EdgeTX/OpenTX Lua
+  configuration.
 - External MSP/config passthrough API.
 - RX battery telemetry population into TX telemetry fields.

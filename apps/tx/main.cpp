@@ -10,6 +10,8 @@
 #include <hardware/watchdog.h>
 
 #include "UARTProtocol.h"
+#include "app/CrsfLinkStats.h"
+#include "crsfSerial.h"
 #include "fhss/Fhss.h"
 #include "hal/FlashStore.h"
 #include "hal/SerialPort.h"
@@ -21,6 +23,10 @@
 #include "link/Uid.h"
 #include "phy/Sx1280NativePhy.h"
 #include "util/Mailbox.h"
+
+#ifndef XLRS_TX_CONTROLLER_CRSF
+#define XLRS_TX_CONTROLLER_CRSF 0
+#endif
 
 #ifndef UART_PROTOCOL_TX
 #define UART_PROTOCOL_TX 8
@@ -55,13 +61,26 @@ xlrs::Sx1280NativePhy g_phy;
 xlrs::BindingStore g_bindingStore;
 xlrs::RfConfigData g_rfConfig;
 xlrs::hal::SerialPort g_controlUart(uart1, UART_PROTOCOL_TX, UART_PROTOCOL_RX);
+#if XLRS_TX_CONTROLLER_CRSF
+CrsfSerial controllerCrsf(g_controlUart, CRSF_BAUDRATE);
+#else
 UARTProtocol uartProto(&g_controlUart);
+#endif
 
 static uint32_t lastTelemetrySent = 0;
 static constexpr uint32_t TELEMETRY_INTERVAL = 200;
 static uint32_t lastStatusSent = 0;
 static constexpr uint32_t STATUS_INTERVAL = 1000;
 
+#if XLRS_TX_CONTROLLER_CRSF
+void onCrsfChannelsReceived() {
+    AppToRfData payload;
+    for (int i = 0; i < 8; i++) {
+        payload.channels[i] = (uint16_t)controllerCrsf.getChannel((unsigned int)i + 1);
+    }
+    g_appToRf.store(payload);
+}
+#else
 void onChannelsReceived(const ChannelData* data) {
     if (!data) return;
     AppToRfData payload;
@@ -113,6 +132,7 @@ void onCommandPayloadReceived(UARTMsgType cmd, const uint8_t* payload, uint8_t l
         printf("[UART] ERROR: Failed to persist binding phrase\n");
     }
 }
+#endif
 
 // Print boot identity diagnostics ON CORE 0 (stdio is core-0 only — see rf_core_main). Lets the
 // bench operator confirm both ends derived the same UID/sync word before expecting a link.
@@ -165,16 +185,25 @@ static void setup_app_core() {
         printIdentity(uid);
     }
 
+#if XLRS_TX_CONTROLLER_CRSF
+    controllerCrsf.begin(CRSF_BAUDRATE);
+    controllerCrsf.onPacketChannels = onCrsfChannelsReceived;
+    printf("Controller CRSF initialized.\n");
+#else
     uartProto.begin(UART_PROTOCOL_BAUDRATE);
     uartProto.setOnChannels(onChannelsReceived);
     uartProto.setOnCommand(onCommandReceived);
     uartProto.setOnCommandPayload(onCommandPayloadReceived);
-
     printf("Controller UART initialized.\n");
+#endif
 }
 
 static void app_core_loop() {
+#if XLRS_TX_CONTROLLER_CRSF
+    controllerCrsf.loop();
+#else
     uartProto.loop();
+#endif
 
     RfToAppData rfData;
     if (g_rfToApp.load(rfData)) {
@@ -182,16 +211,26 @@ static void app_core_loop() {
         if (now - lastTelemetrySent >= TELEMETRY_INTERVAL) {
             lastTelemetrySent = now;
 
+#if XLRS_TX_CONTROLLER_CRSF
+            uint8_t crsfLinkStatistics[10] = {};
+            xlrs::buildCrsfLinkStatistics(rfData.stats, crsfLinkStatistics);
+            controllerCrsf.queuePacket(CRSF_ADDRESS_RADIO_TRANSMITTER,
+                                       CRSF_FRAMETYPE_LINK_STATISTICS,
+                                       crsfLinkStatistics,
+                                       sizeof(crsfLinkStatistics));
+#else
             TelemetryData telem{};
             telem.rssi = rfData.stats.rssiDbm;
             telem.snr = rfData.stats.snr;
             telem.linkQuality = rfData.stats.lqDown;
             uartProto.sendTelemetry(&telem);
+#endif
         }
 
         if (now - lastStatusSent >= STATUS_INTERVAL) {
             lastStatusSent = now;
 
+#if !XLRS_TX_CONTROLLER_CRSF
             StatusData status{};
             switch (rfData.state) {
                 case xlrs::LinkState::Disconnected: status.connectionState = 0; break;
@@ -204,6 +243,7 @@ static void app_core_loop() {
             status.pairingState = 1;
             status.packetsLost = rfData.stats.missedDeadlines;
             uartProto.sendStatus(&status);
+#endif
 
             // Core-0 diagnostic: surface PHY fault counters so a wedged radio is visible on the
             // bench console, not just an opaque healthy()=false (docs/troubleshooting/index.md §3).

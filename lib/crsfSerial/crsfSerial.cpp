@@ -1,12 +1,7 @@
 #include "crsfSerial.h"
+#include "app/CrsfChannels.h"
 #include "hal/Time.h"
 #include <cstring>
-
-namespace {
-static int32_t mapRange(int32_t value, int32_t inMin, int32_t inMax, int32_t outMin, int32_t outMax) {
-    return (value - inMin) * (outMax - outMin) / (inMax - inMin) + outMin;
-}
-} // namespace
 
 // static void hexdump(void *p, size_t len)
 // {
@@ -39,11 +34,29 @@ static int32_t mapRange(int32_t value, int32_t inMin, int32_t inMax, int32_t out
 // }
 
 CrsfSerial::CrsfSerial(xlrs::hal::SerialPort &port, uint32_t baud) :
-    _port(port), _crc(0xd5), _baud(baud),
-    _lastReceive(0), _lastChannelsPacket(0), _linkIsUp(false),
-    _passthroughBaud(0), _batteryVoltage(0), _batteryCurrent(0),
-    _batteryCapacity(0), _batteryRemaining(0)
-{}
+    _port(port), _rxBufPos(0), _crc(0xd5),
+    _batteryVoltage(0), _batteryCurrent(0), _batteryCapacity(0), _batteryRemaining(0),
+    _baud(baud), _lastReceive(0), _lastChannelsPacket(0), _linkIsUp(false),
+    _passthroughBaud(0)
+{
+    memset(_rxBuf, 0, sizeof(_rxBuf));
+    memset(&_linkStatistics, 0, sizeof(_linkStatistics));
+    memset(&_gpsSensor, 0, sizeof(_gpsSensor));
+    memset(&_batterySensor, 0, sizeof(_batterySensor));
+    for (unsigned int i = 0; i < CRSF_NUM_CHANNELS; ++i) {
+        _channels[i] = 1500;
+    }
+
+    onLinkUp = nullptr;
+    onLinkDown = nullptr;
+    onOobData = nullptr;
+    onPacketChannels = nullptr;
+    onPacketLinkStatistics = nullptr;
+    onPacketGps = nullptr;
+    onPacketBattery = nullptr;
+    onDeviceInfo = nullptr;
+    onParameterEntry = nullptr;
+}
 
 void CrsfSerial::begin(uint32_t baud)
 {
@@ -206,26 +219,12 @@ void CrsfSerial::shiftRxBuffer(uint8_t cnt)
 
 void CrsfSerial::packetChannelsPacked(const crsf_header_t *p)
 {
-    crsf_channels_t *ch = (crsf_channels_t *)&p->data;
-    _channels[0] = ch->ch0;
-    _channels[1] = ch->ch1;
-    _channels[2] = ch->ch2;
-    _channels[3] = ch->ch3;
-    _channels[4] = ch->ch4;
-    _channels[5] = ch->ch5;
-    _channels[6] = ch->ch6;
-    _channels[7] = ch->ch7;
-    _channels[8] = ch->ch8;
-    _channels[9] = ch->ch9;
-    _channels[10] = ch->ch10;
-    _channels[11] = ch->ch11;
-    _channels[12] = ch->ch12;
-    _channels[13] = ch->ch13;
-    _channels[14] = ch->ch14;
-    _channels[15] = ch->ch15;
-
-    for (unsigned int i=0; i<CRSF_NUM_CHANNELS; ++i)
-        _channels[i] = mapRange(_channels[i], CRSF_CHANNEL_VALUE_1000, CRSF_CHANNEL_VALUE_2000, 1000, 2000);
+    const crsf_channels_t *crsfChannels = (const crsf_channels_t *)&p->data;
+    uint16_t rcChannels[CRSF_NUM_CHANNELS];
+    xlrs::crsfChannelsToRcUs(*crsfChannels, rcChannels);
+    for (unsigned int i = 0; i < CRSF_NUM_CHANNELS; ++i) {
+        _channels[i] = rcChannels[i];
+    }
 
     if (!_linkIsUp && onLinkUp)
         onLinkUp();

@@ -32,5 +32,6 @@ extending the XLRS TX/RX firmware.
 
 - [Interface Overview](interfaces/index.md)
 - [TX Controller UART](interfaces/tx-controller-uart.md)
+- [TX Controller CRSF](interfaces/tx-controller-crsf.md)
 - [RX CRSF](interfaces/rx-crsf.md)
 - [RF Config Storage](interfaces/rf-config-storage.md)

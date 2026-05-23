@@ -58,6 +58,8 @@ void Link::begin(Role role, const uint8_t uid[8], uint8_t rateIndex, int8_t maxP
     _stats = LinkStats{};
     _stats.rateIndex = _rateIndex;
     for (uint8_t i = 0; i < RC_CHANNELS; ++i) _ch[i] = 1024;   // mid (11-bit)
+    _txUseCompact = false;
+    _auxCenteredFrames = 0;
     _txPowerDbm = maxPowerDbm;
     _stats.txPowerDbm = _txPowerDbm;
     if (_role == Role::Tx) {
@@ -188,18 +190,25 @@ bool Link::getTxPayload(uint32_t tick, uint16_t pos, uint8_t* outBuf, uint8_t& o
                 return true;
             }
 
-            // Otherwise, send standard or compact RC frame
-            bool useCompact = true;
+            // Otherwise, send standard or compact RC frame. HYSTERESIS on the compact decision:
+            // eligibility (aux ch5-7 centered AND all channels even → lossless 10-bit pack) can
+            // toggle frame-to-frame as a stick's LSB flips or an aux hovers near center, which
+            // would flip compact(10-bit)↔full(11-bit) every frame and jitter the primary channels'
+            // resolution. So enter compact only after COMPACT_ENTER_FRAMES consecutive eligible RC
+            // frames, and drop to full immediately on the first ineligible frame.
+            constexpr uint16_t COMPACT_ENTER_FRAMES = 25;
+            bool compactEligible = true;
             for (int i = 0; i < RC_CHANNELS; ++i) {
-                if (i >= 5 && _ch[i] != 1024) {
-                    useCompact = false;
-                    break;
-                }
-                if ((_ch[i] & 0x01) != 0) {
-                    useCompact = false;
-                    break;
-                }
+                if (i >= 5 && _ch[i] != 1024) { compactEligible = false; break; }  // aux must be centered
+                if ((_ch[i] & 0x01) != 0)     { compactEligible = false; break; }  // odd → 10-bit loses LSB
             }
+            if (!compactEligible) {
+                _auxCenteredFrames = 0;
+                _txUseCompact = false;                          // instant exit to full
+            } else if (_auxCenteredFrames < COMPACT_ENTER_FRAMES) {
+                if (++_auxCenteredFrames >= COMPACT_ENTER_FRAMES) _txUseCompact = true;
+            }
+            bool useCompact = _txUseCompact;
 
             if (useCompact) {
                 // Pack into compact 8-byte frame, piggybacking _localAckSeq in the sequence field
@@ -440,6 +449,17 @@ void Link::notePhyRecovery(bool success) {
 void Link::noteMissedDeadlines(uint16_t n) {
     uint32_t v = (uint32_t)_stats.missedDeadlines + n;
     _stats.missedDeadlines = (v > UINT16_MAX) ? UINT16_MAX : (uint16_t)v;
+}
+
+void Link::noteSchedulerOverrun(uint16_t n) {
+    noteMissedDeadlines(n);
+    if (_role == Role::Rx) {
+        _state = LinkState::Connecting;
+        _locked = false;
+        _syncSeen = false;
+        _rxPos = 0;
+        _consecutiveMissedUplinks = 0;
+    }
 }
 
 void Link::setChannels(const uint16_t* ch, uint8_t n) {

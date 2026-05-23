@@ -52,7 +52,6 @@ static constexpr uint32_t WATCHDOG_BOOT_GRACE_MS = 3000; // feed unconditionally
 xlrs::Link g_link;
 xlrs::RfScheduler g_scheduler;
 xlrs::Sx1280NativePhy g_phy;
-xlrs::Fhss g_fhss;
 xlrs::BindingStore g_bindingStore;
 xlrs::RfConfigData g_rfConfig;
 xlrs::hal::SerialPort g_controlUart(uart1, UART_PROTOCOL_TX, UART_PROTOCOL_RX);
@@ -247,7 +246,7 @@ static void rf_core_main() {
 
     xlrs::PhyConfig phyCfg = xlrs::makePhyConfig(xlrs::kRates[g_rfConfig.defaultRate], 2400.0f, g_rfConfig.maxPowerDbm, xlrs::syncWordFromUid(uid));
     if (!g_phy.init(phyCfg) ||
-        !g_scheduler.begin(&g_phy, &g_fhss, &g_link, g_rfConfig.defaultRate)) {
+        !g_scheduler.begin(&g_phy, &g_link, g_rfConfig.defaultRate)) {
         publishRfFault();
         while (true) xlrs::hal::sleepMs(100);  // heartbeat stops → watchdog reboots to retry
     }

@@ -22,18 +22,20 @@ RfScheduler::~RfScheduler() {
     }
 }
 
-bool RfScheduler::begin(IRadioPhy* phy, Fhss* fhss, Link* link, uint8_t rateIndex) {
+bool RfScheduler::begin(IRadioPhy* phy, Link* link, uint8_t rateIndex) {
     _phy = phy;
-    _fhss = fhss;
     _link = link;
     if (rateIndex >= kNumRates) rateIndex = 0;
     _rateIndex = rateIndex;
     _rate = kRates[rateIndex];
-    
+
     _pfd.begin(_rate.intervalUs);
     _currentSlot = Slot::Idle;
     _tick = 0;
     _tickStartUs = 0;
+    _armedTick = 0;
+    _armedPos = 0;
+    _armedTickStartUs = 0;
     _tickEvents.store(0, std::memory_order_release);
     _rxDoneEvents.store(0, std::memory_order_release);
     _txDoneEvents.store(0, std::memory_order_release);
@@ -167,6 +169,7 @@ void RfScheduler::onTick(uint32_t tick) {
             }
         } else if (_currentSlot == Slot::Telemetry) {
             if (_phy) {
+                _armedTick = tick; _armedPos = _link->txPos(tick); _armedTickStartUs = _tickStartUs;
                 _phy->startRx(freq);
             }
         }
@@ -174,6 +177,7 @@ void RfScheduler::onTick(uint32_t tick) {
         // RX Role
         if (_currentSlot == Slot::Sync || _currentSlot == Slot::Uplink) {
             if (_phy) {
+                _armedTick = tick; _armedPos = _link->rxPos(); _armedTickStartUs = _tickStartUs;
                 _phy->startRx(freq);
             }
         } else if (_currentSlot == Slot::Telemetry) {
@@ -202,18 +206,19 @@ void RfScheduler::onRxDone() {
     if (!_phy || !_link) return;
     RxPacket pkt;
     if (_phy->readRx(pkt)) {
-        // Unpack, decode, and authenticate through Link.
-        uint16_t pos = (_link->role() == Role::Tx) ? _link->txPos(_tick) : _link->rxPos();
-        bool success = _link->processRxPayload(_tick, pos, pkt.data, pkt.len, pkt.rssiDbm, pkt.snr);
+        // Decode/authenticate against the slot the radio was ARMED with (not the current tick),
+        // so a packet drained after a tick advance is still matched to its own (tick,pos) nonce
+        // and PFD reference. More reachable now that poll() can fast-forward the tick.
+        bool success = _link->processRxPayload(_armedTick, _armedPos, pkt.data, pkt.len, pkt.rssiDbm, pkt.snr);
         if (success) {
             // Apply Phase-Frequency Detector (PFD) correction to timer interval (RX only).
             if (_link->role() == Role::Rx) {
                 uint32_t airtime = (pkt.len <= 8) ? _rate.airtime8Us : _rate.airtime16Us;
                 // Correct PFD negative feedback sign: offsetUs = actual - expected
 #if defined(XLRS_PICO_SDK)
-                int32_t offsetUs = (int32_t)(pkt.timestampUs - airtime - TX_GUARD_US) - (int32_t)_tickStartUs;
+                int32_t offsetUs = (int32_t)(pkt.timestampUs - airtime - TX_GUARD_US) - (int32_t)_armedTickStartUs;
 #else
-                int32_t offsetUs = (int32_t)(pkt.timestampUs - airtime) - (int32_t)_tickStartUs;
+                int32_t offsetUs = (int32_t)(pkt.timestampUs - airtime) - (int32_t)_armedTickStartUs;
 #endif
                 int32_t adjUs = _pfd.update(offsetUs);
                 if (_timer) {
@@ -274,7 +279,7 @@ void RfScheduler::poll() {
             // Fast-forward to the latest tick instead: TX FHSS is tick-derived so a jump stays
             // correct, and an RX this far behind has lost its slot lock and re-acquires from the
             // next Sync beacon. Record the gap as missed deadlines so the overrun is observable.
-            if (_link) _link->noteMissedDeadlines(diff);
+            if (_link) _link->noteSchedulerOverrun(diff);
             onTick(currentTicks);
             if (_link) _link->service(currentTicks);
         } else {

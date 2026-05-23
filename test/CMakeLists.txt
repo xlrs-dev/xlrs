@@ -28,25 +28,32 @@ FetchContent_MakeAvailable(unity)
 
 set(XLRS_LIB_DIR ${CMAKE_CURRENT_LIST_DIR}/../lib)
 
-# Pure-logic sources that need a translation unit (the rest are header-only).
-add_executable(xlrs_native_tests
-    test_xlrs_native/test_main.cpp
+enable_testing()
+
+set(XLRS_TEST_LIB_SOURCES
     ${XLRS_LIB_DIR}/xlrs/link/Link.cpp
     ${XLRS_LIB_DIR}/xlrs/link/RfScheduler.cpp
     ${XLRS_LIB_DIR}/xlrs/timing/HwTimer.cpp
     ${XLRS_LIB_DIR}/xlrs/util/FlashBootCounter.cpp
 )
 
-target_include_directories(xlrs_native_tests PRIVATE
-    ${XLRS_LIB_DIR}
-    ${XLRS_LIB_DIR}/xlrs
-)
+function(add_xlrs_test suite)
+    add_executable(xlrs_${suite}_tests
+        ${suite}_tests.cpp
+        ${XLRS_TEST_LIB_SOURCES}
+    )
+    target_include_directories(xlrs_${suite}_tests PRIVATE
+        ${CMAKE_CURRENT_LIST_DIR}
+        ${XLRS_LIB_DIR}
+        ${XLRS_LIB_DIR}/xlrs
+    )
+    target_link_libraries(xlrs_${suite}_tests PRIVATE unity)
+    if(NOT MSVC)
+        target_compile_options(xlrs_${suite}_tests PRIVATE -Wall -Wextra)
+    endif()
+    add_test(NAME xlrs_${suite}_tests COMMAND xlrs_${suite}_tests)
+endfunction()
 
-target_link_libraries(xlrs_native_tests PRIVATE unity)
-
-if(NOT MSVC)
-    target_compile_options(xlrs_native_tests PRIVATE -Wall -Wextra)
-endif()
-
-enable_testing()
-add_test(NAME xlrs_native_tests COMMAND xlrs_native_tests)
+foreach(suite core timing scheduler link telemetry power crypto app flash)
+    add_xlrs_test(${suite})
+endforeach()

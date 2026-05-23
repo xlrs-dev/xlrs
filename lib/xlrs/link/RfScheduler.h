@@ -23,19 +23,12 @@ namespace xlrs {
 
 enum class Slot : uint8_t { Uplink, Telemetry, Sync, Bind, Idle };
 
-// Pure slot-selection: which slot does this packet tick belong to?
-// Precedence: Sync > Telemetry > Uplink. Host-testable.
-//   syncEveryNTicks: emit a Sync beacon every N ticks (0 = never).
-//   tlmRatioDenom:   telemetry slot ratio 1:N (0 = no telemetry).
-inline Slot slotForTick(uint32_t tick, uint8_t tlmRatioDenom, uint16_t syncEveryNTicks) {
-    if (syncEveryNTicks && (tick % syncEveryNTicks) == 0) return Slot::Sync;
-    if (tlmRatioDenom    && (tick % tlmRatioDenom)    == 0) return Slot::Telemetry;
-    return Slot::Uplink;
-}
+// NOTE: the authoritative per-tick slot decision is Link::slotForTick (FHSS-position-based).
+// A separate tick-cadence helper used to live here; it was removed to keep a single source of
+// truth and avoid the two diverging on Sync semantics.
 
 // Forward-declared collaborators keep this header dependency-light.
 class IRadioPhy;
-class Fhss;
 class Link;
 
 class RfScheduler {
@@ -51,8 +44,9 @@ public:
     RfScheduler();
     ~RfScheduler();
 
-    // Wire in the lower layers, link instance, and the active rate (sets cadence + slot ratios).
-    bool begin(IRadioPhy* phy, Fhss* fhss, Link* link, uint8_t rateIndex);
+    // Wire in the PHY, link instance, and the active rate (sets cadence + slot ratios).
+    // (FHSS lives inside Link — the scheduler reads frequency via Link::freqForTick.)
+    bool begin(IRadioPhy* phy, Link* link, uint8_t rateIndex);
 
     // Called from the hardware-timer ISR context path (core 1). Must stay short:
     // it sequences the slot and kicks async PHY ops — no blocking, no logging, no alloc.
@@ -86,13 +80,18 @@ private:
 
 private:
     IRadioPhy*   _phy = nullptr;
-    Fhss*        _fhss = nullptr;
     Link*        _link = nullptr;
     RateConfig   _rate{};
     uint8_t      _rateIndex = 0;
     Slot         _currentSlot = Slot::Idle;
     uint32_t     _tick = 0;
     uint32_t     _tickStartUs = 0;
+    // The (tick, pos, tickStart) the radio was ARMED with this slot. onRxDone() processes a
+    // drained packet against THIS — not the current scheduler tick — so a packet drained after
+    // a tick advance (late packet / poll() fast-forward) is still decoded against its own slot.
+    uint32_t     _armedTick = 0;
+    uint16_t     _armedPos = 0;
+    uint32_t     _armedTickStartUs = 0;
     Pfd          _pfd{};
     HwTimer*     _timer = nullptr;
 

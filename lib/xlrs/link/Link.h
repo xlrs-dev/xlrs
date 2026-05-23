@@ -86,6 +86,7 @@ public:
     void service(uint32_t tick);   // timing-independent timeout, LQ and state machine updater
     void notePhyRecovery(bool success);
     void noteMissedDeadlines(uint16_t n);  // scheduler fell behind by n slots (saturating count)
+    void noteSchedulerOverrun(uint16_t n); // scheduler skipped stale slots; RX must re-acquire
 
     void    setChannels(const uint16_t* ch, uint8_t n);        // TX input (11-bit, 0..2047)
     uint8_t getChannels(uint16_t* ch, uint8_t maxN) const;     // RX output; returns count
@@ -149,6 +150,8 @@ private:
     StubbornReceiver _tlmReceiver;
     uint8_t          _receivedAckSeq = 0;
     uint8_t          _localAckSeq = 0;
+    bool             _txUseCompact = false;     // compact-frame hysteresis state (TX)
+    uint16_t         _auxCenteredFrames = 0;    // consecutive RC frames eligible for compact pack
 };
 
 } // namespace xlrs

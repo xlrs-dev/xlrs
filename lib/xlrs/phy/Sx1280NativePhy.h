@@ -19,7 +19,7 @@ enum class PhyDiagPhase : uint8_t {
     ModParams,
     SyncWord,
     RxGain,
-    PllTune,
+    LoraTune,
     AutoFs,
     DioIrq,
     ClearIrq,
@@ -116,6 +116,7 @@ private:
     void writeBuffer(uint8_t offset, const uint8_t* data, uint8_t len);
     void readBuffer(uint8_t offset, uint8_t* data, uint8_t len);
     void setRfSwitch(Mode mode);
+    void applyLoraModulationTuning();
     // Single source of truth for the modulation/packet register blocks (used by
     // init/reconfigure/setSyncWord/startTx) so tuning lives in one place.
     void buildModParams(uint8_t out[3]) const;

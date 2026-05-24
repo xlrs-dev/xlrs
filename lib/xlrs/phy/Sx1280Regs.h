@@ -39,7 +39,8 @@ enum Sx1280Register : uint16_t {
     SX1280_REG_LORA_SYNC_WORD        = 0x0944,
     SX1280_REG_FLRC_SYNC_WORD        = 0x09CF,
     SX1280_REG_RX_GAIN               = 0x0891, // [7:6]=3 → high-sensitivity (Table 13-1)
-    SX1280_REG_PLL_TUNE              = 0x0930  // vendor PLL tuning (undocumented in datasheet)
+    SX1280_REG_LORA_SF_CONFIG        = 0x0925, // mandatory after LoRa SetModulationParams (Table 14-47 note)
+    SX1280_REG_FREQ_ERROR_COMP       = 0x093C  // mandatory after LoRa SetModulationParams (Table 14-47 note)
 };
 
 // ------------------------------------------------------------
@@ -151,5 +152,9 @@ static constexpr uint8_t SX1280_LORA_PREAMBLE_12     = 0x16; // 12-symbol preamb
 static constexpr uint8_t SX1280_LORA_HEADER_IMPLICIT = 0x80; // implicit (fixed-length) header
 static constexpr uint8_t SX1280_LORA_CRC_ON          = 0x20;
 static constexpr uint8_t SX1280_LORA_IQ_STD          = 0x40; // standard (non-inverted) IQ
+static constexpr uint8_t SX1280_LORA_SF_CONFIG_SF5_6 = 0x1E;
+static constexpr uint8_t SX1280_LORA_SF_CONFIG_SF7_8 = 0x37;
+static constexpr uint8_t SX1280_LORA_SF_CONFIG_SF9_12 = 0x32;
+static constexpr uint8_t SX1280_FREQ_ERROR_COMP_ON   = 0x01;
 
 } // namespace xlrs

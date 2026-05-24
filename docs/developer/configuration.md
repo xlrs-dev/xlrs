@@ -30,6 +30,7 @@ Pins are configured as CMake cache variables and emitted as target compile defin
 * **`XLRS_SX128X_SPI_DIO1`** (default `21`) — DIO1 pin for TX-done/RX-done interrupts.
 * **`XLRS_SX128X_SPI_RST`** (default `22`) — Reset pin.
 * **`XLRS_SX128X_RXEN`** (default `14`) / **`XLRS_SX128X_TXEN`** (default `15`) — Front-end LNA/PA switching pins.
+* **`XLRS_SX128X_REGULATOR_MODE`** (default `0`) — SX1280 regulator mode, where `0` is LDO and `1` is DC-DC. Use DC-DC only on boards with the required SX1280 inductor populated.
 
 #### 2. TX UART Interface Configuration
 * **`XLRS_UART_TX_PIN`** (default `8`) / **`XLRS_UART_RX_PIN`** (default `9`) — TX module channel/control UART.

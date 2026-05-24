@@ -38,6 +38,9 @@
 #ifndef SX128X_SPI_BAUD
 #define SX128X_SPI_BAUD 8000000
 #endif
+#ifndef SX128X_REGULATOR_MODE
+#define SX128X_REGULATOR_MODE SX1280_REGULATOR_LDO
+#endif
 
 namespace xlrs {
 
@@ -90,7 +93,7 @@ const char* Sx1280NativePhy::diagPhaseName(PhyDiagPhase phase) {
         case PhyDiagPhase::ModParams: return "ModParams";
         case PhyDiagPhase::SyncWord: return "SyncWord";
         case PhyDiagPhase::RxGain: return "RxGain";
-        case PhyDiagPhase::PllTune: return "PllTune";
+        case PhyDiagPhase::LoraTune: return "LoraTune";
         case PhyDiagPhase::AutoFs: return "AutoFs";
         case PhyDiagPhase::DioIrq: return "DioIrq";
         case PhyDiagPhase::ClearIrq: return "ClearIrq";
@@ -245,6 +248,23 @@ void Sx1280NativePhy::buildPacketParams(uint8_t out[7], uint8_t payloadLen) cons
         out[5] = SX1280_FLRC_CRC_2_BYTE;
         out[6] = SX1280_FLRC_WHITENING_OFF;
     }
+}
+
+void Sx1280NativePhy::applyLoraModulationTuning() {
+    if (_cfg.modulation != Modulation::Lora) return;
+
+    uint8_t sfConfig = SX1280_LORA_SF_CONFIG_SF9_12;
+    if (_cfg.sf <= 6) {
+        sfConfig = SX1280_LORA_SF_CONFIG_SF5_6;
+    } else if (_cfg.sf <= 8) {
+        sfConfig = SX1280_LORA_SF_CONFIG_SF7_8;
+    }
+
+    writeRegister(SX1280_REG_LORA_SF_CONFIG, &sfConfig, 1);
+    if (_hardwareError.load(std::memory_order_acquire)) return;
+
+    uint8_t freqErrorComp = SX1280_FREQ_ERROR_COMP_ON;
+    writeRegister(SX1280_REG_FREQ_ERROR_COMP, &freqErrorComp, 1);
 }
 
 void Sx1280NativePhy::writeRegister(uint16_t addr, const uint8_t* data, uint8_t len) {
@@ -418,9 +438,10 @@ bool Sx1280NativePhy::init(const PhyConfig& cfg) {
     if (_hardwareError.load(std::memory_order_acquire)) return false;
     completeDiag(PhyDiagPhase::Standby, SX1280_OP_SET_STANDBY);
 
-    // 2. Set Regulator Mode to DC-DC
+    // 2. Set regulator mode. Default to LDO; DC-DC must be opted in only on boards with the
+    // required inductor, otherwise FS/Rx/Tx can brown out while STDBY_RC still appears healthy.
     beginDiag(PhyDiagPhase::Regulator, SX1280_OP_SET_REGULATOR_MODE);
-    uint8_t regModeParam = SX1280_REGULATOR_DCDC;
+    uint8_t regModeParam = SX128X_REGULATOR_MODE;
     spiCommand(SX1280_OP_SET_REGULATOR_MODE, &regModeParam, 1);
     if (_hardwareError.load(std::memory_order_acquire)) return false;
     completeDiag(PhyDiagPhase::Regulator, SX1280_OP_SET_REGULATOR_MODE);
@@ -454,6 +475,11 @@ bool Sx1280NativePhy::init(const PhyConfig& cfg) {
     if (_hardwareError.load(std::memory_order_acquire)) return false;
     completeDiag(PhyDiagPhase::ModParams, SX1280_OP_SET_MODULATION_PARAMS);
 
+    beginDiag(PhyDiagPhase::LoraTune, SX1280_OP_WRITE_REGISTER);
+    applyLoraModulationTuning();
+    if (_hardwareError.load(std::memory_order_acquire)) return false;
+    completeDiag(PhyDiagPhase::LoraTune, SX1280_OP_WRITE_REGISTER);
+
     // 7. Set sync word (also sets packet parameters)
     beginDiag(PhyDiagPhase::SyncWord);
     setSyncWord(cfg.syncWord);
@@ -471,12 +497,6 @@ bool Sx1280NativePhy::init(const PhyConfig& cfg) {
     writeRegister(SX1280_REG_RX_GAIN, &rxGain, 1);
     if (_hardwareError.load(std::memory_order_acquire)) return false;
     completeDiag(PhyDiagPhase::RxGain, SX1280_OP_WRITE_REGISTER);
-
-    beginDiag(PhyDiagPhase::PllTune, SX1280_OP_WRITE_REGISTER);
-    uint8_t pllTune = 0x08;
-    writeRegister(SX1280_REG_PLL_TUNE, &pllTune, 1); // vendor PLL tuning (undocumented register)
-    if (_hardwareError.load(std::memory_order_acquire)) return false;
-    completeDiag(PhyDiagPhase::PllTune, SX1280_OP_WRITE_REGISTER);
 
     // 7c. Enable AutoFS via the documented command (SetAutoFS, opcode 0x9E; 0x01 = enable).
     // Keeps the radio in FS between RX and TX instead of dropping to STDBY_RC, for faster
@@ -724,6 +744,7 @@ void Sx1280NativePhy::reconfigure(const PhyConfig& cfg) {
     uint8_t modParams[3];
     buildModParams(modParams);
     spiCommand(SX1280_OP_SET_MODULATION_PARAMS, modParams, 3);
+    applyLoraModulationTuning();
 
     // Set sync word and packet parameters
     setSyncWord(cfg.syncWord);

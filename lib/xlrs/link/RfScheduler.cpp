@@ -46,7 +46,9 @@ bool RfScheduler::begin(IRadioPhy* phy, Link* link, uint8_t rateIndex) {
     _lastProcessedRxEvent = 0;
     _lastProcessedTxEvent = 0;
 
-    syncPhyIdentity(true);
+    // init() already applied sync word and packet params; track revision for bind/rate changes.
+    _syncedIdentityRevision = _link->identityRevision();
+    _identitySynced = true;
 
     if (!_timer) {
         _timer = createHwTimer();
@@ -135,7 +137,7 @@ void RfScheduler::onTick(uint32_t tick) {
         if (_timer) {
             _timer->setIntervalUs(_rate.intervalUs);
         }
-        if (_phy) {
+        if (_phy && _phy->healthy()) {
             float freq = _link->freqForTick(tick);
             PhyConfig phyCfg = makePhyConfig(_rate, freq, _link->txPowerDbm(), _link->syncWord());
             _phy->reconfigure(phyCfg);
@@ -147,11 +149,15 @@ void RfScheduler::onTick(uint32_t tick) {
     _currentSlot = _link->slotForTick(tick);
 
     // 3. Keep physical output power synchronized.
-    if (_phy) {
+    if (_phy && _phy->healthy()) {
         _phy->setOutputPowerDbm(_link->txPowerDbm());
     }
 
     // 4. Sequence half-duplex transmit/receive turnaround.
+    if (!_phy || !_phy->healthy()) {
+        return;
+    }
+
     if (_link->role() == Role::Tx) {
         if (_currentSlot == Slot::Sync || _currentSlot == Slot::Uplink) {
             uint8_t buf[OTA16_LEN];
@@ -248,7 +254,8 @@ bool RfScheduler::recoverPhyIfNeeded() {
     }
     const bool ok = _phy->recover();
     if (ok) {
-        syncPhyIdentity(true);
+        _syncedIdentityRevision = _link->identityRevision();
+        _identitySynced = true;
     }
     if (_link) {
         _link->notePhyRecovery(ok);
@@ -258,7 +265,7 @@ bool RfScheduler::recoverPhyIfNeeded() {
 }
 
 void RfScheduler::syncPhyIdentity(bool force) {
-    if (!_phy || !_link) return;
+    if (!_phy || !_link || !_phy->healthy()) return;
     const uint32_t revision = _link->identityRevision();
     if (!force && _identitySynced && revision == _syncedIdentityRevision) return;
 

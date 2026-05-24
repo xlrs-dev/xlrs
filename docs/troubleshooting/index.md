@@ -82,10 +82,12 @@ do not, stop and fix binding/config before investigating RF behavior.
 Periodic status lines:
 
 ```text
-[TX STATUS] State: <n> LQdown: <n>% RSSI: <n> dBm | PHY timeouts: <n> CRC: <n>
+[TX STATUS] State: <n> LQdown: <n>% RSSI: <n> dBm | PHY timeouts: <n> CRC: <n> Phase: <phase>/<status> LastOp: 0xNN LastOk: 0xNN LastFailOp: 0xNN
 [TX STATUS] ... | CRSF rc:<n> age:<ms> ping:<n> pr:<n> pw:<n> fc:<n> bad:<n> qdrop:<n> dldrop:<n>
-[RX STATUS] State: <n> LQ: <n>% RSSI: <n> dBm | PHY timeouts: <n> CRC: <n> | out:<0|1> crsf_rc:<n> age:<ms> stats:<n> fc:<n> fcq:<n> fcdrop:<n> fcage:<ms> qdrop:<n>
+[RX STATUS] State: <n> LQ: <n>% RSSI: <n> dBm | PHY timeouts: <n> CRC: <n> Phase: <phase>/<status> LastOp: 0xNN LastOk: 0xNN LastFailOp: 0xNN | out:<0|1> crsf_rc:<n> age:<ms> stats:<n> fc:<n> fcq:<n> fcdrop:<n> fcage:<ms> qdrop:<n>
 ```
+
+PHY field meanings: [sx1280-phy-init.md](sx1280-phy-init.md).
 
 The second TX status form appears only in CRSF RC builds.
 
@@ -112,8 +114,10 @@ Current state values:
 | 3 | Connected |
 | 4 | Failsafe |
 
-`[HW FAULT]`, increasing PHY timeouts, or increasing CRC errors mean the problem
-is at or below the radio/PHY layer, not in CRSF or controller input.
+`[HW FAULT]`, increasing PHY timeouts, non-zero `LastFailOp`, or increasing CRC
+errors mean the problem is at or below the radio/PHY layer, not in CRSF or
+controller input. After a Pico SDK migration, start with
+[sx1280-phy-init.md](sx1280-phy-init.md) before changing RF timing.
 
 ### CRSF RC Bring-Up Counters
 
@@ -151,7 +155,7 @@ The RX status counters answer whether the flight-controller side works:
 | Symptom | Most Likely Cause | What To Check |
 | --- | --- | --- |
 | No USB serial port appears | Board not booted, bad cable, stuck in BOOTSEL, firmware not flashed | Try another cable, check `/dev/cu.usbmodem*`, reflash UF2, verify board exits BOOTSEL |
-| Repeated reboot every ~1 second | RF core heartbeat stopped, often radio init failure | Watch for `[HW FAULT]`; inspect SX1280 wiring, BUSY/DIO1, SPI pins, power rail |
+| Repeated reboot every ~1 second | RF core heartbeat stopped, often radio init failure | Watch for `[HW FAULT]` and `LastFailOp`; see [sx1280-phy-init.md](sx1280-phy-init.md); inspect SX1280 wiring, BUSY/DIO1, SPI pins, power rail |
 | TX/RX identities differ | Binding phrase/config mismatch | Rebuild both with same `XLRS_DEFAULT_BINDING_PHRASE` or reset/persist same binding phrase |
 | Same identity, never connects | RF init, sync word, RF channel table, antenna/path issue | Compare `[PHY]` lines, check antennas/load, inspect PHY timeout/CRC counters |
 | Connects then drops | PFD/timing instability, weak RF path, CRC errors, radio recovery | Watch LQ/RSSI/CRC, test boards close together at low power, then with attenuation |

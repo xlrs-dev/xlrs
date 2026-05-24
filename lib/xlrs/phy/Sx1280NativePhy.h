@@ -103,12 +103,13 @@ private:
     static Sx1280NativePhy* s_self;    // single radio instance per build
 
     void resetRadio();
-    bool waitBusy();
+    bool waitBusy(bool recordTimeout = true);
+    bool trySetStandby(); // SetStandby RC without touching _hardwareError (reset verify retries)
     void recordHardwareFault(uint8_t opcode);
     void recordDiag(PhyDiagPhase phase, PhyDiagStatus status, uint8_t opcode = 0);
     void beginDiag(PhyDiagPhase phase, uint8_t opcode = 0);
     void completeDiag(PhyDiagPhase phase, uint8_t opcode = 0);
-    void spiCommand(uint8_t opcode, const uint8_t* params, uint8_t len);
+    void spiCommand(uint8_t opcode, const uint8_t* params, uint8_t len, bool waitPostBusy = true);
     bool readCommand(uint8_t opcode, uint8_t* out, uint8_t len); // GET-status read (opcode+dummy+len)
     void clearIrqStatus();
     void writeRegister(uint16_t addr, const uint8_t* data, uint8_t len);
@@ -131,6 +132,7 @@ private:
     std::atomic<uint32_t> _spiTimeouts{0};    // BUSY-line timeouts seen
     std::atomic<uint32_t> _crcErrors{0};      // RX frames dropped on CRC mismatch
     std::atomic<uint8_t>  _lastFailOpcode{0}; // opcode of the last SPI op that timed out
+    std::atomic<bool>     _txInProgress{false}; // SetTx armed; cleared on DIO1 TX_DONE
     std::atomic<uint8_t>  _lastDiagPhase{(uint8_t)PhyDiagPhase::None};
     std::atomic<uint8_t>  _lastDiagStatus{(uint8_t)PhyDiagStatus::Complete};
     std::atomic<uint8_t>  _lastStartedOpcode{0};

@@ -24,9 +24,9 @@ Expected boot markers:
 Periodic status lines:
 
 ```text
-[TX STATUS] State: <n> LQdown: <n>% RSSI: <n> dBm | PHY timeouts: <n> CRC: <n>
+[TX STATUS] State: <n> LQdown: <n>% RSSI: <n> dBm | PHY timeouts: <n> CRC: <n> Phase: <phase>/<status> LastOp: 0xNN LastOk: 0xNN LastFailOp: 0xNN
 [TX STATUS] ... | CRSF rc:<n> age:<ms> ping:<n> pr:<n> pw:<n> fc:<n> bad:<n> qdrop:<n> dldrop:<n>
-[RX STATUS] State: <n> LQ: <n>% RSSI: <n> dBm | PHY timeouts: <n> CRC: <n> | out:<0|1> crsf_rc:<n> age:<ms> stats:<n> fc:<n> fcq:<n> fcdrop:<n> fcage:<ms> qdrop:<n>
+[RX STATUS] State: <n> LQ: <n>% RSSI: <n> dBm | PHY timeouts: <n> CRC: <n> Phase: <phase>/<status> LastOp: 0xNN LastOk: 0xNN LastFailOp: 0xNN | out:<0|1> crsf_rc:<n> age:<ms> stats:<n> fc:<n> fcq:<n> fcdrop:<n> fcage:<ms> qdrop:<n>
 ```
 
 The CRSF section in the TX status line appears only when TX is built with
@@ -51,13 +51,15 @@ Current state values:
 | 3 | Connected |
 | 4 | Failsafe |
 
-`[HW FAULT]`, increasing PHY timeouts, or increasing CRC errors mean the problem
-is at or below the radio/PHY layer, not in CRSF or controller input.
+`[HW FAULT]`, increasing PHY timeouts, non-zero `LastFailOp`, or increasing CRC
+errors mean the problem is at or below the radio/PHY layer, not in CRSF or
+controller input. Opcode reference: [sx1280-phy-init.md](sx1280-phy-init.md).
 
 Counter meanings:
 
 | Counter | Meaning |
 | --- | --- |
+| `Phase` / `LastOp` / `LastOk` / `LastFailOp` | SX1280 init/runtime phase and SPI opcode diagnostics |
 | TX `rc` / `age` | CRSF RC frames received from the controller, and age of the most recent one |
 | TX `ping` | CRSF device discovery frames received |
 | TX `pr` / `pw` | CRSF parameter reads/writes received |

@@ -145,16 +145,30 @@ void Sx1280NativePhy::completeDiag(PhyDiagPhase phase, uint8_t opcode) {
     recordDiag(phase, PhyDiagStatus::Complete, opcode);
 }
 
-bool Sx1280NativePhy::waitBusy() {
+bool Sx1280NativePhy::waitBusy(bool recordTimeout) {
     uint32_t start = hal::nowUs();
     while (gpio_get(SX128X_SPI_BUSY)) {
         if (hal::nowUs() - start > BUSY_TIMEOUT_US) {
-            _spiTimeouts.fetch_add(1, std::memory_order_relaxed);
+            if (recordTimeout) {
+                _spiTimeouts.fetch_add(1, std::memory_order_relaxed);
+            }
             return false;
         }
         hal::sleepUs(1);
     }
     return true;
+}
+
+bool Sx1280NativePhy::trySetStandby() {
+    if (!waitBusy(false)) return false;
+    uint8_t stdbyParam = SX1280_STDBY_RC;
+    gpio_put(SX128X_SPI_CS, false);
+    hal::sleepUs(2);
+    spiTransfer(SX1280_OP_SET_STANDBY);
+    spiTransfer(stdbyParam);
+    gpio_put(SX128X_SPI_CS, true);
+    hal::sleepUs(2);
+    return waitBusy(false);
 }
 
 void Sx1280NativePhy::recordHardwareFault(uint8_t opcode) {
@@ -163,7 +177,7 @@ void Sx1280NativePhy::recordHardwareFault(uint8_t opcode) {
     recordDiag(lastDiagPhase(), PhyDiagStatus::Fail, opcode);
 }
 
-void Sx1280NativePhy::spiCommand(uint8_t opcode, const uint8_t* params, uint8_t len) {
+void Sx1280NativePhy::spiCommand(uint8_t opcode, const uint8_t* params, uint8_t len, bool waitPostBusy) {
     _lastStartedOpcode.store(opcode, std::memory_order_relaxed);
     if (!waitBusy()) {
         recordHardwareFault(opcode);
@@ -177,7 +191,7 @@ void Sx1280NativePhy::spiCommand(uint8_t opcode, const uint8_t* params, uint8_t 
     }
     gpio_put(SX128X_SPI_CS, true);
     hal::sleepUs(2);
-    if (!waitBusy()) {
+    if (waitPostBusy && !waitBusy()) {
         recordHardwareFault(opcode);
         return;
     }
@@ -367,13 +381,18 @@ void Sx1280NativePhy::resetRadio() {
     gpio_init(SX128X_SPI_RST);
     gpio_set_dir(SX128X_SPI_RST, GPIO_OUT);
     gpio_put(SX128X_SPI_RST, false);
-    hal::sleepMs(10);
+    hal::sleepMs(1);
     gpio_put(SX128X_SPI_RST, true);
-    hal::sleepMs(10);
-    gpio_set_dir(SX128X_SPI_RST, GPIO_IN);
-    if (!waitBusy()) {
-        recordHardwareFault(0);
+    // Keep RST driven high (RadioLib does not tri-state after reset).
+
+    // Match RadioLib reset(): retry SetStandby until the chip responds or 3 s elapse.
+    uint32_t startMs = hal::nowMs();
+    while ((uint32_t)(hal::nowMs() - startMs) < 3000) {
+        if (trySetStandby()) return;
+        hal::sleepMs(10);
     }
+    _spiTimeouts.fetch_add(1, std::memory_order_relaxed);
+    recordHardwareFault(SX1280_OP_SET_STANDBY);
 }
 
 void Sx1280NativePhy::setRfSwitch(Mode mode) {
@@ -399,6 +418,7 @@ void Sx1280NativePhy::onDio1(uint gpio, uint32_t events) {
         s_self->_rxReady.store(true, std::memory_order_release);
         if (s_self->_onRxDone) s_self->_onRxDone();
     } else if (mode == Mode::Tx) {
+        s_self->_txInProgress.store(false, std::memory_order_release);
         if (s_self->_onTxDone) s_self->_onTxDone();
     }
 }
@@ -406,12 +426,15 @@ void Sx1280NativePhy::onDio1(uint gpio, uint32_t events) {
 bool Sx1280NativePhy::init(const PhyConfig& cfg) {
     _cfg = cfg;
     s_self = this;
-    _hardwareError.store(false, std::memory_order_release); // reset state
+    _hardwareError.store(false, std::memory_order_release);
+    _txInProgress.store(false, std::memory_order_release);
+    _spiTimeouts.store(0, std::memory_order_relaxed);
     _lastFailOpcode.store(0, std::memory_order_relaxed);
     _diagTraceEnabled = true;
 
     beginDiag(PhyDiagPhase::SpiGpio);
     spi_init(kRadioSpi, SX128X_SPI_BAUD);
+    spi_set_format(kRadioSpi, 8, SPI_CPOL_0, SPI_CPHA_0, SPI_MSB_FIRST);
     gpio_set_function(SX128X_SPI_SCK, GPIO_FUNC_SPI);
     gpio_set_function(SX128X_SPI_MOSI, GPIO_FUNC_SPI);
     gpio_set_function(SX128X_SPI_MISO, GPIO_FUNC_SPI);
@@ -421,6 +444,7 @@ bool Sx1280NativePhy::init(const PhyConfig& cfg) {
     gpio_put(SX128X_SPI_CS, true);
     gpio_init(SX128X_SPI_BUSY);
     gpio_set_dir(SX128X_SPI_BUSY, GPIO_IN);
+    gpio_disable_pulls(SX128X_SPI_BUSY);
     gpio_init(SX128X_SPI_DIO1);
     gpio_set_dir(SX128X_SPI_DIO1, GPIO_IN);
     gpio_init(SX128X_RXEN);
@@ -530,18 +554,20 @@ bool Sx1280NativePhy::init(const PhyConfig& cfg) {
     if (_hardwareError.load(std::memory_order_acquire)) return false;
     completeDiag(PhyDiagPhase::ClearIrq, SX1280_OP_CLEAR_IRQ_STATUS);
 
-    // 10. Attach interrupt
+    // 10. Attach interrupt (RX/TX armed by the scheduler on the first tick).
     beginDiag(PhyDiagPhase::AttachIrq);
     gpio_set_irq_enabled_with_callback(SX128X_SPI_DIO1, GPIO_IRQ_EDGE_RISE, true, onDio1);
     completeDiag(PhyDiagPhase::AttachIrq);
 
-    startRx(cfg.freqMHz);
-    const bool ok = !_hardwareError.load(std::memory_order_acquire);
     _diagTraceEnabled = false;
-    return ok;
+    return !_hardwareError.load(std::memory_order_acquire);
 }
 
 void Sx1280NativePhy::startRx(float freqMHz) {
+    if (_hardwareError.load(std::memory_order_acquire) ||
+        _txInProgress.load(std::memory_order_acquire)) {
+        return;
+    }
     beginDiag(PhyDiagPhase::StartRx, SX1280_OP_SET_RX);
     _mode.store(Mode::Rx, std::memory_order_release);
     _rxReady.store(false, std::memory_order_release);
@@ -573,13 +599,18 @@ void Sx1280NativePhy::startRx(float freqMHz) {
         (uint8_t)(SX1280_TIMEOUT_SINGLE_MODE >> 8),
         (uint8_t)SX1280_TIMEOUT_SINGLE_MODE
     };
-    spiCommand(SX1280_OP_SET_RX, rxParams, 3);
+    // Skip post-BUSY wait — the chip may hold BUSY through RX entry; DIO1 marks completion.
+    spiCommand(SX1280_OP_SET_RX, rxParams, 3, false);
     if (!_hardwareError.load(std::memory_order_acquire)) {
         completeDiag(PhyDiagPhase::StartRx, SX1280_OP_SET_RX);
     }
 }
 
 void Sx1280NativePhy::startTx(float freqMHz, const uint8_t* data, uint8_t len) {
+    if (_hardwareError.load(std::memory_order_acquire) ||
+        _txInProgress.load(std::memory_order_acquire)) {
+        return;
+    }
     beginDiag(PhyDiagPhase::StartTx, SX1280_OP_SET_TX);
     _mode.store(Mode::Tx, std::memory_order_release);
 
@@ -610,10 +641,13 @@ void Sx1280NativePhy::startTx(float freqMHz, const uint8_t* data, uint8_t len) {
     // 6. Clear Interrupts
     clearIrqStatus();
 
-    // 7. Issue SetTx (0x00, 0x00, 0x00)
+    // 7. Issue SetTx (0x00, 0x00, 0x00). Return once accepted — TX_DONE arrives on DIO1.
+    _txInProgress.store(true, std::memory_order_release);
     uint8_t txParams[3] = { 0x00, 0x00, 0x00 };
-    spiCommand(SX1280_OP_SET_TX, txParams, 3);
-    if (!_hardwareError.load(std::memory_order_acquire)) {
+    spiCommand(SX1280_OP_SET_TX, txParams, 3, false);
+    if (_hardwareError.load(std::memory_order_acquire)) {
+        _txInProgress.store(false, std::memory_order_release);
+    } else {
         completeDiag(PhyDiagPhase::StartTx, SX1280_OP_SET_TX);
     }
 }
@@ -681,6 +715,10 @@ bool Sx1280NativePhy::readRx(RxPacket& out) {
 }
 
 void Sx1280NativePhy::setOutputPowerDbm(int8_t dbm) {
+    if (_hardwareError.load(std::memory_order_acquire) ||
+        _txInProgress.load(std::memory_order_acquire)) {
+        return;
+    }
     beginDiag(PhyDiagPhase::SetPower, SX1280_OP_SET_TX_PARAMS);
     _cfg.powerDbm = dbm;
     uint8_t txParams[2] = { txPowerReg(dbm), SX1280_RAMP_20_US };
@@ -691,6 +729,19 @@ void Sx1280NativePhy::setOutputPowerDbm(int8_t dbm) {
 }
 
 void Sx1280NativePhy::setSyncWord(uint16_t uidDerived) {
+    if (_hardwareError.load(std::memory_order_acquire) ||
+        _txInProgress.load(std::memory_order_acquire)) {
+        return;
+    }
+
+    // Register writes require standby; scheduler may call this while init left us in RX.
+    const Mode prevMode = _mode.load(std::memory_order_acquire);
+    if (prevMode != Mode::Idle) {
+        uint8_t stdbyParam = SX1280_STDBY_RC;
+        spiCommand(SX1280_OP_SET_STANDBY, &stdbyParam, 1);
+        if (_hardwareError.load(std::memory_order_acquire)) return;
+    }
+
     if (_cfg.modulation == Modulation::Flrc) {
         // Datasheet §16.4: with a FLRC sync word at CR 1/2, sync words whose top 16 bits are
         // 0x8C38 or 0x630E resemble the FLRC preamble and cause elevated PER. Those top 16 bits
@@ -729,6 +780,10 @@ void Sx1280NativePhy::setSyncWord(uint16_t uidDerived) {
         uint8_t packetParams[7];
         buildPacketParams(packetParams, _cfg.payloadLen);
         spiCommand(SX1280_OP_SET_PACKET_PARAMS, packetParams, 7);
+    }
+
+    if (prevMode == Mode::Rx && !_hardwareError.load(std::memory_order_acquire)) {
+        startRx(_cfg.freqMHz);
     }
 }
 
@@ -772,6 +827,7 @@ bool Sx1280NativePhy::recover() {
     PhyConfig cfg = _cfg;
     gpio_set_irq_enabled(SX128X_SPI_DIO1, GPIO_IRQ_EDGE_RISE, false);
     _rxReady.store(false, std::memory_order_release);
+    _txInProgress.store(false, std::memory_order_release);
     _mode.store(Mode::Idle, std::memory_order_release);
     const bool ok = init(cfg);
     if (ok) {

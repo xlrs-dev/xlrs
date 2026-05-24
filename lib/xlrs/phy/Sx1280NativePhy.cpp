@@ -50,6 +50,8 @@ static spi_inst_t* kRadioSpi = spi0;
 // (datasheet §10.3); 10 ms is a generous ceiling that still bounds a wedged-chip stall to a
 // handful of slots instead of the previous 100 ms (tens of slots at the faster rates).
 static constexpr uint32_t BUSY_TIMEOUT_US = 10000;
+static constexpr uint8_t SX1280_TIMEOUT_BASE_15_625_US = 0x00;
+static constexpr uint16_t SX1280_TIMEOUT_SINGLE_MODE = 0x0000;
 
 static uint8_t spiTransfer(uint8_t value) {
     uint8_t rx = 0;
@@ -409,8 +411,14 @@ void Sx1280NativePhy::startRx(float freqMHz) {
     // 4. Clear Interrupts
     clearIrqStatus();
 
-    // 5. Issue SetRx with continuous timeout (0x00, 0xFF, 0xFF)
-    uint8_t rxParams[3] = { 0x00, 0xFF, 0xFF };
+    // 5. Issue SetRx in single mode. The scheduler re-arms RX for every receive slot, and
+    // Semtech errata 16.1 warns that continuous RX (0xFFFF) can wedge BUSY high under high
+    // co-channel packet rates.
+    uint8_t rxParams[3] = {
+        SX1280_TIMEOUT_BASE_15_625_US,
+        (uint8_t)(SX1280_TIMEOUT_SINGLE_MODE >> 8),
+        (uint8_t)SX1280_TIMEOUT_SINGLE_MODE
+    };
     spiCommand(SX1280_OP_SET_RX, rxParams, 3);
 }
 

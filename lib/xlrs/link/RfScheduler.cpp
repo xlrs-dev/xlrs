@@ -268,7 +268,9 @@ void RfScheduler::syncPhyIdentity(bool force) {
 }
 
 void RfScheduler::poll() {
-    recoverPhyIfNeeded();
+    if (!recoverPhyIfNeeded()) {
+        return;
+    }
 
     // 1. Process RX Done
     uint32_t currentRx = _rxDoneEvents.load(std::memory_order_acquire);

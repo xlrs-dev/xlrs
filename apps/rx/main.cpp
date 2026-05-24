@@ -69,6 +69,8 @@ static constexpr uint32_t RF_STALL_MS            = 500;  // stop feeding if RF c
 static constexpr uint32_t WATCHDOG_BOOT_GRACE_MS = 3000; // feed unconditionally until RF core is up
 static constexpr uint32_t BIND_SCAN_NORMAL_WINDOW_MS = 4000;
 static constexpr uint32_t BIND_SCAN_WINDOW_MS = 1500;
+// Defer bind-scan cycling so a bound pair can acquire before the RX retunes to bind mode.
+static constexpr uint32_t BIND_SCAN_GRACE_MS = 30000;
 
 xlrs::Link g_link;
 xlrs::RfScheduler g_scheduler;
@@ -378,6 +380,7 @@ static void rf_core_main() {
         static bool pendingBindMessageReady = false;
         static xlrs::AppTelemetryMessage pendingBindMessage{};
         static bool normalLinkSeen = false;
+        static const uint32_t bootMs = xlrs::hal::nowMs();
         static bool telemetryPending = false;
         static xlrs::AppTelemetryMessage pendingTelemetryMessage{};
         xlrs::AppTelemetryMessage telemetryMessage{};
@@ -401,14 +404,14 @@ static void rf_core_main() {
         if (linkState == xlrs::LinkState::Connected || normalLinkSeen || bindPacketReceived) {
             if (linkState == xlrs::LinkState::Connected) normalLinkSeen = true;
             if (bindScanning) {
-                g_link.setLinkUid(uid);
+                g_link.endBindScan(uid);
                 bindScanning = false;
             }
-        } else {
+        } else if ((int32_t)(xlrs::hal::nowMs() - bootMs) >= (int32_t)BIND_SCAN_GRACE_MS) {
             const uint32_t now = xlrs::hal::nowMs();
             if ((int32_t)(now - nextBindScanSwitchMs) >= 0) {
                 if (bindScanning) {
-                    g_link.setLinkUid(uid);
+                    g_link.endBindScan(uid);
                     bindScanning = false;
                     nextBindScanSwitchMs = now + BIND_SCAN_NORMAL_WINDOW_MS;
                 } else {

@@ -124,6 +124,16 @@ void Link::startBindScan() {
     resetAcquisition(LinkState::Binding);
 }
 
+void Link::endBindScan(const uint8_t uid[LINK_UID_SIZE]) {
+    if (_role != Role::Rx || !uid) return;
+    configureIdentity(uid);
+    _bindTransmitActive = false;
+    _bindScanActive = false;
+    if (_state == LinkState::Binding) {
+        _state = LinkState::Connecting;
+    }
+}
+
 bool Link::takeReceivedBindUid(uint8_t uid[LINK_UID_SIZE]) {
     if (!uid || !_receivedBindUidReady) return false;
     memcpy(uid, _receivedBindUid, LINK_UID_SIZE);

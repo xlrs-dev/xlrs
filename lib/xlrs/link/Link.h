@@ -92,6 +92,8 @@ public:
     void setLinkUid(const uint8_t uid[LINK_UID_SIZE]);
     void startBindTransmit(const uint8_t targetUid[LINK_UID_SIZE]);
     void startBindScan();
+    // Leave bind-scan listen mode and restore the bound identity without wiping acquisition.
+    void endBindScan(const uint8_t uid[LINK_UID_SIZE]);
     bool bindTransmitActive() const { return _bindTransmitActive; }
     bool bindScanActive() const { return _bindScanActive; }
     bool takeReceivedBindUid(uint8_t uid[LINK_UID_SIZE]);

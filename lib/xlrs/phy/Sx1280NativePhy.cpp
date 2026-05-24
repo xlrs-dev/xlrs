@@ -3,6 +3,8 @@
 #if defined(XLRS_PICO_SDK)
 #include "hal/Time.h"
 
+#include <cstring>
+
 #include <hardware/gpio.h>
 #include <hardware/spi.h>
 #include <pico/stdlib.h>
@@ -588,10 +590,15 @@ void Sx1280NativePhy::startRx(float freqMHz) {
     };
     spiCommand(SX1280_OP_SET_RF_FREQUENCY, freqParams, 3);
 
-    // 4. Clear Interrupts
+    // 4. Restore fixed air length — a prior startTx() may have shortened packet params.
+    uint8_t packetParams[7];
+    buildPacketParams(packetParams, _cfg.payloadLen);
+    spiCommand(SX1280_OP_SET_PACKET_PARAMS, packetParams, 7);
+
+    // 5. Clear Interrupts
     clearIrqStatus();
 
-    // 5. Issue SetRx in single mode. The scheduler re-arms RX for every receive slot, and
+    // 6. Issue SetRx in single mode. The scheduler re-arms RX for every receive slot, and
     // Semtech errata 16.1 warns that continuous RX (0xFFFF) can wedge BUSY high under high
     // co-channel packet rates.
     uint8_t rxParams[3] = {
@@ -630,12 +637,18 @@ void Sx1280NativePhy::startTx(float freqMHz, const uint8_t* data, uint8_t len) {
     };
     spiCommand(SX1280_OP_SET_RF_FREQUENCY, freqParams, 3);
 
-    // 4. Write data to Buffer at offset 0
-    writeBuffer(0x00, data, len);
+    // 4. Pad to the configured fixed air length (FLRC fixed-packet mode on both ends).
+    const uint8_t airLen = _cfg.payloadLen;
+    uint8_t padded[32] = {};
+    if (len > airLen) len = airLen;
+    if (data && len > 0) {
+        memcpy(padded, data, len);
+    }
+    writeBuffer(0x00, padded, airLen);
 
-    // 5. Update Packet Params with the actual payload length
+    // 5. Packet params always use the nominal OTA length, not the logical frame size.
     uint8_t packetParams[7];
-    buildPacketParams(packetParams, len);
+    buildPacketParams(packetParams, airLen);
     spiCommand(SX1280_OP_SET_PACKET_PARAMS, packetParams, 7);
 
     // 6. Clear Interrupts

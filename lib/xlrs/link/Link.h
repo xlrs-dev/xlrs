@@ -105,7 +105,8 @@ public:
     float freqForTick(uint32_t tick) const;
     Slot slotForTick(uint32_t tick) const;
     bool getTxPayload(uint32_t tick, uint16_t pos, uint8_t* outBuf, uint8_t& outLen);
-    bool processRxPayload(uint32_t tick, uint16_t pos, const uint8_t* data, uint8_t len, int16_t rssi, int8_t snr);
+    bool processRxPayload(uint32_t tick, uint16_t pos, const uint8_t* data, uint8_t len,
+                          int16_t rssi, int8_t snr, uint32_t rxPacketStartUs = 0);
     void service(uint32_t tick);   // timing-independent timeout, LQ and state machine updater
     void notePhyRecovery(bool success);
     void noteMissedDeadlines(uint16_t n);  // scheduler fell behind by n slots (saturating count)
@@ -138,6 +139,7 @@ private:
     uint16_t hopInterval() const;
     SlotKind slotKind(uint32_t tick, uint16_t pos) const;
     float    freqForPos(uint16_t pos) const;
+    uint32_t txTickForNonce(uint32_t rxPacketStartUs) const;
     void     configureIdentity(const uint8_t uid[LINK_UID_SIZE]);
     void     resetAcquisition(LinkState state);
 
@@ -161,6 +163,8 @@ private:
     int8_t       _syncFhssSkew = 0;
     uint16_t     _rxPos    = 0;         // RX: hop index (tick-derived when locked)
     bool         _syncResyncResetPfd = false;
+    uint32_t     _syncAnchorTxTick = 0;
+    uint32_t     _syncAnchorLocalTick = 0;
     FailsafeMode _fsMode   = FailsafeMode::NoPulses;
     LinkState    _state    = LinkState::Disconnected;
     uint16_t     _ch[RC_CHANNELS] = {0};

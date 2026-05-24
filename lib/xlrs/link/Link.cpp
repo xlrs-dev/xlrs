@@ -61,6 +61,8 @@ void Link::resetAcquisition(LinkState state) {
     _stats.fhssIndex = 0;
     _syncResyncPending = false;
     _pendingTxTickResync = 0;
+    _syncAnchorTxTick = 0;
+    _syncAnchorLocalTick = 0;
 }
 
 void Link::begin(Role role, const uint8_t uid[8], uint8_t rateIndex, int8_t maxPowerDbm, bool useDynamicPower) {
@@ -158,6 +160,8 @@ void Link::snapSchedulerTick(uint32_t tick) {
     _tick = tick;
     if (_role == Role::Rx && _locked) {
         _rxPos = txPos(tick);
+        _syncAnchorTxTick = tick;
+        _syncAnchorLocalTick = tick;
     }
     _stats.fhssIndex = (_role == Role::Tx) ? (uint8_t)txPos(tick) : (uint8_t)_rxPos;
 }
@@ -189,6 +193,12 @@ Link::SlotKind Link::slotKind(uint32_t tick, uint16_t pos) const {
 
 float Link::freqForPos(uint16_t pos) const {
     return fhssFreqForIndex(_fhss.at((uint8_t)(pos % _fhss.count())), _region);
+}
+
+uint32_t Link::txTickForNonce(uint32_t rxPacketStartUs) const {
+    (void)rxPacketStartUs;
+    if (_role != Role::Rx || !_locked) return _tick;
+    return _syncAnchorTxTick + (_tick - _syncAnchorLocalTick);
 }
 
 void Link::onTick(uint32_t tick) {
@@ -356,7 +366,8 @@ bool Link::getTxPayload(uint32_t tick, uint16_t pos, uint8_t* outBuf, uint8_t& o
     }
 }
 
-bool Link::processRxPayload(uint32_t tick, uint16_t pos, const uint8_t* data, uint8_t len, int16_t rssi, int8_t snr) {
+bool Link::processRxPayload(uint32_t tick, uint16_t pos, const uint8_t* data, uint8_t len,
+                            int16_t rssi, int8_t snr, uint32_t rxPacketStartUs) {
     if (!data || len == 0) return false;
 
     SyncPayload s{};
@@ -454,14 +465,30 @@ bool Link::processRxPayload(uint32_t tick, uint16_t pos, const uint8_t* data, ui
     } else if (otaType(data[0]) == OtaType::Rc && _role == Role::Rx) {
         if (!_locked || !_syncSeen) return false;
         ICipher* c = _cipher ? _cipher : &s_nullCipher;
+        uint32_t nonceTick = tick;
+#if defined(XLRS_PICO_SDK)
+        if (_locked) {
+            nonceTick = _syncAnchorTxTick + (tick - _syncAnchorLocalTick);
+        }
+#endif
+
+        auto tryNonceTicks = [&](auto&& tryFrame) -> bool {
+            for (int32_t delta = -1; delta <= 1; ++delta) {
+                const int32_t tryTick = (int32_t)nonceTick + delta;
+                if (tryTick < 0) continue;
+                if (tryFrame((uint32_t)tryTick)) return true;
+            }
+            return false;
+        };
 
         // Try compact 8-byte frame first
         if (len >= (uint8_t)(8 + c->overhead())) {
             uint8_t decBuf[32];
-            memcpy(decBuf, data, len);
-            if (c->open(decBuf + 1, 7, Nonce96::build(_sessionSalt, tick, pos))) {
-                uint8_t decSeq = 0;
-                if (unpackChannels8Byte(decBuf, rxch, decSeq)) {
+            if (tryNonceTicks([&](uint32_t tryTick) -> bool {
+                    memcpy(decBuf, data, len);
+                    if (!c->open(decBuf + 1, 7, Nonce96::build(_sessionSalt, tryTick, pos))) return false;
+                    uint8_t decSeq = 0;
+                    if (!unpackChannels8Byte(decBuf, rxch, decSeq)) return false;
                     _gotRcThisTick = true;
                     _gotValidUplinkThisTick = true;
                     memcpy(_ch, rxch, sizeof(uint16_t) * RC_CHANNELS);
@@ -470,7 +497,8 @@ bool Link::processRxPayload(uint32_t tick, uint16_t pos, const uint8_t* data, ui
                     _receivedAckSeq = decSeq;
                     _tlmSender.receiveAck(_receivedAckSeq);
                     return true;
-                }
+                })) {
+                return true;
             }
         }
 
@@ -478,16 +506,18 @@ bool Link::processRxPayload(uint32_t tick, uint16_t pos, const uint8_t* data, ui
         const uint8_t p = packedSize(RC_CHANNELS);
         if (len >= (uint8_t)(1 + p + c->overhead())) {
             uint8_t decBuf[32];
-            memcpy(decBuf, data, len);
-            if (c->open(decBuf + 1, p, Nonce96::build(_sessionSalt, tick, pos))) {
-                if (otaDecodeRc(decBuf, len, rxch, RC_CHANNELS)) {
+            if (tryNonceTicks([&](uint32_t tryTick) -> bool {
+                    memcpy(decBuf, data, len);
+                    if (!c->open(decBuf + 1, p, Nonce96::build(_sessionSalt, tryTick, pos))) return false;
+                    if (!otaDecodeRc(decBuf, len, rxch, RC_CHANNELS)) return false;
                     _gotRcThisTick = true;
                     _gotValidUplinkThisTick = true;
                     memcpy(_ch, rxch, sizeof(uint16_t) * RC_CHANNELS);
                     _lastRxTick = tick; _everRx = true;
                     _stats.rssiDbm = rssi; _stats.snr = snr;
                     return true;
-                }
+                })) {
+                return true;
             }
         }
     }

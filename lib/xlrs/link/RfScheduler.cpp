@@ -217,18 +217,23 @@ void RfScheduler::onRxDone() {
         // Decode/authenticate against the slot the radio was ARMED with (not the current tick),
         // so a packet drained after a tick advance is still matched to its own (tick,pos) nonce
         // and PFD reference. More reachable now that poll() can fast-forward the tick.
-        bool success = _link->processRxPayload(_armedTick, _armedPos, pkt.data, pkt.len, pkt.rssiDbm, pkt.snr);
+        uint32_t airtime = (pkt.len <= 8) ? _rate.airtime8Us : _rate.airtime16Us;
+        uint32_t packetStartUs = pkt.timestampUs - airtime;
+#if defined(XLRS_PICO_SDK)
+        packetStartUs -= TX_GUARD_US;
+#endif
+        const bool success = _link->processRxPayload(_armedTick, _armedPos, pkt.data, pkt.len, pkt.rssiDbm, pkt.snr,
+                                                     packetStartUs);
         if (success) {
             uint32_t txTick = 0;
             bool resetPfd = false;
             if (_link->role() == Role::Rx && _link->takeSyncResyncTick(txTick, resetPfd)) {
                 _tick = txTick;
                 _link->snapSchedulerTick(txTick);
-                if (resetPfd) {
-                    _pfd.begin(_rate.intervalUs);
-                    if (_timer) {
-                        _timer->setIntervalUs(_rate.intervalUs);
-                    }
+                (void)resetPfd;
+                _pfd.begin(_rate.intervalUs);
+                if (_timer) {
+                    _timer->setIntervalUs(_rate.intervalUs);
                 }
             }
             // Hardware RX is async: the packet often arrives after service() already
@@ -237,12 +242,12 @@ void RfScheduler::onRxDone() {
 #if defined(XLRS_PICO_SDK)
             _link->service(_armedTick);
 #endif
-            // Apply Phase-Frequency Detector (PFD) correction to timer interval (RX only).
-            if (_link->role() == Role::Rx) {
-                uint32_t airtime = (pkt.len <= 8) ? _rate.airtime8Us : _rate.airtime16Us;
-                // Correct PFD negative feedback sign: offsetUs = actual - expected
+            // Hold nominal cadence during acquisition; PFD nudges from Sync biased the
+            // timer (~953 µs) and desynced tick numbers from TX, breaking RC nonce match.
+            if (_link->role() == Role::Rx && _link->state() == LinkState::Connected &&
+                _link->slotForTick(_armedTick) != Slot::Sync) {
 #if defined(XLRS_PICO_SDK)
-                int32_t offsetUs = (int32_t)(pkt.timestampUs - airtime - TX_GUARD_US) - (int32_t)_armedTickStartUs;
+                int32_t offsetUs = (int32_t)packetStartUs - (int32_t)_armedTickStartUs;
 #else
                 int32_t offsetUs = (int32_t)(pkt.timestampUs - airtime) - (int32_t)_armedTickStartUs;
 #endif
@@ -250,6 +255,8 @@ void RfScheduler::onRxDone() {
                 if (_timer) {
                     _timer->setIntervalUs(_rate.intervalUs + adjUs);
                 }
+            } else if (_link->role() == Role::Rx && _timer) {
+                _timer->setIntervalUs(_rate.intervalUs);
             }
         }
     }

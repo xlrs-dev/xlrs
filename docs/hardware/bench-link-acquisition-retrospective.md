@@ -240,7 +240,7 @@ at 1 m separation.
 
 ## Follow-up work
 
-Tracked in GitHub issue (link acquisition / PFD / nonce follow-ups). Summary:
+Tracked in GitHub issue [#8](https://github.com/xlrs-dev/xlrs/issues/8). Summary:
 
 1. **Re-enable PFD during Connected** — validate it converges without pulling timer
    back to ~953 µs; consider clamping max adjustment.

@@ -2,8 +2,9 @@
 
 | Path | Responsibility |
 | --- | --- |
-| `apps/tx/main.cpp` | TX role app, controller UART, telemetry/status output |
+| `apps/tx/main.cpp` | TX role app, controller UART, telemetry/status output, status LED |
 | `apps/rx/main.cpp` | RX role app, CRSF output, status LED |
+| `lib/xlrs/app/LinkStatusLed.h` | Shared GPIO status LED patterns for TX/RX link state |
 | `lib/xlrs/link/Link.*` | Link lifecycle, bind/connect/failsafe, link stats |
 | `lib/xlrs/link/RfScheduler.*` | Per-tick slot coordination, FHSS advance, PHY calls |
 | `lib/xlrs/link/RateConfig.h` | Rate table and airtime values |

@@ -99,6 +99,7 @@ public:
     bool takeReceivedBindUid(uint8_t uid[LINK_UID_SIZE]);
     // RX: one-shot TX tick from the latest acquisition Sync (scheduler resync).
     bool takeSyncResyncTick(uint32_t& txTick);
+    void snapSchedulerTick(uint32_t tick);
 
     void onTick(uint32_t tick);
     float freqForTick(uint32_t tick) const;
@@ -117,6 +118,7 @@ public:
     LinkState        state() const { return _state; }
     const LinkStats& stats() const { return _stats; }
     bool             isLocked() const { return _locked; }
+    bool             syncSeen() const { return _syncSeen; }
     uint16_t         rxPos() const { return _rxPos; }
     uint16_t         txPos(uint32_t tick) const { return (uint16_t)((tick / hopInterval()) % _fhss.count()); }
     uint8_t          tlmRatioDenom() const { return _rate.tlmRatioDenom; }

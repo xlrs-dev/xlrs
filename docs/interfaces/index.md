@@ -38,7 +38,7 @@ Default SX1280 interface:
 | RXEN | GP14 |
 | TXEN | GP15 |
 
-RX status LED defaults to GP13.
+RX status LED defaults to GP10.
 
 All defaults are CMake cache variables and can be overridden when configuring
 the build. The TX controller protocol is selected with

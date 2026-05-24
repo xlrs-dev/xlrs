@@ -392,19 +392,23 @@ Symptoms of timing sign problems:
 
 ---
 
-## 7. RX Status LED
+## 7. Status LED (TX and RX)
 
-Current RX LED behavior:
+Both TX and RX drive the same GPIO status LED patterns on `XLRS_STATUS_LED_PIN`
+(default GP10 / Pico pin 13, active-low by default). Patterns are implemented in
+[`lib/xlrs/app/LinkStatusLed.h`](../../lib/xlrs/app/LinkStatusLed.h).
 
 | Condition | LED |
 | --- | --- |
 | Config fault or hardware fault | Solid on |
-| Bind scan open | Double flash, pause |
-| Valid bind frame received | Very fast blink until flash persistence/reboot |
-| Bind UID persisted | Five short flashes, then reboot |
-| Generic binding state | Fast blink |
-| Connected and output active | Solid on |
+| Bind scan open (RX) | Double flash, pause |
+| Valid bind frame received (RX) | Very fast blink until flash persistence/reboot |
+| Bind UID persisted (RX) | Five short flashes, then reboot |
+| Binding / bind transmit (TX) | Fast blink |
+| Connected (TX always; RX when CRSF output active) | Solid on |
+| Connected but CRSF output gated (RX) | Medium blink |
 | Connecting | Medium blink |
+| Failsafe | Double blink, pause |
 | Other/disconnected | Slow blink |
 
 During CRSF Bind RX, periodic RX status lines also append `[BIND SCAN]` while

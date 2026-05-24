@@ -30,3 +30,27 @@ build/config -> boot identity -> radio init -> sync/acquisition
 
 See [../troubleshooting/index.md](../troubleshooting/index.md) for the symptom
 matrix and detailed flow.
+
+## Status LED (GP10 / Pico pin 13)
+
+Both TX and RX drive a single-color GPIO status LED through
+[`lib/xlrs/app/LinkStatusLed.h`](../lib/xlrs/app/LinkStatusLed.h).
+
+| Item | Value |
+| --- | --- |
+| GPIO | GP10 (Pico physical pin 13) |
+| Polarity | Active-low by default (`XLRS_STATUS_LED_ACTIVE_LOW=ON`) |
+| Boot pattern | Five slow blinks at power-up |
+
+**Bench note (May 2026):** The pre-migration PlatformIO RX firmware drove a
+WS2812 NeoPixel on **GP13** (Pico physical pin **17**), not this LED. If the LED
+never toggles after a fresh flash, verify the build picked up GP10 — stale CMake
+cache may still have `XLRS_STATUS_LED_PIN=13`. Reconfigure with:
+
+```bash
+cmake -S . -B build -G Ninja -DXLRS_STATUS_LED_PIN=10 -DXLRS_STATUS_LED_ACTIVE_LOW=ON
+cmake --build build --target xlrs_tx xlrs_rx
+```
+
+If GP10 is confirmed in the serial boot line but the LED stays dark, try
+`-DXLRS_STATUS_LED_ACTIVE_LOW=OFF` for active-high wiring.

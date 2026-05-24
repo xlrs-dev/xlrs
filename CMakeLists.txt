@@ -16,7 +16,8 @@ set(XLRS_UART_TX_PIN 8 CACHE STRING "TX firmware UART TX pin toward controller")
 set(XLRS_UART_RX_PIN 9 CACHE STRING "TX firmware UART RX pin from controller")
 set(XLRS_CRSF_TX_PIN 8 CACHE STRING "RX firmware CRSF TX pin toward flight controller")
 set(XLRS_CRSF_RX_PIN 9 CACHE STRING "RX firmware CRSF RX pin from flight controller")
-set(XLRS_STATUS_LED_PIN 13 CACHE STRING "RX firmware status LED pin")
+set(XLRS_STATUS_LED_PIN 10 CACHE STRING "TX/RX firmware status LED pin (active high)")
+set(XLRS_STATUS_LED_ACTIVE_LOW ON CACHE BOOL "Status LED is active low (GPIO low = ON)")
 set(XLRS_SX128X_SPI_SCK 18 CACHE STRING "SX1280 SPI SCK pin")
 set(XLRS_SX128X_SPI_MOSI 19 CACHE STRING "SX1280 SPI MOSI pin")
 set(XLRS_SX128X_SPI_MISO 16 CACHE STRING "SX1280 SPI MISO pin")
@@ -72,6 +73,12 @@ target_compile_definitions(xlrs_core PUBLIC
     SX128X_SPI_BAUD=${XLRS_SX128X_SPI_BAUD}
     SX128X_REGULATOR_MODE=${XLRS_SX128X_REGULATOR_MODE}
 )
+
+if(XLRS_STATUS_LED_ACTIVE_LOW)
+    target_compile_definitions(xlrs_core PUBLIC XLRS_STATUS_LED_ACTIVE_LOW=1)
+else()
+    target_compile_definitions(xlrs_core PUBLIC XLRS_STATUS_LED_ACTIVE_LOW=0)
+endif()
 
 if(XLRS_TX_CONTROLLER_PROTOCOL STREQUAL "CRSF")
     target_compile_definitions(xlrs_core PUBLIC XLRS_TX_CONTROLLER_CRSF=1)

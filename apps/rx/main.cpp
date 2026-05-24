@@ -13,6 +13,7 @@
 #include "app/AppTelemetry.h"
 #include "app/CrsfChannels.h"
 #include "app/CrsfLinkStats.h"
+#include "app/LinkStatusLed.h"
 #include "crsfSerial.h"
 #include "fhss/Fhss.h"
 #include "hal/FlashStore.h"
@@ -35,7 +36,7 @@
 #endif
 
 #ifndef STATUS_LED_PIN
-#define STATUS_LED_PIN 13
+#define STATUS_LED_PIN 10
 #endif
 
 // RC plumbing constants (no bare magic numbers in the control path).
@@ -54,6 +55,9 @@ struct RfToAppData {
     bool hardwareError;
     bool bindScanOpen;
     bool bindPacketReceived;
+    bool fhssLocked;
+    bool syncSeen;
+    uint32_t schedulerTick;
     uint32_t rfToAppQueueDrops;
 };
 
@@ -80,8 +84,6 @@ xlrs::RfConfigData g_rfConfig;
 xlrs::hal::SerialPort g_crsfUart(uart1, CRSF_TX_PIN, CRSF_RX_PIN);
 CrsfSerial crsf(g_crsfUart, CRSF_BAUDRATE);
 
-static uint32_t lastLedUpdate = 0;
-static constexpr uint32_t LED_UPDATE_INTERVAL_MS = 50;
 static uint32_t lastLinkStats = 0;
 static constexpr uint32_t LINK_STATS_INTERVAL_MS = 500;
 static uint16_t localChannels[RC_CHANNELS] = {
@@ -97,12 +99,7 @@ static uint32_t g_lastFcCrsfFrameMs = 0;
 static uint32_t g_lastCrsfRcOutMs = 0;
 
 static void blinkStatusLedBlocking(uint8_t pulses, uint32_t onMs, uint32_t offMs) {
-    for (uint8_t i = 0; i < pulses; ++i) {
-        gpio_put(STATUS_LED_PIN, true);
-        xlrs::hal::sleepMs(onMs);
-        gpio_put(STATUS_LED_PIN, false);
-        xlrs::hal::sleepMs(offMs);
-    }
+    xlrs::app::linkStatusLedBlinkBlocking(STATUS_LED_PIN, pulses, onMs, offMs);
 }
 
 static void onCrsfFrameFromFlightController(const uint8_t *frame, uint8_t frameLen) {
@@ -153,30 +150,14 @@ static void applyRxAppTelemetry(const xlrs::AppTelemetryMessage& message) {
 
 static void updateLED(xlrs::LinkState state, bool outputActive, bool hardwareError,
                       bool bindScanOpen, bool bindPacketReceived) {
-    if (xlrs::hal::nowMs() - lastLedUpdate < LED_UPDATE_INTERVAL_MS) return;
-    lastLedUpdate = xlrs::hal::nowMs();
-
-    static uint32_t msCounter = 0;
-    msCounter += LED_UPDATE_INTERVAL_MS;
-
-    bool on = false;
-    if (g_configFault || hardwareError) {
-        on = true;
-    } else if (bindPacketReceived) {
-        on = (msCounter % 100) < 75;
-    } else if (bindScanOpen) {
-        const uint32_t phase = msCounter % 600;
-        on = phase < 70 || (phase >= 140 && phase < 210);
-    } else if (state == xlrs::LinkState::Binding) {
-        on = (msCounter % 100) < 50;
-    } else if (state == xlrs::LinkState::Connected && outputActive) {
-        on = true;
-    } else if (state == xlrs::LinkState::Connecting) {
-        on = (msCounter % 500) < 250;
-    } else {
-        on = (msCounter % 1000) < 500;
-    }
-    gpio_put(STATUS_LED_PIN, on);
+    xlrs::app::LinkStatusLedFlags flags{};
+    flags.hardwareError = hardwareError;
+    flags.configFault = g_configFault;
+    flags.bindScanOpen = bindScanOpen;
+    flags.bindPacketReceived = bindPacketReceived;
+    flags.outputActive = outputActive;
+    flags.requireOutputForConnected = true;
+    xlrs::app::linkStatusLedUpdate(STATUS_LED_PIN, state, flags);
 }
 
 // Print boot identity diagnostics ON CORE 0 (stdio is core-0 only — see rf_core_main). Lets the
@@ -247,11 +228,8 @@ static void setup_app_core() {
     crsf.begin(CRSF_BAUDRATE);
     crsf.onPacketRaw = onCrsfFrameFromFlightController;
 
-    gpio_init(STATUS_LED_PIN);
-    gpio_set_dir(STATUS_LED_PIN, GPIO_OUT);
-    gpio_put(STATUS_LED_PIN, false);
-
-    printf("CRSF UART and status LED initialized.\n");
+    printf("CRSF UART and status LED on GP%d (active-%s).\n", (int)STATUS_LED_PIN,
+           XLRS_STATUS_LED_ACTIVE_LOW ? "low" : "high");
 }
 
 static void app_core_loop() {
@@ -304,7 +282,7 @@ static void app_core_loop() {
         g_crsfLinkStatsOut++;
         const uint32_t fcAge = g_lastFcCrsfFrameMs == 0 ? 0 : now - g_lastFcCrsfFrameMs;
         const uint32_t rcOutAge = g_lastCrsfRcOutMs == 0 ? 0 : now - g_lastCrsfRcOutMs;
-        printf("[RX STATUS] State: %d LQ: %u%% RSSI: %d dBm | PHY timeouts: %lu CRC: %lu Phase: %s/%s LastOp: 0x%02X LastOk: 0x%02X LastFailOp: 0x%02X | out:%u crsf_rc:%lu age:%lums stats:%lu fc:%lu fcq:%lu fcdrop:%lu fcage:%lums qdrop:%lu%s\n",
+        printf("[RX STATUS] State: %d LQ: %u%% RSSI: %d dBm | PHY timeouts: %lu CRC: %lu Phase: %s/%s LastOp: 0x%02X LastOk: 0x%02X LastFailOp: 0x%02X | lock:%u sync:%u tick:%lu fhss:%u | out:%u crsf_rc:%lu age:%lums stats:%lu fc:%lu fcq:%lu fcdrop:%lu fcage:%lums qdrop:%lu%s\n",
                (int)state, (unsigned)rfData.stats.lqUp, (int)rfData.stats.rssiDbm,
                (unsigned long)g_phy.spiTimeouts(), (unsigned long)g_phy.crcErrors(),
                xlrs::Sx1280NativePhy::diagPhaseName(g_phy.lastDiagPhase()),
@@ -312,6 +290,10 @@ static void app_core_loop() {
                (unsigned)g_phy.lastStartedOpcode(),
                (unsigned)g_phy.lastCompletedOpcode(),
                (unsigned)g_phy.lastFailOpcode(),
+               rfData.fhssLocked ? 1u : 0u,
+               rfData.syncSeen ? 1u : 0u,
+               (unsigned long)rfData.schedulerTick,
+               (unsigned)rfData.stats.fhssIndex,
                outputActive ? 1u : 0u,
                (unsigned long)g_crsfRcFramesOut,
                (unsigned long)rcOutAge,
@@ -453,6 +435,9 @@ static void rf_core_main() {
             rfData.hardwareError = !g_phy.healthy();
             rfData.bindScanOpen = bindScanning;
             rfData.bindPacketReceived = bindPacketReceived;
+            rfData.fhssLocked = g_link.isLocked();
+            rfData.syncSeen = g_link.syncSeen();
+            rfData.schedulerTick = currentTick;
             rfData.rfToAppQueueDrops = g_rfTelemetryToApp.dropped();
             g_rfToApp.store(rfData);
 
@@ -467,6 +452,8 @@ static void rf_core_main() {
 int main() {
     stdio_init_all();
     flash_safe_execute_core_init();
+    xlrs::app::linkStatusLedInit(STATUS_LED_PIN);
+
     xlrs::hal::sleepMs(1000);
     setup_app_core();
     multicore_launch_core1(rf_core_main);

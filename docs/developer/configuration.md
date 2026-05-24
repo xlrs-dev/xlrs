@@ -37,7 +37,8 @@ Pins are configured as CMake cache variables and emitted as target compile defin
 
 #### 3. RX CRSF Interface Configuration
 * **`XLRS_CRSF_TX_PIN`** (default `8`) / **`XLRS_CRSF_RX_PIN`** (default `9`) — RX module CRSF UART to the flight controller.
-* **`XLRS_STATUS_LED_PIN`** (default `13`) — RX status LED GPIO.
+* **`XLRS_STATUS_LED_PIN`** (default `10`, Pico pin 13) — TX/RX status LED GPIO.
+* **`XLRS_STATUS_LED_ACTIVE_LOW`** (default `ON`) — set `OFF` if the LED is active high.
 
 ---
 

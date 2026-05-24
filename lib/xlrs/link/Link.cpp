@@ -152,6 +152,11 @@ bool Link::takeSyncResyncTick(uint32_t& txTick) {
     return true;
 }
 
+void Link::snapSchedulerTick(uint32_t tick) {
+    _tick = tick;
+    _stats.fhssIndex = (_role == Role::Tx) ? (uint8_t)txPos(tick) : (uint8_t)_rxPos;
+}
+
 void Link::requestRate(uint8_t rateIndex) {
     if (rateIndex >= kNumRates) return;
     if (rateIndex == _rateIndex) {

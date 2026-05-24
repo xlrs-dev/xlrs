@@ -12,6 +12,7 @@
 #include "UARTProtocol.h"
 #include "app/AppTelemetry.h"
 #include "app/CrsfLinkStats.h"
+#include "app/LinkStatusLed.h"
 #include "crsfSerial.h"
 #include "fhss/Fhss.h"
 #include "hal/FlashStore.h"
@@ -35,6 +36,10 @@
 #endif
 #ifndef UART_PROTOCOL_RX
 #define UART_PROTOCOL_RX 9
+#endif
+
+#ifndef STATUS_LED_PIN
+#define STATUS_LED_PIN 10
 #endif
 
 struct AppToRfData {
@@ -502,6 +507,13 @@ static void serviceWatchdog() {
     if (inGrace || rfAlive) watchdog_update();
 }
 
+static void updateLED(xlrs::LinkState state, bool hardwareError, bool bindTransmitActive) {
+    xlrs::app::LinkStatusLedFlags flags{};
+    flags.hardwareError = hardwareError;
+    flags.bindTransmitActive = bindTransmitActive;
+    xlrs::app::linkStatusLedUpdate(STATUS_LED_PIN, state, flags);
+}
+
 static void setup_app_core() {
     printf("=== XLRS Pico SDK Transmitter ===\n");
 
@@ -542,6 +554,9 @@ static void setup_app_core() {
     uartProto.setOnCommandPayload(onCommandPayloadReceived);
     printf("Controller UART initialized.\n");
 #endif
+
+    printf("Status LED on GP%d (active-%s).\n", (int)STATUS_LED_PIN,
+           XLRS_STATUS_LED_ACTIVE_LOW ? "low" : "high");
 }
 
 static void app_core_loop() {
@@ -564,8 +579,19 @@ static void app_core_loop() {
 #endif
     drainPhyDiagLogs();
 
-    RfToAppData rfData;
-    if (g_rfToApp.load(rfData)) {
+    static RfToAppData rfData{};
+    static bool haveRfData = false;
+    RfToAppData latest{};
+    if (g_rfToApp.load(latest)) {
+        rfData = latest;
+        haveRfData = true;
+    }
+
+    updateLED(haveRfData ? rfData.state : xlrs::LinkState::Disconnected,
+              haveRfData && rfData.hardwareError,
+              haveRfData && rfData.bindTransmitActive);
+
+    if (haveRfData) {
         uint32_t now = xlrs::hal::nowMs();
         static bool lastBindTransmitActive = false;
         if (rfData.bindTransmitActive != lastBindTransmitActive) {
@@ -753,6 +779,8 @@ static void rf_core_main() {
 int main() {
     stdio_init_all();
     flash_safe_execute_core_init();
+    xlrs::app::linkStatusLedInit(STATUS_LED_PIN);
+
     xlrs::hal::sleepMs(1000);
     setup_app_core();
     multicore_launch_core1(rf_core_main);

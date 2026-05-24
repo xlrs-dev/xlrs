@@ -67,7 +67,7 @@ Use the same phrase on both modules when relying on compile-time binding.
 
 ## RX Debug Indicators
 
-The RX status LED exposes binding progress during bench bring-up:
+The status LED on TX and RX exposes binding progress during bench bring-up:
 
 | Binding phase | RX LED |
 | --- | --- |

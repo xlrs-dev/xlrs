@@ -222,11 +222,18 @@ void RfScheduler::onRxDone() {
             uint32_t txTick = 0;
             if (_link->role() == Role::Rx && _link->takeSyncResyncTick(txTick)) {
                 _tick = txTick;
+                _link->snapSchedulerTick(txTick);
                 _pfd.begin(_rate.intervalUs);
                 if (_timer) {
                     _timer->setIntervalUs(_rate.intervalUs);
                 }
             }
+            // Hardware RX is async: the packet often arrives after service() already
+            // ran for _armedTick in an earlier poll iteration. Re-run service now
+            // so state/LQ updates see the decoded payload flags.
+#if defined(XLRS_PICO_SDK)
+            _link->service(_armedTick);
+#endif
             // Apply Phase-Frequency Detector (PFD) correction to timer interval (RX only).
             if (_link->role() == Role::Rx) {
                 uint32_t airtime = (pkt.len <= 8) ? _rate.airtime8Us : _rate.airtime16Us;

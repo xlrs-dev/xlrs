@@ -188,6 +188,19 @@ static void printIdentity(const uint8_t uid[8]) {
            (unsigned)xlrs::syncWordFromUid(uid));
 }
 
+static void drainPhyDiagLogs() {
+    xlrs::PhyDiagEvent event{};
+    while (g_phy.popDiagEvent(event)) {
+        printf("[PHY DIAG] t=%luus phase=%s status=%s op=0x%02X timeouts=%lu drops=%lu\n",
+               (unsigned long)event.timestampUs,
+               xlrs::Sx1280NativePhy::diagPhaseName(event.phase),
+               xlrs::Sx1280NativePhy::diagStatusName(event.status),
+               (unsigned)event.opcode,
+               (unsigned long)event.spiTimeouts,
+               (unsigned long)g_phy.diagDrops());
+    }
+}
+
 // Feed the hardware watchdog only while the RF core's heartbeat keeps advancing. A bounded boot
 // grace lets core 1 finish radio init before liveness is enforced; after that, a hung RF core
 // (including the init-failure spin in rf_core_main) stops the feed and the watchdog reboots.
@@ -248,6 +261,7 @@ static void app_core_loop() {
     if (!isNew) {
         g_rfToApp.load(rfData);
     }
+    drainPhyDiagLogs();
 
     xlrs::LinkState state = rfData.state;
     bool outputActive = rfData.outputActive;
@@ -288,9 +302,13 @@ static void app_core_loop() {
         g_crsfLinkStatsOut++;
         const uint32_t fcAge = g_lastFcCrsfFrameMs == 0 ? 0 : now - g_lastFcCrsfFrameMs;
         const uint32_t rcOutAge = g_lastCrsfRcOutMs == 0 ? 0 : now - g_lastCrsfRcOutMs;
-        printf("[RX STATUS] State: %d LQ: %u%% RSSI: %d dBm | PHY timeouts: %lu CRC: %lu LastFailOp: 0x%02X | out:%u crsf_rc:%lu age:%lums stats:%lu fc:%lu fcq:%lu fcdrop:%lu fcage:%lums qdrop:%lu%s\n",
+        printf("[RX STATUS] State: %d LQ: %u%% RSSI: %d dBm | PHY timeouts: %lu CRC: %lu Phase: %s/%s LastOp: 0x%02X LastOk: 0x%02X LastFailOp: 0x%02X | out:%u crsf_rc:%lu age:%lums stats:%lu fc:%lu fcq:%lu fcdrop:%lu fcage:%lums qdrop:%lu%s\n",
                (int)state, (unsigned)rfData.stats.lqUp, (int)rfData.stats.rssiDbm,
                (unsigned long)g_phy.spiTimeouts(), (unsigned long)g_phy.crcErrors(),
+               xlrs::Sx1280NativePhy::diagPhaseName(g_phy.lastDiagPhase()),
+               xlrs::Sx1280NativePhy::diagStatusName(g_phy.lastDiagStatus()),
+               (unsigned)g_phy.lastStartedOpcode(),
+               (unsigned)g_phy.lastCompletedOpcode(),
                (unsigned)g_phy.lastFailOpcode(),
                outputActive ? 1u : 0u,
                (unsigned long)g_crsfRcFramesOut,

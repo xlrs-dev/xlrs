@@ -475,6 +475,19 @@ static void printIdentity(const uint8_t uid[8]) {
            (unsigned)xlrs::syncWordFromUid(uid));
 }
 
+static void drainPhyDiagLogs() {
+    xlrs::PhyDiagEvent event{};
+    while (g_phy.popDiagEvent(event)) {
+        printf("[PHY DIAG] t=%luus phase=%s status=%s op=0x%02X timeouts=%lu drops=%lu\n",
+               (unsigned long)event.timestampUs,
+               xlrs::Sx1280NativePhy::diagPhaseName(event.phase),
+               xlrs::Sx1280NativePhy::diagStatusName(event.status),
+               (unsigned)event.opcode,
+               (unsigned long)event.spiTimeouts,
+               (unsigned long)g_phy.diagDrops());
+    }
+}
+
 // Feed the hardware watchdog only while the RF core's heartbeat keeps advancing. A bounded boot
 // grace lets core 1 finish radio init before liveness is enforced; after that, a hung RF core
 // (including the init-failure spin below) stops the feed and the watchdog reboots to retry.
@@ -549,6 +562,7 @@ static void app_core_loop() {
 #else
     uartProto.loop();
 #endif
+    drainPhyDiagLogs();
 
     RfToAppData rfData;
     if (g_rfToApp.load(rfData)) {
@@ -603,9 +617,13 @@ static void app_core_loop() {
 
             // Core-0 diagnostic: surface PHY fault counters so a wedged radio is visible on the
             // bench console, not just an opaque healthy()=false (docs/troubleshooting/index.md §3).
-            printf("[TX STATUS] State: %d LQdown: %u%% RSSI: %d dBm | PHY timeouts: %lu CRC: %lu LastFailOp: 0x%02X",
+            printf("[TX STATUS] State: %d LQdown: %u%% RSSI: %d dBm | PHY timeouts: %lu CRC: %lu Phase: %s/%s LastOp: 0x%02X LastOk: 0x%02X LastFailOp: 0x%02X",
                    (int)rfData.state, (unsigned)rfData.stats.lqDown, (int)rfData.stats.rssiDbm,
                    (unsigned long)g_phy.spiTimeouts(), (unsigned long)g_phy.crcErrors(),
+                   xlrs::Sx1280NativePhy::diagPhaseName(g_phy.lastDiagPhase()),
+                   xlrs::Sx1280NativePhy::diagStatusName(g_phy.lastDiagStatus()),
+                   (unsigned)g_phy.lastStartedOpcode(),
+                   (unsigned)g_phy.lastCompletedOpcode(),
                    (unsigned)g_phy.lastFailOpcode());
 #if XLRS_TX_CONTROLLER_CRSF
             const uint32_t rcAge = g_crsfDebug.lastRcMs == 0 ? 0 : now - g_crsfDebug.lastRcMs;

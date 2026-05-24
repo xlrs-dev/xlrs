@@ -1,10 +1,50 @@
 #pragma once
 #include "phy/IRadioPhy.h"
 #include "phy/Sx1280Regs.h"
+#include "util/RingBuffer.h"
 #include <atomic>
 #include <pico/types.h>
 
 namespace xlrs {
+
+enum class PhyDiagPhase : uint8_t {
+    None,
+    SpiGpio,
+    Reset,
+    Standby,
+    Regulator,
+    PacketType,
+    TxParams,
+    BufferBase,
+    ModParams,
+    SyncWord,
+    RxGain,
+    PllTune,
+    AutoFs,
+    DioIrq,
+    ClearIrq,
+    AttachIrq,
+    StartRx,
+    StartTx,
+    ReadRx,
+    SetPower,
+    Reconfigure,
+    Recover
+};
+
+enum class PhyDiagStatus : uint8_t {
+    Begin,
+    Complete,
+    Fail
+};
+
+struct PhyDiagEvent {
+    uint32_t timestampUs;
+    PhyDiagPhase phase;
+    PhyDiagStatus status;
+    uint8_t opcode;
+    uint32_t spiTimeouts;
+};
 
 class Sx1280NativePhy : public IRadioPhy {
 public:
@@ -38,6 +78,22 @@ public:
     uint32_t spiTimeouts()    const { return _spiTimeouts.load(std::memory_order_relaxed); }
     uint32_t crcErrors()      const { return _crcErrors.load(std::memory_order_relaxed); }
     uint8_t  lastFailOpcode() const { return _lastFailOpcode.load(std::memory_order_relaxed); }
+    PhyDiagPhase lastDiagPhase() const {
+        return (PhyDiagPhase)_lastDiagPhase.load(std::memory_order_relaxed);
+    }
+    PhyDiagStatus lastDiagStatus() const {
+        return (PhyDiagStatus)_lastDiagStatus.load(std::memory_order_relaxed);
+    }
+    uint8_t lastStartedOpcode() const {
+        return _lastStartedOpcode.load(std::memory_order_relaxed);
+    }
+    uint8_t lastCompletedOpcode() const {
+        return _lastCompletedOpcode.load(std::memory_order_relaxed);
+    }
+    size_t diagDrops() const { return _diagEvents.dropped(); }
+    bool popDiagEvent(PhyDiagEvent& out) { return _diagEvents.pop(out); }
+    static const char* diagPhaseName(PhyDiagPhase phase);
+    static const char* diagStatusName(PhyDiagStatus status);
 
 private:
     enum class Mode : uint8_t { Idle, Rx, Tx };
@@ -49,6 +105,9 @@ private:
     void resetRadio();
     bool waitBusy();
     void recordHardwareFault(uint8_t opcode);
+    void recordDiag(PhyDiagPhase phase, PhyDiagStatus status, uint8_t opcode = 0);
+    void beginDiag(PhyDiagPhase phase, uint8_t opcode = 0);
+    void completeDiag(PhyDiagPhase phase, uint8_t opcode = 0);
     void spiCommand(uint8_t opcode, const uint8_t* params, uint8_t len);
     bool readCommand(uint8_t opcode, uint8_t* out, uint8_t len); // GET-status read (opcode+dummy+len)
     void clearIrqStatus();
@@ -71,6 +130,12 @@ private:
     std::atomic<uint32_t> _spiTimeouts{0};    // BUSY-line timeouts seen
     std::atomic<uint32_t> _crcErrors{0};      // RX frames dropped on CRC mismatch
     std::atomic<uint8_t>  _lastFailOpcode{0}; // opcode of the last SPI op that timed out
+    std::atomic<uint8_t>  _lastDiagPhase{(uint8_t)PhyDiagPhase::None};
+    std::atomic<uint8_t>  _lastDiagStatus{(uint8_t)PhyDiagStatus::Complete};
+    std::atomic<uint8_t>  _lastStartedOpcode{0};
+    std::atomic<uint8_t>  _lastCompletedOpcode{0};
+    bool                  _diagTraceEnabled = false;
+    SpscRing<PhyDiagEvent, 64> _diagEvents{};
     PhyIsrCallback _onTxDone = nullptr;
     PhyIsrCallback _onRxDone = nullptr;
 };

@@ -533,7 +533,11 @@ void Link::service(uint32_t tick) {
             }
             break;
         case LinkState::Connected:
-            if (misses >= FAILSAFE_MISS) { _state = LinkState::Failsafe; _locked = false; }
+            if (misses >= FAILSAFE_MISS) {
+                _state = LinkState::Failsafe;
+                // Keep RX hop lock through failsafe so a returning RC frame can
+                // re-enter Connected without waiting for another Sync beacon.
+            }
             break;
         case LinkState::Failsafe:
             if (_role == Role::Rx) {

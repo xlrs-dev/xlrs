@@ -104,11 +104,37 @@ static void test_scheduler_phy_recovery_failure() {
     env.rxPhy.forceFault();
     TEST_ASSERT_FALSE(env.rxPhy.healthy());
 
-    for (int i = 0; i < 6 && !env.rxPhy.healthy(); ++i) env.rxSched.poll();
+    for (int i = 0; i < 6 && !env.rxPhy.healthy(); ++i) {
+        setSimulatedTimeUs(i * RfScheduler::PHY_RECOVERY_BACKOFF_US);
+        env.rxSched.poll();
+    }
 
     TEST_ASSERT_TRUE(env.rxPhy.healthy());
     TEST_ASSERT_EQUAL_UINT16(3, env.rx.stats().phyRecoveryFailures);
     TEST_ASSERT_EQUAL_UINT16(1, env.rx.stats().phyRecoveries);
+}
+
+static void test_scheduler_phy_recovery_backoff() {
+    uint8_t uid[LINK_UID_SIZE];
+    linkUidFromPhrase("Kikobot-02", uid);
+    SimEnvironment env;
+    env.setup(uid, 2);
+
+    env.rxPhy.setRecoveryFailures(2);
+    env.rxPhy.forceFault();
+    setSimulatedTimeUs(0);
+
+    env.rxSched.poll();
+    env.rxSched.poll();
+
+    TEST_ASSERT_FALSE(env.rxPhy.healthy());
+    TEST_ASSERT_EQUAL_UINT16(1, env.rx.stats().phyRecoveryFailures);
+
+    setSimulatedTimeUs(RfScheduler::PHY_RECOVERY_BACKOFF_US);
+    env.rxSched.poll();
+
+    TEST_ASSERT_FALSE(env.rxPhy.healthy());
+    TEST_ASSERT_EQUAL_UINT16(2, env.rx.stats().phyRecoveryFailures);
 }
 
 void setUp() {}
@@ -121,5 +147,6 @@ int main() {
     RUN_TEST(test_scheduler_poll_caps_backlog);
     RUN_TEST(test_scheduler_rx_overrun_demotes_to_acquisition);
     RUN_TEST(test_scheduler_phy_recovery_failure);
+    RUN_TEST(test_scheduler_phy_recovery_backoff);
     return UNITY_END();
 }

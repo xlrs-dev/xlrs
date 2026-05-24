@@ -40,6 +40,7 @@ public:
     // blocking SPI + a TX_GUARD sleep for a now-stale FHSS slot) and fast-forwards to the
     // latest tick instead. See poll().
     static const uint32_t MAX_TICK_CATCHUP = 16;
+    static const uint32_t PHY_RECOVERY_BACKOFF_US = 100000;
 
     RfScheduler();
     ~RfScheduler();
@@ -87,6 +88,7 @@ private:
     Slot         _currentSlot = Slot::Idle;
     uint32_t     _tick = 0;
     uint32_t     _tickStartUs = 0;
+    uint32_t     _nextPhyRecoveryAttemptUs = 0;
     // The (tick, pos, tickStart) the radio was ARMED with this slot. onRxDone() processes a
     // drained packet against THIS — not the current scheduler tick — so a packet drained after
     // a tick advance (late packet / poll() fast-forward) is still decoded against its own slot.

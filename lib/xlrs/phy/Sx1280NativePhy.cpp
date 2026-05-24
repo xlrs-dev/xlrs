@@ -35,6 +35,9 @@
 #ifndef SX128X_TXEN
 #define SX128X_TXEN 15
 #endif
+#ifndef SX128X_SPI_BAUD
+#define SX128X_SPI_BAUD 8000000
+#endif
 
 namespace xlrs {
 
@@ -84,10 +87,14 @@ bool Sx1280NativePhy::waitBusy() {
     return true;
 }
 
+void Sx1280NativePhy::recordHardwareFault(uint8_t opcode) {
+    _hardwareError.store(true, std::memory_order_release);
+    _lastFailOpcode.store(opcode, std::memory_order_relaxed);
+}
+
 void Sx1280NativePhy::spiCommand(uint8_t opcode, const uint8_t* params, uint8_t len) {
     if (!waitBusy()) {
-        _hardwareError.store(true, std::memory_order_release);
-        _lastFailOpcode.store(opcode, std::memory_order_relaxed);
+        recordHardwareFault(opcode);
         return;
     }
     gpio_put(SX128X_SPI_CS, false);
@@ -99,8 +106,7 @@ void Sx1280NativePhy::spiCommand(uint8_t opcode, const uint8_t* params, uint8_t 
     gpio_put(SX128X_SPI_CS, true);
     hal::sleepUs(2);
     if (!waitBusy()) {
-        _hardwareError.store(true, std::memory_order_release);
-        _lastFailOpcode.store(opcode, std::memory_order_relaxed);
+        recordHardwareFault(opcode);
     }
 }
 
@@ -109,8 +115,7 @@ void Sx1280NativePhy::spiCommand(uint8_t opcode, const uint8_t* params, uint8_t 
 // clocked out of a wedged chip.
 bool Sx1280NativePhy::readCommand(uint8_t opcode, uint8_t* out, uint8_t len) {
     if (!waitBusy()) {
-        _hardwareError.store(true, std::memory_order_release);
-        _lastFailOpcode.store(opcode, std::memory_order_relaxed);
+        recordHardwareFault(opcode);
         return false;
     }
     gpio_put(SX128X_SPI_CS, false);
@@ -123,8 +128,7 @@ bool Sx1280NativePhy::readCommand(uint8_t opcode, uint8_t* out, uint8_t len) {
     gpio_put(SX128X_SPI_CS, true);
     hal::sleepUs(2);
     if (!waitBusy()) {
-        _hardwareError.store(true, std::memory_order_release);
-        _lastFailOpcode.store(opcode, std::memory_order_relaxed);
+        recordHardwareFault(opcode);
         return false;
     }
     return true;
@@ -172,7 +176,7 @@ void Sx1280NativePhy::buildPacketParams(uint8_t out[7], uint8_t payloadLen) cons
 
 void Sx1280NativePhy::writeRegister(uint16_t addr, const uint8_t* data, uint8_t len) {
     if (!waitBusy()) {
-        _hardwareError.store(true, std::memory_order_release);
+        recordHardwareFault(SX1280_OP_WRITE_REGISTER);
         return;
     }
     gpio_put(SX128X_SPI_CS, false);
@@ -186,13 +190,13 @@ void Sx1280NativePhy::writeRegister(uint16_t addr, const uint8_t* data, uint8_t 
     gpio_put(SX128X_SPI_CS, true);
     hal::sleepUs(2);
     if (!waitBusy()) {
-        _hardwareError.store(true, std::memory_order_release);
+        recordHardwareFault(SX1280_OP_WRITE_REGISTER);
     }
 }
 
 void Sx1280NativePhy::readRegister(uint16_t addr, uint8_t* data, uint8_t len) {
     if (!waitBusy()) {
-        _hardwareError.store(true, std::memory_order_release);
+        recordHardwareFault(SX1280_OP_READ_REGISTER);
         return;
     }
     gpio_put(SX128X_SPI_CS, false);
@@ -207,13 +211,13 @@ void Sx1280NativePhy::readRegister(uint16_t addr, uint8_t* data, uint8_t len) {
     gpio_put(SX128X_SPI_CS, true);
     hal::sleepUs(2);
     if (!waitBusy()) {
-        _hardwareError.store(true, std::memory_order_release);
+        recordHardwareFault(SX1280_OP_READ_REGISTER);
     }
 }
 
 void Sx1280NativePhy::writeBuffer(uint8_t offset, const uint8_t* data, uint8_t len) {
     if (!waitBusy()) {
-        _hardwareError.store(true, std::memory_order_release);
+        recordHardwareFault(SX1280_OP_WRITE_BUFFER);
         return;
     }
     gpio_put(SX128X_SPI_CS, false);
@@ -226,13 +230,13 @@ void Sx1280NativePhy::writeBuffer(uint8_t offset, const uint8_t* data, uint8_t l
     gpio_put(SX128X_SPI_CS, true);
     hal::sleepUs(2);
     if (!waitBusy()) {
-        _hardwareError.store(true, std::memory_order_release);
+        recordHardwareFault(SX1280_OP_WRITE_BUFFER);
     }
 }
 
 void Sx1280NativePhy::readBuffer(uint8_t offset, uint8_t* data, uint8_t len) {
     if (!waitBusy()) {
-        _hardwareError.store(true, std::memory_order_release);
+        recordHardwareFault(SX1280_OP_READ_BUFFER);
         return;
     }
     gpio_put(SX128X_SPI_CS, false);
@@ -246,7 +250,7 @@ void Sx1280NativePhy::readBuffer(uint8_t offset, uint8_t* data, uint8_t len) {
     gpio_put(SX128X_SPI_CS, true);
     hal::sleepUs(2);
     if (!waitBusy()) {
-        _hardwareError.store(true, std::memory_order_release);
+        recordHardwareFault(SX1280_OP_READ_BUFFER);
     }
 }
 
@@ -259,7 +263,7 @@ void Sx1280NativePhy::resetRadio() {
     hal::sleepMs(10);
     gpio_set_dir(SX128X_SPI_RST, GPIO_IN);
     if (!waitBusy()) {
-        _hardwareError.store(true, std::memory_order_release);
+        recordHardwareFault(0);
     }
 }
 
@@ -295,7 +299,7 @@ bool Sx1280NativePhy::init(const PhyConfig& cfg) {
     s_self = this;
     _hardwareError.store(false, std::memory_order_release); // reset state
 
-    spi_init(kRadioSpi, 10000000);
+    spi_init(kRadioSpi, SX128X_SPI_BAUD);
     gpio_set_function(SX128X_SPI_SCK, GPIO_FUNC_SPI);
     gpio_set_function(SX128X_SPI_MOSI, GPIO_FUNC_SPI);
     gpio_set_function(SX128X_SPI_MISO, GPIO_FUNC_SPI);

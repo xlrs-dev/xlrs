@@ -33,6 +33,7 @@ bool RfScheduler::begin(IRadioPhy* phy, Link* link, uint8_t rateIndex) {
     _currentSlot = Slot::Idle;
     _tick = 0;
     _tickStartUs = 0;
+    _nextPhyRecoveryAttemptUs = 0;
     _armedTick = 0;
     _armedPos = 0;
     _armedTickStartUs = 0;
@@ -240,6 +241,11 @@ Slot RfScheduler::currentSlot() const {
 
 bool RfScheduler::recoverPhyIfNeeded() {
     if (!_phy || _phy->healthy()) return true;
+    uint32_t nowUs = _timer ? _timer->nowUs() : 0;
+    if (_nextPhyRecoveryAttemptUs != 0 &&
+        (int32_t)(nowUs - _nextPhyRecoveryAttemptUs) < 0) {
+        return false;
+    }
     const bool ok = _phy->recover();
     if (ok) {
         syncPhyIdentity(true);
@@ -247,6 +253,7 @@ bool RfScheduler::recoverPhyIfNeeded() {
     if (_link) {
         _link->notePhyRecovery(ok);
     }
+    _nextPhyRecoveryAttemptUs = ok ? 0 : nowUs + PHY_RECOVERY_BACKOFF_US;
     return ok;
 }
 

@@ -603,9 +603,10 @@ static void app_core_loop() {
 
             // Core-0 diagnostic: surface PHY fault counters so a wedged radio is visible on the
             // bench console, not just an opaque healthy()=false (docs/troubleshooting/index.md §3).
-            printf("[TX STATUS] State: %d LQdown: %u%% RSSI: %d dBm | PHY timeouts: %lu CRC: %lu",
+            printf("[TX STATUS] State: %d LQdown: %u%% RSSI: %d dBm | PHY timeouts: %lu CRC: %lu LastFailOp: 0x%02X",
                    (int)rfData.state, (unsigned)rfData.stats.lqDown, (int)rfData.stats.rssiDbm,
-                   (unsigned long)g_phy.spiTimeouts(), (unsigned long)g_phy.crcErrors());
+                   (unsigned long)g_phy.spiTimeouts(), (unsigned long)g_phy.crcErrors(),
+                   (unsigned)g_phy.lastFailOpcode());
 #if XLRS_TX_CONTROLLER_CRSF
             const uint32_t rcAge = g_crsfDebug.lastRcMs == 0 ? 0 : now - g_crsfDebug.lastRcMs;
             printf(" | CRSF rc:%lu age:%lums ping:%lu pr:%lu pw:%lu fc:%lu bad:%lu qdrop:%lu dldrop:%lu",

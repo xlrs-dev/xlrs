@@ -48,6 +48,7 @@ private:
 
     void resetRadio();
     bool waitBusy();
+    void recordHardwareFault(uint8_t opcode);
     void spiCommand(uint8_t opcode, const uint8_t* params, uint8_t len);
     bool readCommand(uint8_t opcode, uint8_t* out, uint8_t len); // GET-status read (opcode+dummy+len)
     void clearIrqStatus();

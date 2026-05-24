@@ -66,6 +66,10 @@ public:
     uint32_t tickEvents() const { return _tickEvents.load(std::memory_order_relaxed); }
     uint32_t rxDoneEvents() const { return _rxDoneEvents.load(std::memory_order_relaxed); }
     uint32_t txDoneEvents() const { return _txDoneEvents.load(std::memory_order_relaxed); }
+    int32_t  pfdPhaseErrorUs() const { return _pfd.phaseError(); }
+    uint32_t timerIntervalUs() const {
+        return _timer ? _timer->intervalUs() : _rate.intervalUs;
+    }
 
 private:
     bool recoverPhyIfNeeded();

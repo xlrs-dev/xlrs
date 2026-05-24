@@ -145,15 +145,20 @@ bool Link::takeReceivedBindUid(uint8_t uid[LINK_UID_SIZE]) {
     return true;
 }
 
-bool Link::takeSyncResyncTick(uint32_t& txTick) {
+bool Link::takeSyncResyncTick(uint32_t& txTick, bool& resetPfd) {
     if (!_syncResyncPending) return false;
     txTick = _pendingTxTickResync;
+    resetPfd = _syncResyncResetPfd;
     _syncResyncPending = false;
+    _syncResyncResetPfd = false;
     return true;
 }
 
 void Link::snapSchedulerTick(uint32_t tick) {
     _tick = tick;
+    if (_role == Role::Rx && _locked) {
+        _rxPos = txPos(tick);
+    }
     _stats.fhssIndex = (_role == Role::Tx) ? (uint8_t)txPos(tick) : (uint8_t)_rxPos;
 }
 
@@ -193,12 +198,12 @@ void Link::onTick(uint32_t tick) {
     const uint8_t seqLen = _fhss.count();
     const bool atHopBoundary = (tick % hop) == 0;
 
-    if (_role == Role::Rx && _locked && atHopBoundary) {
-        _rxPos = (uint16_t)((_rxPos + 1) % seqLen);
+    if (_role == Role::Rx && _locked) {
+        _rxPos = txPos(tick);
     }
 
     const bool atSequenceBoundary = atHopBoundary &&
-        ((_role == Role::Tx) ? (txPos(tick) == 0) : (_locked && _rxPos == 0));
+        ((_role == Role::Tx) ? (txPos(tick) == 0) : (_locked && txPos(tick) == 0));
 
     if (_role == Role::Tx) {
         const uint16_t seqPeriod = hop * seqLen;
@@ -229,16 +234,13 @@ float Link::freqForTick(uint32_t tick) const {
     if (_bindTransmitActive || _bindScanActive) return freqForPos(0);
     if (_role == Role::Tx) {
         return freqForPos(txPos(tick));
-    } else {
-        if (!_locked) return freqForPos(0);
-        return freqForPos(_rxPos);
     }
+    if (!_locked) return freqForPos(0);
+    return freqForPos(txPos(tick));
 }
 
 Slot Link::slotForTick(uint32_t tick) const {
-    const uint16_t hop = hopInterval();
-    const uint8_t seqLen = _fhss.count();
-    uint16_t pos = (_role == Role::Tx) ? (uint16_t)((tick / hop) % seqLen) : _rxPos;
+    const uint16_t pos = (_role == Role::Tx || _locked) ? txPos(tick) : _rxPos;
     if (pos == 0) return Slot::Sync;
     if (_rate.tlmRatioDenom && (tick % _rate.tlmRatioDenom) == 0) return Slot::Telemetry;
     return Slot::Uplink;
@@ -382,11 +384,14 @@ bool Link::processRxPayload(uint32_t tick, uint16_t pos, const uint8_t* data, ui
         _gotSyncThisTick = true;
         if (_role == Role::Rx) {
             const bool wasLocked = _locked;
-            if (!_locked) { _rxPos = s.fhssIndex; _locked = true; }
-            if (!wasLocked) {
-                _pendingTxTickResync = s.txTick;
-                _syncResyncPending = true;
+            if (!_locked) {
+                _locked = true;
+                _rxPos = s.fhssIndex;
             }
+            _syncFhssSkew = (int8_t)((int)s.fhssIndex - (int)txPos(s.txTick));
+            _pendingTxTickResync = s.txTick;
+            _syncResyncPending = true;
+            _syncResyncResetPfd = !wasLocked;
             _syncSeen = true;
             _lastRxTick = tick; _everRx = true;
             _stats.rssiDbm = rssi; _stats.snr = snr;

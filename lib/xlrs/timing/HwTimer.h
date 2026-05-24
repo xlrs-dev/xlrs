@@ -21,6 +21,7 @@ public:
     virtual ~HwTimer() = default;
     virtual bool     begin(uint32_t intervalUs, TimerTickCallback onTick) = 0;
     virtual void     setIntervalUs(uint32_t intervalUs) = 0;  // PFD nudges this each period
+    virtual uint32_t intervalUs() const = 0;
     virtual uint32_t nowUs() const = 0;
     virtual void     stop() = 0;
 };

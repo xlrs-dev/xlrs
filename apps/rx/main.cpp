@@ -14,6 +14,7 @@
 #include "app/CrsfChannels.h"
 #include "app/CrsfLinkStats.h"
 #include "app/LinkStatusLed.h"
+#include "app/LinkRuntimeDiag.h"
 #include "crsfSerial.h"
 #include "fhss/Fhss.h"
 #include "hal/FlashStore.h"
@@ -55,9 +56,7 @@ struct RfToAppData {
     bool hardwareError;
     bool bindScanOpen;
     bool bindPacketReceived;
-    bool fhssLocked;
-    bool syncSeen;
-    uint32_t schedulerTick;
+    xlrs::app::LinkRuntimeDiag linkDiag;
     uint32_t rfToAppQueueDrops;
 };
 
@@ -282,7 +281,7 @@ static void app_core_loop() {
         g_crsfLinkStatsOut++;
         const uint32_t fcAge = g_lastFcCrsfFrameMs == 0 ? 0 : now - g_lastFcCrsfFrameMs;
         const uint32_t rcOutAge = g_lastCrsfRcOutMs == 0 ? 0 : now - g_lastCrsfRcOutMs;
-        printf("[RX STATUS] State: %d LQ: %u%% RSSI: %d dBm | PHY timeouts: %lu CRC: %lu Phase: %s/%s LastOp: 0x%02X LastOk: 0x%02X LastFailOp: 0x%02X | lock:%u sync:%u tick:%lu fhss:%u | out:%u crsf_rc:%lu age:%lums stats:%lu fc:%lu fcq:%lu fcdrop:%lu fcage:%lums qdrop:%lu%s\n",
+        printf("[RX STATUS] State: %d LQ: %u%% RSSI: %d dBm | PHY timeouts: %lu CRC: %lu Phase: %s/%s LastOp: 0x%02X LastOk: 0x%02X LastFailOp: 0x%02X | lock:%u sync:%u tick:%lu fhss:%u exp:%u skew:%d pfd:%ldus tmr:%lu/%lu | out:%u crsf_rc:%lu age:%lums stats:%lu fc:%lu fcq:%lu fcdrop:%lu fcage:%lums qdrop:%lu%s\n",
                (int)state, (unsigned)rfData.stats.lqUp, (int)rfData.stats.rssiDbm,
                (unsigned long)g_phy.spiTimeouts(), (unsigned long)g_phy.crcErrors(),
                xlrs::Sx1280NativePhy::diagPhaseName(g_phy.lastDiagPhase()),
@@ -290,10 +289,15 @@ static void app_core_loop() {
                (unsigned)g_phy.lastStartedOpcode(),
                (unsigned)g_phy.lastCompletedOpcode(),
                (unsigned)g_phy.lastFailOpcode(),
-               rfData.fhssLocked ? 1u : 0u,
-               rfData.syncSeen ? 1u : 0u,
-               (unsigned long)rfData.schedulerTick,
-               (unsigned)rfData.stats.fhssIndex,
+               rfData.linkDiag.fhssLocked ? 1u : 0u,
+               rfData.linkDiag.syncSeen ? 1u : 0u,
+               (unsigned long)rfData.linkDiag.schedulerTick,
+               (unsigned)rfData.linkDiag.fhssIndex,
+               (unsigned)rfData.linkDiag.fhssExpected,
+               (int)rfData.linkDiag.syncFhssSkew,
+               (long)rfData.linkDiag.pfdPhaseUs,
+               (unsigned long)rfData.linkDiag.timerIntervalUs,
+               (unsigned long)rfData.linkDiag.nomIntervalUs,
                outputActive ? 1u : 0u,
                (unsigned long)g_crsfRcFramesOut,
                (unsigned long)rcOutAge,
@@ -435,9 +439,7 @@ static void rf_core_main() {
             rfData.hardwareError = !g_phy.healthy();
             rfData.bindScanOpen = bindScanning;
             rfData.bindPacketReceived = bindPacketReceived;
-            rfData.fhssLocked = g_link.isLocked();
-            rfData.syncSeen = g_link.syncSeen();
-            rfData.schedulerTick = currentTick;
+            xlrs::app::fillLinkRuntimeDiag(rfData.linkDiag, g_link, g_scheduler);
             rfData.rfToAppQueueDrops = g_rfTelemetryToApp.dropped();
             g_rfToApp.store(rfData);
 

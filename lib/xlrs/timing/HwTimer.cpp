@@ -35,6 +35,8 @@ public:
         _intervalUs = intervalUs;
     }
 
+    uint32_t intervalUs() const override { return _intervalUs; }
+
     uint32_t nowUs() const override {
         return (uint32_t)time_us_64();
     }
@@ -114,6 +116,7 @@ public:
     void setIntervalUs(uint32_t intervalUs) override {
         s_simIntervalUs = intervalUs;
     }
+    uint32_t intervalUs() const override { return s_simIntervalUs; }
     uint32_t nowUs() const override {
         return s_simNowUs;
     }

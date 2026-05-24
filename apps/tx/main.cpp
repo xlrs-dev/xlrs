@@ -13,6 +13,7 @@
 #include "app/AppTelemetry.h"
 #include "app/CrsfLinkStats.h"
 #include "app/LinkStatusLed.h"
+#include "app/LinkRuntimeDiag.h"
 #include "crsfSerial.h"
 #include "fhss/Fhss.h"
 #include "hal/FlashStore.h"
@@ -53,6 +54,8 @@ struct RfToAppData {
     bool bindTransmitActive;
     uint8_t bindSecondsRemaining;
     uint32_t downlinkQueueDrops;
+    xlrs::app::LinkRuntimeDiag linkDiag;
+    uint32_t ticksSinceLastDownlink;
 };
 
 xlrs::LatestValue<AppToRfData> g_appToRf;
@@ -643,14 +646,20 @@ static void app_core_loop() {
 
             // Core-0 diagnostic: surface PHY fault counters so a wedged radio is visible on the
             // bench console, not just an opaque healthy()=false (docs/troubleshooting/index.md §3).
-            printf("[TX STATUS] State: %d LQdown: %u%% RSSI: %d dBm | PHY timeouts: %lu CRC: %lu Phase: %s/%s LastOp: 0x%02X LastOk: 0x%02X LastFailOp: 0x%02X",
+            printf("[TX STATUS] State: %d LQdown: %u%% RSSI: %d dBm | PHY timeouts: %lu CRC: %lu Phase: %s/%s LastOp: 0x%02X LastOk: 0x%02X LastFailOp: 0x%02X | tick:%lu fhss:%u exp:%u tmr:%lu/%lu dlrx:%lu",
                    (int)rfData.state, (unsigned)rfData.stats.lqDown, (int)rfData.stats.rssiDbm,
                    (unsigned long)g_phy.spiTimeouts(), (unsigned long)g_phy.crcErrors(),
                    xlrs::Sx1280NativePhy::diagPhaseName(g_phy.lastDiagPhase()),
                    xlrs::Sx1280NativePhy::diagStatusName(g_phy.lastDiagStatus()),
                    (unsigned)g_phy.lastStartedOpcode(),
                    (unsigned)g_phy.lastCompletedOpcode(),
-                   (unsigned)g_phy.lastFailOpcode());
+                   (unsigned)g_phy.lastFailOpcode(),
+                   (unsigned long)rfData.linkDiag.schedulerTick,
+                   (unsigned)rfData.linkDiag.fhssIndex,
+                   (unsigned)rfData.linkDiag.fhssExpected,
+                   (unsigned long)rfData.linkDiag.timerIntervalUs,
+                   (unsigned long)rfData.linkDiag.nomIntervalUs,
+                   (unsigned long)rfData.ticksSinceLastDownlink);
 #if XLRS_TX_CONTROLLER_CRSF
             const uint32_t rcAge = g_crsfDebug.lastRcMs == 0 ? 0 : now - g_crsfDebug.lastRcMs;
             printf(" | CRSF rc:%lu age:%lums ping:%lu pr:%lu pw:%lu fc:%lu bad:%lu qdrop:%lu dldrop:%lu",
@@ -758,6 +767,12 @@ static void rf_core_main() {
             rfData.hardwareError = !g_phy.healthy();
             rfData.bindTransmitActive = g_link.bindTransmitActive();
             rfData.downlinkQueueDrops = g_rfTelemetryToApp.dropped();
+            xlrs::app::fillLinkRuntimeDiag(rfData.linkDiag, g_link, g_scheduler);
+            if (g_link.lastRxTick() == 0 || currentTick <= g_link.lastRxTick()) {
+                rfData.ticksSinceLastDownlink = 0;
+            } else {
+                rfData.ticksSinceLastDownlink = currentTick - g_link.lastRxTick();
+            }
             if (rfData.bindTransmitActive && bindTransmitUntilMs != 0) {
                 const int32_t remainingMs = (int32_t)(bindTransmitUntilMs - xlrs::hal::nowMs());
                 rfData.bindSecondsRemaining = remainingMs > 0

@@ -24,9 +24,9 @@ Expected boot markers:
 Periodic status lines:
 
 ```text
-[TX STATUS] State: <n> LQdown: <n>% RSSI: <n> dBm | PHY timeouts: <n> CRC: <n> Phase: <phase>/<status> LastOp: 0xNN LastOk: 0xNN LastFailOp: 0xNN
+[TX STATUS] State: <n> LQdown: <n>% RSSI: <n> dBm | PHY timeouts: <n> CRC: <n> Phase: <phase>/<status> LastOp: 0xNN LastOk: 0xNN LastFailOp: 0xNN | tick:<n> fhss:<n> exp:<n> tmr:<actual>/<nom> dlrx:<n>
 [TX STATUS] ... | CRSF rc:<n> age:<ms> ping:<n> pr:<n> pw:<n> fc:<n> bad:<n> qdrop:<n> dldrop:<n>
-[RX STATUS] State: <n> LQ: <n>% RSSI: <n> dBm | PHY timeouts: <n> CRC: <n> Phase: <phase>/<status> LastOp: 0xNN LastOk: 0xNN LastFailOp: 0xNN | out:<0|1> crsf_rc:<n> age:<ms> stats:<n> fc:<n> fcq:<n> fcdrop:<n> fcage:<ms> qdrop:<n>
+[RX STATUS] State: <n> LQ: <n>% RSSI: <n> dBm | PHY timeouts: <n> CRC: <n> Phase: <phase>/<status> LastOp: 0xNN LastOk: 0xNN LastFailOp: 0xNN | lock:<0|1> sync:<0|1> tick:<n> fhss:<n> exp:<n> skew:<n> pfd:<us>us tmr:<actual>/<nom> | out:<0|1> crsf_rc:<n> age:<ms> stats:<n> fc:<n> fcq:<n> fcdrop:<n> fcage:<ms> qdrop:<n>
 ```
 
 The CRSF section in the TX status line appears only when TX is built with
@@ -65,5 +65,12 @@ Counter meanings:
 | TX `pr` / `pw` | CRSF parameter reads/writes received |
 | TX `fc` | Flight-controller CRSF telemetry frames forwarded back to the CRSF RC controller |
 | RX `out` | Whether RX is currently allowed to emit CRSF RC output |
+| `tick` | Scheduler tick counter (both roles) |
+| `fhss` / `exp` | Current FHSS sequence index and tick-derived expected index (should match when locked) |
+| RX `lock` / `sync` | FHSS locked to TX sequence; valid Sync beacon seen this session |
+| RX `skew` | Last Sync beacon `fhssIndex − txPos(txTick)` (should be 0) |
+| RX `pfd` | Last PFD phase error in µs (packet arrival vs expected tick) |
+| `tmr` | Actual hardware timer period vs nominal `RateConfig.intervalUs` |
+| TX `dlrx` | Scheduler ticks since last downlink telemetry decode |
 | RX `crsf_rc` / `stats` | CRSF RC and link-statistics frames emitted to the flight controller |
 | RX `fc` / `fcq` / `fcdrop` | Flight-controller telemetry frames received, queued, or dropped before downlink |

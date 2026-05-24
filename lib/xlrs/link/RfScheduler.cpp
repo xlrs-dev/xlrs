@@ -220,12 +220,15 @@ void RfScheduler::onRxDone() {
         bool success = _link->processRxPayload(_armedTick, _armedPos, pkt.data, pkt.len, pkt.rssiDbm, pkt.snr);
         if (success) {
             uint32_t txTick = 0;
-            if (_link->role() == Role::Rx && _link->takeSyncResyncTick(txTick)) {
+            bool resetPfd = false;
+            if (_link->role() == Role::Rx && _link->takeSyncResyncTick(txTick, resetPfd)) {
                 _tick = txTick;
                 _link->snapSchedulerTick(txTick);
-                _pfd.begin(_rate.intervalUs);
-                if (_timer) {
-                    _timer->setIntervalUs(_rate.intervalUs);
+                if (resetPfd) {
+                    _pfd.begin(_rate.intervalUs);
+                    if (_timer) {
+                        _timer->setIntervalUs(_rate.intervalUs);
+                    }
                 }
             }
             // Hardware RX is async: the packet often arrives after service() already

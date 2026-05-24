@@ -54,3 +54,23 @@ cmake --build build --target xlrs_tx xlrs_rx
 
 If GP10 is confirmed in the serial boot line but the LED stays dark, try
 `-DXLRS_STATUS_LED_ACTIVE_LOW=OFF` for active-high wiring.
+
+## Link diagnostics (USB status lines)
+
+Both TX and RX append tick/FHSS/timer fields to the periodic `[TX STATUS]` /
+`[RX STATUS]` lines. Shared fill logic lives in
+[`lib/xlrs/app/LinkRuntimeDiag.h`](../lib/xlrs/app/LinkRuntimeDiag.h).
+
+When debugging FHSS alignment on the bench:
+
+1. Confirm both boards show the same `fhss` value at the same time once RX
+   reports `lock:1 sync:1`.
+2. On RX, `fhss` and `exp` should always match when locked; wild `fhss` with
+   `lock:1` was the pre-fix symptom of a tick-derived hop index diverging from TX.
+3. Watch `pfd` on RX — it should stay small (tens of µs) once the PI loop has
+   converged; large sustained error means phase lock is failing.
+4. Compare TX `tick`/`fhss` with RX — they track once acquisition succeeds.
+
+Clock sync summary: TX is the master timer; RX snaps its tick from every Sync
+beacon's `txTick` and uses the PFD to nudge its timer period between beacons.
+See [../troubleshooting/index.md](../troubleshooting/index.md) §6 (PFD/timing).

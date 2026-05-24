@@ -98,7 +98,7 @@ public:
     bool bindScanActive() const { return _bindScanActive; }
     bool takeReceivedBindUid(uint8_t uid[LINK_UID_SIZE]);
     // RX: one-shot TX tick from the latest acquisition Sync (scheduler resync).
-    bool takeSyncResyncTick(uint32_t& txTick);
+    bool takeSyncResyncTick(uint32_t& txTick, bool& resetPfd);
     void snapSchedulerTick(uint32_t tick);
 
     void onTick(uint32_t tick);
@@ -119,6 +119,8 @@ public:
     const LinkStats& stats() const { return _stats; }
     bool             isLocked() const { return _locked; }
     bool             syncSeen() const { return _syncSeen; }
+    int8_t           syncFhssSkew() const { return _syncFhssSkew; }
+    uint32_t         lastRxTick() const { return _lastRxTick; }
     uint16_t         rxPos() const { return _rxPos; }
     uint16_t         txPos(uint32_t tick) const { return (uint16_t)((tick / hopInterval()) % _fhss.count()); }
     uint8_t          tlmRatioDenom() const { return _rate.tlmRatioDenom; }
@@ -156,7 +158,9 @@ private:
     uint8_t      _uidCrc   = 0;
     bool         _locked   = false;     // RX: hop-locked to the TX sequence?
     bool         _syncSeen = false;
-    uint16_t     _rxPos    = 0;         // RX: current sequence position (from Sync beacon)
+    int8_t       _syncFhssSkew = 0;
+    uint16_t     _rxPos    = 0;         // RX: hop index (tick-derived when locked)
+    bool         _syncResyncResetPfd = false;
     FailsafeMode _fsMode   = FailsafeMode::NoPulses;
     LinkState    _state    = LinkState::Disconnected;
     uint16_t     _ch[RC_CHANNELS] = {0};

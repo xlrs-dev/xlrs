@@ -82,9 +82,9 @@ do not, stop and fix binding/config before investigating RF behavior.
 Periodic status lines:
 
 ```text
-[TX STATUS] State: <n> LQdown: <n>% RSSI: <n> dBm | PHY timeouts: <n> CRC: <n> Phase: <phase>/<status> LastOp: 0xNN LastOk: 0xNN LastFailOp: 0xNN
+[TX STATUS] State: <n> LQdown: <n>% RSSI: <n> dBm | PHY timeouts: <n> CRC: <n> Phase: <phase>/<status> LastOp: 0xNN LastOk: 0xNN LastFailOp: 0xNN | tick:<n> fhss:<n> exp:<n> tmr:<actual>/<nom> dlrx:<n>
 [TX STATUS] ... | CRSF rc:<n> age:<ms> ping:<n> pr:<n> pw:<n> fc:<n> bad:<n> qdrop:<n> dldrop:<n>
-[RX STATUS] State: <n> LQ: <n>% RSSI: <n> dBm | PHY timeouts: <n> CRC: <n> Phase: <phase>/<status> LastOp: 0xNN LastOk: 0xNN LastFailOp: 0xNN | out:<0|1> crsf_rc:<n> age:<ms> stats:<n> fc:<n> fcq:<n> fcdrop:<n> fcage:<ms> qdrop:<n>
+[RX STATUS] State: <n> LQ: <n>% RSSI: <n> dBm | PHY timeouts: <n> CRC: <n> Phase: <phase>/<status> LastOp: 0xNN LastOk: 0xNN LastFailOp: 0xNN | lock:<0|1> sync:<0|1> tick:<n> fhss:<n> exp:<n> skew:<n> pfd:<us>us tmr:<actual>/<nom> | out:<0|1> crsf_rc:<n> age:<ms> stats:<n> fc:<n> fcq:<n> fcdrop:<n> fcage:<ms> qdrop:<n>
 ```
 
 PHY field meanings: [sx1280-phy-init.md](sx1280-phy-init.md).
@@ -379,10 +379,11 @@ If the system freezes or UART data drops:
 
 PFD/timing lock guidance:
 
-- TX is the time master.
-- RX runs the PFD/PI loop.
+- TX is the time master: core-1 `HwTimer` fires every `RateConfig.intervalUs` (F1000 = 1000 µs) and drives the scheduler tick counter. FHSS position is derived as `txPos(tick) = (tick / hopInterval) % seqLen` — same formula on both sides once locked.
+- RX acquisition: the first valid Sync beacon snaps the RX scheduler tick to the TX `txTick` carried in the beacon (one-shot phase alignment). Every subsequent Sync beacon re-snaps the tick number to correct slow drift; the PFD integral state is reset only on the first lock, not on every beacon.
+- RX continuous lock: after each decoded packet, the PFD/PI loop (`timing/Pfd.h`, Kp=1/4, Ki=1/256) nudges the RX hardware timer period so packet-start time (`RxPacket.timestampUs − airtime`) aligns with the expected scheduler tick. `pfd:` in RX status is the last phase error in µs; `tmr:` is actual vs nominal timer period.
+- FHSS when locked: RX hop index is tick-derived (same as TX), not a free-running counter — bench `fhss` and `exp` should match on both boards at the same wall time when clocks are aligned.
 - TX must not adjust its master clock based on downlink telemetry.
-- Packet-start timing is recovered as RX timestamp minus airtime.
 
 Symptoms of timing sign problems:
 

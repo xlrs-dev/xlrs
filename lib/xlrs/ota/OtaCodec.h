@@ -26,7 +26,7 @@ inline bool otaDecodeRc(const uint8_t* in, uint8_t len, uint16_t* ch, uint8_t n)
     return true;
 }
 
-// Sync beacon: [header][fhssIndex][rateIndex][nextRateIndex][switchCycles:4][tlmRatioDenom][uidCrc] = 10 bytes.
+// Sync beacon: [header][fhssIndex][rateIndex][nextRateIndex][switchCycles:4][tlmRatioDenom][uidCrc][txTick:4] = 14 bytes.
 inline uint8_t otaEncodeSync(const SyncPayload& s, uint8_t* out) {
     out[0] = otaMakeHeader(OtaType::Sync);
     out[1] = s.fhssIndex;
@@ -38,7 +38,11 @@ inline uint8_t otaEncodeSync(const SyncPayload& s, uint8_t* out) {
     out[7] = (uint8_t)(s.switchTick & 0xFF);
     out[8] = s.tlmRatioDenom;
     out[9] = s.uidCrc;
-    return 10;
+    out[10] = (uint8_t)((s.txTick >> 24) & 0xFF);
+    out[11] = (uint8_t)((s.txTick >> 16) & 0xFF);
+    out[12] = (uint8_t)((s.txTick >> 8) & 0xFF);
+    out[13] = (uint8_t)(s.txTick & 0xFF);
+    return 14;
 }
 
 inline bool otaDecodeSync(const uint8_t* in, uint8_t len, SyncPayload& s) {
@@ -54,6 +58,14 @@ inline bool otaDecodeSync(const uint8_t* in, uint8_t len, SyncPayload& s) {
                       in[7];
     s.tlmRatioDenom = in[8];
     s.uidCrc        = in[9];
+    if (len >= 14) {
+        s.txTick = ((uint32_t)in[10] << 24) |
+                   ((uint32_t)in[11] << 16) |
+                   ((uint32_t)in[12] << 8)  |
+                   in[13];
+    } else {
+        s.txTick = 0;
+    }
     return true;
 }
 

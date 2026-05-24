@@ -59,6 +59,8 @@ void Link::resetAcquisition(LinkState state) {
     _stats.lqUp = 0;
     _stats.lqDown = 0;
     _stats.fhssIndex = 0;
+    _syncResyncPending = false;
+    _pendingTxTickResync = 0;
 }
 
 void Link::begin(Role role, const uint8_t uid[8], uint8_t rateIndex, int8_t maxPowerDbm, bool useDynamicPower) {
@@ -99,6 +101,8 @@ void Link::setLinkUid(const uint8_t uid[LINK_UID_SIZE]) {
     _bindTransmitActive = false;
     _bindScanActive = false;
     _receivedBindUidReady = false;
+    _syncResyncPending = false;
+    _pendingTxTickResync = 0;
     resetAcquisition(LinkState::Connecting);
 }
 
@@ -138,6 +142,13 @@ bool Link::takeReceivedBindUid(uint8_t uid[LINK_UID_SIZE]) {
     if (!uid || !_receivedBindUidReady) return false;
     memcpy(uid, _receivedBindUid, LINK_UID_SIZE);
     _receivedBindUidReady = false;
+    return true;
+}
+
+bool Link::takeSyncResyncTick(uint32_t& txTick) {
+    if (!_syncResyncPending) return false;
+    txTick = _pendingTxTickResync;
+    _syncResyncPending = false;
     return true;
 }
 
@@ -256,6 +267,7 @@ bool Link::getTxPayload(uint32_t tick, uint16_t pos, uint8_t* outBuf, uint8_t& o
             }
             s.tlmRatioDenom = _rate.tlmRatioDenom;
             s.uidCrc        = _uidCrc;
+            s.txTick        = tick;
             outLen = otaEncodeSync(s, outBuf);
             ++_txCounter;
             return true;
@@ -364,7 +376,12 @@ bool Link::processRxPayload(uint32_t tick, uint16_t pos, const uint8_t* data, ui
         if (s.uidCrc != _uidCrc) return false;
         _gotSyncThisTick = true;
         if (_role == Role::Rx) {
+            const bool wasLocked = _locked;
             if (!_locked) { _rxPos = s.fhssIndex; _locked = true; }
+            if (!wasLocked) {
+                _pendingTxTickResync = s.txTick;
+                _syncResyncPending = true;
+            }
             _syncSeen = true;
             _lastRxTick = tick; _everRx = true;
             _stats.rssiDbm = rssi; _stats.snr = snr;

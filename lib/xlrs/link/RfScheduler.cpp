@@ -219,6 +219,14 @@ void RfScheduler::onRxDone() {
         // and PFD reference. More reachable now that poll() can fast-forward the tick.
         bool success = _link->processRxPayload(_armedTick, _armedPos, pkt.data, pkt.len, pkt.rssiDbm, pkt.snr);
         if (success) {
+            uint32_t txTick = 0;
+            if (_link->role() == Role::Rx && _link->takeSyncResyncTick(txTick)) {
+                _tick = txTick;
+                _pfd.begin(_rate.intervalUs);
+                if (_timer) {
+                    _timer->setIntervalUs(_rate.intervalUs);
+                }
+            }
             // Apply Phase-Frequency Detector (PFD) correction to timer interval (RX only).
             if (_link->role() == Role::Rx) {
                 uint32_t airtime = (pkt.len <= 8) ? _rate.airtime8Us : _rate.airtime16Us;

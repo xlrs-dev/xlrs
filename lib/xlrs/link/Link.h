@@ -97,6 +97,8 @@ public:
     bool bindTransmitActive() const { return _bindTransmitActive; }
     bool bindScanActive() const { return _bindScanActive; }
     bool takeReceivedBindUid(uint8_t uid[LINK_UID_SIZE]);
+    // RX: one-shot TX tick from the latest acquisition Sync (scheduler resync).
+    bool takeSyncResyncTick(uint32_t& txTick);
 
     void onTick(uint32_t tick);
     float freqForTick(uint32_t tick) const;
@@ -181,6 +183,8 @@ private:
     uint8_t          _bindTargetUid[LINK_UID_SIZE] = {};
     uint8_t          _receivedBindUid[LINK_UID_SIZE] = {};
     bool             _receivedBindUidReady = false;
+    bool             _syncResyncPending = false;
+    uint32_t         _pendingTxTickResync = 0;
 };
 
 } // namespace xlrs

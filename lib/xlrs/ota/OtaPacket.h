@@ -50,6 +50,7 @@ struct __attribute__((packed)) SyncPayload {
     uint32_t switchTick;   // sequence cycles until activation (0 if none)
     uint8_t  tlmRatioDenom;// telemetry slot ratio (1:N)
     uint8_t  uidCrc;       // CRC of the bind UID
+    uint32_t txTick;       // TX scheduler tick at beacon time (RX resyncs to this)
 };
 
 

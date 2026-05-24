@@ -72,5 +72,7 @@ When debugging FHSS alignment on the bench:
 4. Compare TX `tick`/`fhss` with RX — they track once acquisition succeeds.
 
 Clock sync summary: TX is the master timer; RX snaps its tick from every Sync
-beacon's `txTick` and uses the PFD to nudge its timer period between beacons.
-See [../troubleshooting/index.md](../troubleshooting/index.md) §6 (PFD/timing).
+beacon's `txTick` and uses the PFD to nudge its timer period between beacons **only
+after Connected**. See [../troubleshooting/index.md](../troubleshooting/index.md) §6
+(PFD/timing) and the full pass-by-pass log history in
+[bench-link-acquisition-retrospective.md](bench-link-acquisition-retrospective.md).

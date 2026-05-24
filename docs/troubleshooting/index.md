@@ -383,6 +383,7 @@ PFD/timing lock guidance:
 - RX acquisition: the first valid Sync beacon snaps the RX scheduler tick to the TX `txTick` carried in the beacon (one-shot phase alignment). Every subsequent Sync beacon re-snaps the tick number to correct slow drift; the PFD integral state is reset only on the first lock, not on every beacon.
 - RX continuous lock: after each decoded packet, the PFD/PI loop (`timing/Pfd.h`, Kp=1/4, Ki=1/256) nudges the RX hardware timer period so packet-start time (`RxPacket.timestampUs − airtime`) aligns with the expected scheduler tick. `pfd:` in RX status is the last phase error in µs; `tmr:` is actual vs nominal timer period.
 - FHSS when locked: RX hop index is tick-derived (same as TX), not a free-running counter — bench `fhss` and `exp` should match on both boards at the same wall time when clocks are aligned.
+- PFD during acquisition: hold nominal timer until **Connected**; do not nudge from Sync beacons (different airtime). See [../hardware/bench-link-acquisition-retrospective.md](../hardware/bench-link-acquisition-retrospective.md).
 - TX must not adjust its master clock based on downlink telemetry.
 
 Symptoms of timing sign problems:

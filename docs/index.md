@@ -14,6 +14,7 @@ extending the XLRS TX/RX firmware.
 - [Pinout](hardware/pinout.md)
 - [SX1280 Wiring](hardware/sx1280-wiring.md)
 - [Bench Bring-Up](hardware/bench-bringup.md)
+- [Bench Link Acquisition Retrospective (May 2026)](hardware/bench-link-acquisition-retrospective.md)
 
 ## Developer Guide
 

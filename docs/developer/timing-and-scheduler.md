@@ -16,7 +16,8 @@ move lifecycle policy into `RfScheduler`.
 Rules:
 
 - TX is the time master.
-- RX runs the PFD/PI loop.
+- RX runs the PFD/PI loop **after Connected**; during acquisition the RX timer stays
+  at nominal `RateConfig.intervalUs` and Sync beacons are excluded from PFD updates.
 - Timer ISR latches timestamp / increments an event counter only.
 - DIO ISR latches event/timestamp only.
 - RF task handles slot work, SPI, OTA codec, and PHY operations.

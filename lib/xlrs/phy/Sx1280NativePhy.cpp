@@ -263,7 +263,11 @@ void Sx1280NativePhy::applyLoraModulationTuning() {
     writeRegister(SX1280_REG_LORA_SF_CONFIG, &sfConfig, 1);
     if (_hardwareError.load(std::memory_order_acquire)) return;
 
-    uint8_t freqErrorComp = SX1280_FREQ_ERROR_COMP_ON;
+    uint8_t freqErrorComp = 0;
+    readRegister(SX1280_REG_FREQ_ERROR_COMP, &freqErrorComp, 1);
+    if (_hardwareError.load(std::memory_order_acquire)) return;
+
+    freqErrorComp |= SX1280_FREQ_ERROR_COMP_ON;
     writeRegister(SX1280_REG_FREQ_ERROR_COMP, &freqErrorComp, 1);
 }
 

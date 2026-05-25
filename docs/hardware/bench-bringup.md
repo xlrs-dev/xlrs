@@ -93,3 +93,23 @@ beacon's `txTick` and uses the PFD to nudge its timer period between beacons **o
 after Connected**. See [../troubleshooting/index.md](../troubleshooting/index.md) §6
 (PFD/timing) and the full pass-by-pass log history in
 [bench-link-acquisition-retrospective.md](bench-link-acquisition-retrospective.md).
+
+## Next: AIO + RC handset
+
+After the USB-only bench pair reaches **State 3** on D250 with `out:1` and stable LQ
+(see `tools/bench-run-capture.sh`), move to real wired I/O:
+
+| Role | Wiring | Build notes |
+| --- | --- | --- |
+| **TX** | CRSF RC controller → TX CRSF/UART pins | `-DXLRS_TX_CONTROLLER_PROTOCOL=CRSF`; **`XLRS_BENCH_TX=OFF`** (production TX) |
+| **RX** | RX CRSF TX → AIO / FC CRSF RX @ 420000 baud | Standard RX build; confirm `crsf_rc age` stays low and `out:1` |
+
+Checklist:
+
+1. Same binding phrase and D250 rate on both boards (`tmr:4000/4000`).
+2. TX status: `CRSF rc` increments when sticks move; TX reaches **State 3** from handset RC.
+3. RX status: **State 3**, `out:1`, `LQ` non-zero while sticks move.
+4. FC telemetry (optional): RX `fc`/`fcq` track; TX `fc` increments when AIO sends sensors.
+
+Automated bench capture uses `-DXLRS_BENCH_TX=ON` and midstick autostick — do **not**
+use that build for handset testing.

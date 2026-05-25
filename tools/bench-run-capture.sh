@@ -10,6 +10,9 @@ mkdir -p "$OUTDIR"
 CMAKE_BENCH_ARGS=(-DXLRS_BENCH_TX=ON)
 if [[ -n "$BENCH_RATE" ]]; then
   CMAKE_BENCH_ARGS+=(-DXLRS_BENCH_RATE="$BENCH_RATE")
+else
+  # Clear a prior F1000 bench override left in the CMake cache.
+  CMAKE_BENCH_ARGS+=(-UXLRS_BENCH_RATE)
 fi
 
 bash scripts/test.sh 2>&1 | tail -3

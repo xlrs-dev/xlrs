@@ -393,6 +393,10 @@ despite **LQ 50–77%** — consecutive uplink miss counting ran in `service()` 
 Capture dir: `tools/bench-capture-failsafe-fix/`. Optional F1000 run:
 `tools/bench-run-capture.sh <dir> 0` (rate index 0). One May 2026 attempt did not reach
 State 3 within 90 s — treat F1000 ceiling as follow-up, not a regression on D250.
+Re-lock D250 after any F1000 attempt (script clears `-UXLRS_BENCH_RATE` by default).
+
+**Lock capture (May 2026):** `tools/bench-capture-lock/` — RX **350→348 State 3**,
+TX **State 3** entire run, both sides **≥70% LQ** on D250 (`tmr:4000/4000`).
 
 ---
 
@@ -404,14 +408,21 @@ Tracked in GitHub issue [#8](https://github.com/xlrs-dev/xlrs/issues/8). Summary
    after Connected; tune convergence when link drops quickly (timer can stay biased in Failsafe).
 2. ~~**TX bench failsafe**~~ — addressed by `-DXLRS_BENCH_TX=ON` (Pass 9); use for bench
    captures only, not production TX with a real controller.
-3. **Status LED** — verify GP10 active-low wiring; user reported no blinks early in
+3. **AIO + RC handset (next milestone)** — replace bench TX autostick with a real CRSF RC
+   controller on TX (`-DXLRS_TX_CONTROLLER_PROTOCOL=CRSF`) and wire RX CRSF to an AIO /
+   flight controller. Build production TX (`XLRS_BENCH_TX=OFF`), confirm `CRSF rc`/`out:1`,
+   stick-driven uplink, and FC telemetry loop (`fc`/`fcq`). See
+   [bench-bringup.md](bench-bringup.md) and [../troubleshooting/index.md](../troubleshooting/index.md).
+4. **Status LED** — verify GP10 active-low wiring; user reported no blinks early in
    bring-up (stale CMake `XLRS_STATUS_LED_PIN=13` vs GP10).
-4. **Bind-scan vs lock loss** — after ~70 s without RC, RX dropped lock and cycled
+5. **Bind-scan vs lock loss** — after ~70 s without RC, RX dropped lock and cycled
    bind-scan; tune timeout or keep lock longer during partial acquisition.
-5. **Host sim parity** — add async delivery test that calls `onRxDone` after `service()`
+6. **Host sim parity** — add async delivery test that calls `onRxDone` after `service()`
    to catch regressions without hardware.
-6. **Document PFD Sync exclusion** in [timing-and-scheduler.md](../developer/timing-and-scheduler.md)
+7. **Document PFD Sync exclusion** in [timing-and-scheduler.md](../developer/timing-and-scheduler.md)
    (partially done in troubleshooting §6).
+8. **F1000 ceiling** — optional `tools/bench-run-capture.sh <dir> 0`; clear CMake cache
+   with `-UXLRS_BENCH_RATE` when returning to D250 (script default).
 
 ---
 

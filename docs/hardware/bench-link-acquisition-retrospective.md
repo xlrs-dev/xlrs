@@ -369,6 +369,31 @@ beacons.
 Capture dir: `tools/bench-capture-benchtx/`. Bench script builds with `-DXLRS_BENCH_TX=ON`;
 production TX builds leave it OFF.
 
+### Pass 10 — RX failsafe aligned with async LQ (May 2026)
+
+**Problem:** RX entered **State 4 (Failsafe)** ~105/360 status samples during Pass 9
+despite **LQ 50–77%** — consecutive uplink miss counting ran in `service()` before
+`onRxDone` could attribute decodes, while the LQ ledger already deferred slot close.
+
+**Fixes:**
+
+| Fix | File |
+| --- | --- |
+| Drain `onRxDone` between catch-up ticks in `poll()` | `RfScheduler.cpp` |
+| Count RX uplink misses when the HW LQ slot closes (not at `service()` time) | `Link.cpp` |
+| Suppress consecutive-miss failsafe while `lqUp ≥ 25%` (`FAILSAFE_LQ_HOLDOFF`) | `Link.cpp` |
+
+**After fix (D250, ~1 m, bench TX build):**
+
+| Side | Max LQ | Samples ≥70% | States (3/4) |
+| --- | --- | --- | --- |
+| **RX** | **77%** | 246/360 | **350 / 10** (was 255 / 105) |
+| **TX** | **91%** | 109/180 | 180 / 0 |
+
+Capture dir: `tools/bench-capture-failsafe-fix/`. Optional F1000 run:
+`tools/bench-run-capture.sh <dir> 0` (rate index 0). One May 2026 attempt did not reach
+State 3 within 90 s — treat F1000 ceiling as follow-up, not a regression on D250.
+
 ---
 
 ## Follow-up work

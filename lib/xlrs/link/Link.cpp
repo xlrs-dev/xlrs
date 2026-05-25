@@ -592,6 +592,15 @@ void Link::advanceHwUplinkLqSlot(uint32_t tick) {
                 (_hwUplinkDecodeTick == _hwUplinkLqTick && _hwUplinkDecodeOk);
             _lq.update(received);
             _stats.lqUp = _lq.lq();
+            if (_uplinkGraceSlotsRemaining > 0) {
+                if (received) {
+                    _uplinkGraceSlotsRemaining = 0;
+                }
+            } else if (received) {
+                _consecutiveMissedUplinks = 0;
+            } else if (_state == LinkState::Connected || _state == LinkState::Failsafe) {
+                _consecutiveMissedUplinks++;
+            }
             _hwUplinkLqClosed = true;
         }
     }
@@ -605,6 +614,9 @@ void Link::noteHwUplinkDecode(uint32_t tick, bool received) {
     }
     _hwUplinkDecodeTick = tick;
     _hwUplinkDecodeOk = received;
+    if (received) {
+        _consecutiveMissedUplinks = 0;
+    }
     if (_hwUplinkLqTick == tick && !_hwUplinkLqClosed) {
         _lq.update(received);
         _stats.lqUp = _lq.lq();
@@ -700,6 +712,15 @@ void Link::service(uint32_t tick, bool recordLq) {
     const bool txLinkValid = _benchTxMode ? txTlmTick : got;
 
     if (_role == Role::Rx && _locked && slotKind(et, _rxPos) == SlotKind::Uplink) {
+#if defined(XLRS_PICO_SDK)
+        if (_uplinkGraceSlotsRemaining > 0) {
+            _uplinkGraceSlotsRemaining--;
+            if (_gotValidUplinkThisTick) {
+                _uplinkGraceSlotsRemaining = 0;
+            }
+            _consecutiveMissedUplinks = 0;
+        }
+#else
         if (_uplinkGraceSlotsRemaining > 0) {
             _uplinkGraceSlotsRemaining--;
             if (_gotValidUplinkThisTick) {
@@ -711,6 +732,7 @@ void Link::service(uint32_t tick, bool recordLq) {
         } else {
             _consecutiveMissedUplinks++;
         }
+#endif
     } else if (got) {
         _consecutiveMissedUplinks = 0;
     }
@@ -718,6 +740,10 @@ void Link::service(uint32_t tick, bool recordLq) {
     uint32_t misses = (_role == Role::Rx)
                       ? _consecutiveMissedUplinks
                       : (_everRx ? _consecutiveMissedTelemetry : (FAILSAFE_MISS + 1));
+    // Healthy sliding-window LQ — do not failsafe on consecutive-miss skew alone.
+    if (_role == Role::Rx && _stats.lqUp >= FAILSAFE_LQ_HOLDOFF) {
+        misses = 0;
+    }
     // Bench TX: downlink LQ reflects recent telemetry; do not failsafe while it is healthy.
     if (_benchTxMode && _role == Role::Tx && _stats.lqDown > 0) {
         misses = 0;

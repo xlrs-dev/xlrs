@@ -12,6 +12,7 @@ pico_sdk_init()
 set(XLRS_DEFAULT_BINDING_PHRASE "Kikobot-02" CACHE STRING "Default TX/RX binding phrase")
 set(XLRS_TX_CONTROLLER_PROTOCOL "UART" CACHE STRING "TX controller protocol: UART or CRSF")
 option(XLRS_BENCH_TX "TX stays Connected from downlink telemetry (no controller RC required)" OFF)
+set(XLRS_BENCH_RATE "" CACHE STRING "Optional bench rate index override (0=F1000, 2=D250); empty=use flash config")
 set_property(CACHE XLRS_TX_CONTROLLER_PROTOCOL PROPERTY STRINGS UART CRSF)
 set(XLRS_UART_TX_PIN 8 CACHE STRING "TX firmware UART TX pin toward controller")
 set(XLRS_UART_RX_PIN 9 CACHE STRING "TX firmware UART RX pin from controller")
@@ -91,6 +92,10 @@ if(XLRS_BENCH_TX)
     target_compile_definitions(xlrs_core PUBLIC XLRS_BENCH_TX=1)
 else()
     target_compile_definitions(xlrs_core PUBLIC XLRS_BENCH_TX=0)
+endif()
+
+if(NOT XLRS_BENCH_RATE STREQUAL "")
+    target_compile_definitions(xlrs_core PUBLIC XLRS_BENCH_RATE=${XLRS_BENCH_RATE})
 endif()
 
 target_link_libraries(xlrs_core PUBLIC

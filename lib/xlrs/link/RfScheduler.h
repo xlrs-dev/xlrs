@@ -84,6 +84,7 @@ private:
     void syncPhyIdentity(bool force = false);
     void tryArmTelemetryRx();
     void applyLockedRxPhaseResync(uint32_t packetStartUs);
+    void drainPendingRxDone();
     bool telemetrySlotStillOpen() const;
     bool telemetryListenActive() const;
 

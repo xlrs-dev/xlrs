@@ -715,15 +715,26 @@ static void rf_core_main() {
         g_bindingStore.getBindingUid(uid);
     }
 
-    g_link.begin(xlrs::Role::Tx, uid, g_rfConfig.defaultRate, g_rfConfig.maxPowerDbm, g_rfConfig.dynamicPower == 1);
+    g_link.begin(xlrs::Role::Tx, uid,
+#if defined(XLRS_BENCH_RATE)
+                 XLRS_BENCH_RATE,
+#else
+                 g_rfConfig.defaultRate,
+#endif
+                 g_rfConfig.maxPowerDbm, g_rfConfig.dynamicPower == 1);
     g_link.setRegion(g_rfConfig.region == (uint8_t)xlrs::RfRegion::EU ? xlrs::FhssRegion::EU_CE : xlrs::FhssRegion::US_FCC);
 #if XLRS_BENCH_TX
     g_link.setBenchTxMode(true);
 #endif
 
-    xlrs::PhyConfig phyCfg = xlrs::makePhyConfig(xlrs::kRates[g_rfConfig.defaultRate], 2400.0f, g_rfConfig.maxPowerDbm, xlrs::syncWordFromUid(uid));
+#if defined(XLRS_BENCH_RATE)
+    const uint8_t rfRateIndex = XLRS_BENCH_RATE;
+#else
+    const uint8_t rfRateIndex = g_rfConfig.defaultRate;
+#endif
+    xlrs::PhyConfig phyCfg = xlrs::makePhyConfig(xlrs::kRates[rfRateIndex], 2400.0f, g_rfConfig.maxPowerDbm, xlrs::syncWordFromUid(uid));
     if (!g_phy.init(phyCfg) ||
-        !g_scheduler.begin(&g_phy, &g_link, g_rfConfig.defaultRate)) {
+        !g_scheduler.begin(&g_phy, &g_link, rfRateIndex)) {
         publishRfFault();
         while (true) xlrs::hal::sleepMs(100);  // heartbeat stops → watchdog reboots to retry
     }

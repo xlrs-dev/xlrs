@@ -82,6 +82,8 @@ class Link {
 public:
     static constexpr uint8_t  RC_CHANNELS   = 8;   // M3: 8 packed 11-bit channels / RC frame
     static constexpr uint16_t FAILSAFE_MISS = 10;  // consecutive missed uplink (RX) or telemetry (TX) slots
+    // Sliding-window LQ above this suppresses consecutive-miss failsafe (async HW decode skew).
+    static constexpr uint8_t  FAILSAFE_LQ_HOLDOFF = 25;
     // Post-connect grace: flaky bench links need time for PFD/phase to converge before failsafe.
     static constexpr uint16_t FAILSAFE_GRACE_TELEMETRY_SLOTS = 96;
     static constexpr uint16_t FAILSAFE_GRACE_UPLINK_SLOTS    = 48;

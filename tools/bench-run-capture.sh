@@ -3,15 +3,21 @@ set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO"
 
+OUTDIR="${1:-$REPO/tools/bench-capture-tickanchor}"
+BENCH_RATE="${2:-}"
+mkdir -p "$OUTDIR"
+
+CMAKE_BENCH_ARGS=(-DXLRS_BENCH_TX=ON)
+if [[ -n "$BENCH_RATE" ]]; then
+  CMAKE_BENCH_ARGS+=(-DXLRS_BENCH_RATE="$BENCH_RATE")
+fi
+
 bash scripts/test.sh 2>&1 | tail -3
-cmake -S "$REPO" -B "$REPO/build" -G Ninja -DXLRS_BENCH_TX=ON 2>&1 | tail -3
+cmake -S "$REPO" -B "$REPO/build" -G Ninja "${CMAKE_BENCH_ARGS[@]}" 2>&1 | tail -3
 cmake --build build --target xlrs_tx xlrs_rx 2>&1 | tail -3
 picotool load -x -f --ser E4654C16430F4223 "$REPO/build/xlrs_tx.elf"
 picotool load -x -f --ser E4654C16432C3B22 "$REPO/build/xlrs_rx.elf"
 sleep 20
-
-OUTDIR="${1:-$REPO/tools/bench-capture-tickanchor}"
-mkdir -p "$OUTDIR"
 
 # Drain boot spew so capture starts from a clean serial window.
 python3 - <<'PY'

@@ -482,20 +482,24 @@ void RfScheduler::syncPhyIdentity(bool force) {
     _identitySynced = true;
 }
 
+void RfScheduler::drainPendingRxDone() {
+    uint32_t currentRx = _rxDoneEvents.load(std::memory_order_acquire);
+    if (currentRx > _lastProcessedRxEvent) {
+        const uint32_t diff = currentRx - _lastProcessedRxEvent;
+        for (uint32_t i = 0; i < diff; ++i) {
+            onRxDone();
+        }
+        _lastProcessedRxEvent = currentRx;
+    }
+}
+
 void RfScheduler::poll() {
     if (!recoverPhyIfNeeded()) {
         return;
     }
 
     // 1. Process RX Done
-    uint32_t currentRx = _rxDoneEvents.load(std::memory_order_acquire);
-    if (currentRx > _lastProcessedRxEvent) {
-        uint32_t diff = currentRx - _lastProcessedRxEvent;
-        for (uint32_t i = 0; i < diff; ++i) {
-            onRxDone();
-        }
-        _lastProcessedRxEvent = currentRx;
-    }
+    drainPendingRxDone();
 
     // 2. Process TX Done
     uint32_t currentTx = _txDoneEvents.load(std::memory_order_acquire);
@@ -535,6 +539,8 @@ void RfScheduler::poll() {
                     _link->service(nextTick);
 #endif
                 }
+                // Late DIO: count uplink decode before the next tick's service().
+                drainPendingRxDone();
             }
         }
         _lastProcessedTickEvent = currentTicks;

@@ -358,6 +358,9 @@ If uplink works but TX telemetry is zero/stale:
 7. **RX failsafe vs LQ:** if RX drops to Failsafe while status still shows **LQ ≥ 25%**,
    check for async miss-count skew (see retrospective Pass 10). Total link loss still
    failsafes once the sliding window drains.
+8. **TX failsafe vs LQdown:** same pattern — if **State 4** while **LQdown ≥ 25%**, reflash
+   firmware with the TX async telemetry miss fix (Pass 11). True downlink loss still
+   failsafes when `lqDown` collapses.
 
 If flight-controller telemetry is missing in a CRSF RC controller:
 
@@ -395,9 +398,11 @@ PFD/timing lock guidance:
 - FHSS when locked: RX hop index is tick-derived (same as TX), not a free-running counter — bench `fhss` and `exp` should match on both boards at the same wall time when clocks are aligned.
 - PFD during acquisition: hold nominal timer until **Connected**; do not nudge from Sync beacons (different airtime). See [../hardware/bench-link-acquisition-retrospective.md](../hardware/bench-link-acquisition-retrospective.md).
 - TX must not adjust its master clock based on downlink telemetry.
-- TX failsafe counts **consecutive missed telemetry slots** (`_consecutiveMissedTelemetry`),
-  not raw scheduler ticks. At F1000 (tlm 1:64), do not expect Failsafe within 10 ms of the
-  last downlink — the next telemetry slot may be ~54 ms later.
+- TX failsafe counts **consecutive missed telemetry slots** on hardware when the async
+  LQ slot closes — not at `service()` time (same model as RX uplink, Pass 10/11). While
+  `lqDown ≥ 25%` (`FAILSAFE_LQ_HOLDOFF`), consecutive-miss failsafe is suppressed.
+  At F1000 (tlm 1:64), do not expect Failsafe within 10 ms of the last downlink — the
+  next telemetry slot may be ~54 ms later.
 - RX holds the hardware timer at nominal `intervalUs` whenever `state != Connected`; PFD
   state is cleared on Connected→Failsafe so a biased timer cannot block re-acquire.
 

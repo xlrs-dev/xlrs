@@ -350,7 +350,7 @@ void RfScheduler::onRxDone() {
                 if (_link->slotForTick(tlmTick) == Slot::Telemetry) {
                     _link->noteHwTelemetryDecode(tlmTick, true);
                 }
-                _link->service(_armedTick, false);
+                _link->service(tlmTick, false);
             }
 #else
             if (_link->role() == Role::Rx) {

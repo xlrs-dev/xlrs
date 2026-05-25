@@ -639,6 +639,21 @@ void Link::advanceHwTelemetryLqSlot(uint32_t tick) {
                 (_hwTlmDecodeTick == _hwTlmLqTick && _hwTlmDecodeOk);
             _lqDown.update(received);
             _stats.lqDown = _lqDown.lq();
+            if (_telemetryGraceSlotsRemaining > 0) {
+                if (received) {
+                    _telemetryGraceSlotsRemaining = 0;
+                }
+            } else if (received) {
+                _consecutiveMissedTelemetry = 0;
+            } else if (_state == LinkState::Connected || _state == LinkState::Failsafe) {
+                _consecutiveMissedTelemetry++;
+                if (_stats.telemetryMisses != UINT16_MAX) {
+                    _stats.telemetryMisses++;
+                }
+                if (_consecutiveMissedTelemetry >= 2) {
+                    _txPowerDbm = _power.update(0, 0, true);
+                }
+            }
             _hwTlmLqClosed = true;
         }
     }
@@ -652,6 +667,9 @@ void Link::noteHwTelemetryDecode(uint32_t tick, bool received) {
     }
     _hwTlmDecodeTick = tick;
     _hwTlmDecodeOk = received;
+    if (received) {
+        _consecutiveMissedTelemetry = 0;
+    }
     if (_hwTlmLqTick == tick && !_hwTlmLqClosed) {
         _lqDown.update(received);
         _stats.lqDown = _lqDown.lq();
@@ -676,6 +694,15 @@ void Link::service(uint32_t tick, bool recordLq) {
 #endif
         }
         if (slotKind(tick, txPos) == SlotKind::Telemetry) {
+#if defined(XLRS_PICO_SDK)
+            if (_telemetryGraceSlotsRemaining > 0) {
+                _telemetryGraceSlotsRemaining--;
+                if (_gotValidTelemetryThisTick) {
+                    _telemetryGraceSlotsRemaining = 0;
+                }
+                _consecutiveMissedTelemetry = 0;
+            }
+#else
             if (_telemetryGraceSlotsRemaining > 0) {
                 _telemetryGraceSlotsRemaining--;
                 if (_gotValidTelemetryThisTick) {
@@ -691,6 +718,7 @@ void Link::service(uint32_t tick, bool recordLq) {
                     _txPowerDbm = _power.update(0, 0, true); // ELRS standard: jump to max power immediately on telemetry loss
                 }
             }
+#endif
         }
     } else {
         // RX uplink LQ: count UPLINK slots only (Sync/Telemetry excluded) — once locked.
@@ -742,6 +770,9 @@ void Link::service(uint32_t tick, bool recordLq) {
                       : (_everRx ? _consecutiveMissedTelemetry : (FAILSAFE_MISS + 1));
     // Healthy sliding-window LQ — do not failsafe on consecutive-miss skew alone.
     if (_role == Role::Rx && _stats.lqUp >= FAILSAFE_LQ_HOLDOFF) {
+        misses = 0;
+    }
+    if (_role == Role::Tx && _stats.lqDown >= FAILSAFE_LQ_HOLDOFF) {
         misses = 0;
     }
     // Bench TX: downlink LQ reflects recent telemetry; do not failsafe while it is healthy.

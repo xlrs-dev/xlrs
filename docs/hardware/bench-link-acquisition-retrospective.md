@@ -398,6 +398,16 @@ Re-lock D250 after any F1000 attempt (script clears `-UXLRS_BENCH_RATE` by defau
 **Lock capture (May 2026):** `tools/bench-capture-lock/` — RX **350→348 State 3**,
 TX **State 3** entire run, both sides **≥70% LQ** on D250 (`tmr:4000/4000`).
 
+### Pass 11 — TX failsafe aligned with async LQdown (May 2026)
+
+**Problem:** Production TX entered **State 4** while **LQdown** still showed a healthy
+downlink — same async skew as RX Pass 10: `service()` counted missed telemetry slots
+before `onRxDone` attributed decodes.
+
+**Fixes:** Mirror RX Pass 10 on the TX telemetry path — count misses when the HW
+`lqDown` slot closes, `FAILSAFE_LQ_HOLDOFF` on `lqDown`, re-run `service(tlmTick)` after
+telemetry decode.
+
 ---
 
 ## Follow-up work

@@ -835,6 +835,10 @@ uint32_t Sx1280NativePhy::txLatencyUs() const {
     return 55;
 }
 
+bool Sx1280NativePhy::txInProgress() const {
+    return _txInProgress.load(std::memory_order_acquire);
+}
+
 bool Sx1280NativePhy::recover() {
     beginDiag(PhyDiagPhase::Recover);
     PhyConfig cfg = _cfg;
@@ -862,6 +866,7 @@ void Sx1280NativePhy::setOutputPowerDbm(int8_t dbm) {}
 void Sx1280NativePhy::setSyncWord(uint16_t uidDerived) {}
 void Sx1280NativePhy::reconfigure(const PhyConfig& cfg) {}
 uint32_t Sx1280NativePhy::txLatencyUs() const { return 0; }
+bool Sx1280NativePhy::txInProgress() const { return false; }
 bool Sx1280NativePhy::recover() { return false; }
 }
 

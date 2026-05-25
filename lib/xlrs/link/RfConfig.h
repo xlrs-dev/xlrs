@@ -5,7 +5,7 @@
 
 #define RF_CONFIG_EEPROM_BASE 0
 #define RF_CONFIG_MAGIC 0x52464347UL  // "RFCG"
-#define RF_CONFIG_VERSION 1
+#define RF_CONFIG_VERSION 4
 
 namespace xlrs {
 
@@ -29,7 +29,7 @@ public:
         cfg.magic = RF_CONFIG_MAGIC;
         cfg.version = RF_CONFIG_VERSION;
         cfg.region = (uint8_t)RfRegion::US;
-        cfg.defaultRate = 0; // F1000
+        cfg.defaultRate = 2; // D250 (250 Hz)
         cfg.maxPowerDbm = 10; // default 10dBm
         cfg.failsafeMode = 0; // NoPulses
         cfg.dynamicPower = 1; // enabled

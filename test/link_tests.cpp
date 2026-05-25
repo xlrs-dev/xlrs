@@ -47,7 +47,7 @@ static void test_link_connect_flow_failsafe() {
     for (int i = 0; i < 4; ++i) TEST_ASSERT_EQUAL_UINT16(ch[i], out[i]);
     TEST_ASSERT_EQUAL_UINT8(100, env.rx.stats().lqUp);
 
-    for (uint32_t t = 21; t <= 40; ++t) simTick(env, t, false);
+    for (uint32_t t = 21; t <= 120; ++t) simTick(env, t, false);
     TEST_ASSERT_TRUE(env.rx.state() == LinkState::Failsafe);
     TEST_ASSERT_FALSE(env.rx.outputActive());
     TEST_ASSERT_TRUE(env.rx.stats().lqUp < 100);
@@ -341,6 +341,43 @@ static void test_link_corrupt_rc_rejected() {
     TEST_ASSERT_TRUE(env.rx.stats().lqUp >= 90);
 }
 
+static void test_link_tx_failsafe_grace_after_connect() {
+    uint8_t uid[LINK_UID_SIZE];
+    linkUidFromPhrase("Kikobot-02", uid);
+    SimEnvironment env;
+    env.setup(uid, 2); // D250: tlm 1:16
+
+    uint16_t ch[4] = {512, 512, 512, 512};
+    env.tx.setChannels(ch, 4);
+
+    for (uint32_t t = 1; t <= 100; ++t) simTick(env, t);
+    TEST_ASSERT_TRUE(env.tx.state() == LinkState::Connected);
+
+    // Block downlink delivery; 500 ticks (~31 telemetry slots) stays inside the grace window.
+    env.rxPhy.corruptNextDeliveries(10000);
+    for (uint32_t t = 101; t <= 600; ++t) simTick(env, t);
+    TEST_ASSERT_TRUE(env.tx.state() == LinkState::Connected);
+}
+
+static void test_link_tx_failsafe_counts_telemetry_slots() {
+    uint8_t uid[LINK_UID_SIZE];
+    linkUidFromPhrase("Kikobot-02", uid);
+    SimEnvironment env;
+    env.setup(uid, 0); // F1000: tlmRatioDenom = 64
+
+    uint16_t ch[4] = {512, 512, 512, 512};
+    env.tx.setChannels(ch, 4);
+
+    for (uint32_t t = 1; t <= 100; ++t) simTick(env, t);
+    TEST_ASSERT_TRUE(env.tx.state() == LinkState::Connected);
+    TEST_ASSERT_TRUE(env.rx.state() == LinkState::Connected);
+
+    // TX failsafe must count missed telemetry slots, not raw ticks. With tlm 1:64 the
+    // next downlink slot can be ~54 ms away; 30 ticks (~30 ms) must not trip failsafe.
+    for (uint32_t t = 101; t <= 130; ++t) simTick(env, t);
+    TEST_ASSERT_TRUE(env.tx.state() == LinkState::Connected);
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -358,5 +395,7 @@ int main() {
     RUN_TEST(test_link_wrong_key);
     RUN_TEST(test_link_long_soak);
     RUN_TEST(test_link_corrupt_rc_rejected);
+    RUN_TEST(test_link_tx_failsafe_grace_after_connect);
+    RUN_TEST(test_link_tx_failsafe_counts_telemetry_slots);
     return UNITY_END();
 }

@@ -70,6 +70,8 @@ Counter meanings:
 | RX `lock` / `sync` | FHSS locked to TX sequence; valid Sync beacon seen this session |
 | RX `skew` | Last Sync beacon `fhssIndex − txPos(txTick)` (should be 0) |
 | RX `pfd` | Last PFD phase error in µs (packet arrival vs expected tick) |
+| RX `adj` | Last PFD timer correction applied in µs (non-zero while Connected and tracking) |
+| RX `n` | PFD update count since boot (increments only on Connected non-Sync decodes) |
 | `tmr` | Actual hardware timer period vs nominal `RateConfig.intervalUs` |
 | TX `dlrx` | Scheduler ticks since last downlink telemetry decode |
 | RX `crsf_rc` / `stats` | CRSF RC and link-statistics frames emitted to the flight controller |

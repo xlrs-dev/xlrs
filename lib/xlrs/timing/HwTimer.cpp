@@ -35,6 +35,23 @@ public:
         _intervalUs = intervalUs;
     }
 
+    void resyncNextTickUs(uint32_t nextBoundaryUs) override {
+        if (!_running || !_pool) {
+            return;
+        }
+        if (_alarmId > 0) {
+            alarm_pool_cancel_alarm(_pool, _alarmId);
+            _alarmId = 0;
+        }
+        const uint32_t now = (uint32_t)time_us_64();
+        int32_t delayUs = (int32_t)(nextBoundaryUs - now);
+        constexpr int32_t kMinLeadUs = 50;
+        while (delayUs < kMinLeadUs) {
+            delayUs += (int32_t)_intervalUs;
+        }
+        _alarmId = alarm_pool_add_alarm_in_us(_pool, delayUs, alarmCallback, this, true);
+    }
+
     uint32_t intervalUs() const override { return _intervalUs; }
 
     uint32_t nowUs() const override {
@@ -115,6 +132,9 @@ public:
     }
     void setIntervalUs(uint32_t intervalUs) override {
         s_simIntervalUs = intervalUs;
+    }
+    void resyncNextTickUs(uint32_t nextBoundaryUs) override {
+        (void)nextBoundaryUs;
     }
     uint32_t intervalUs() const override { return s_simIntervalUs; }
     uint32_t nowUs() const override {

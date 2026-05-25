@@ -23,6 +23,9 @@ public:
     virtual void     setIntervalUs(uint32_t intervalUs) = 0;  // PFD nudges this each period
     virtual uint32_t intervalUs() const = 0;
     virtual uint32_t nowUs() const = 0;
+    // Reschedule the next tick to fire at nextBoundaryUs (32-bit µs epoch). Used on RX Sync
+    // snap so slot boundaries align with TX even when boot-time timer phase differed.
+    virtual void     resyncNextTickUs(uint32_t nextBoundaryUs) = 0;
     virtual void     stop() = 0;
 };
 

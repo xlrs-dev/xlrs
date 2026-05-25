@@ -49,6 +49,8 @@ void Link::resetAcquisition(LinkState state) {
     _everRx = false;
     _consecutiveMissedUplinks = 0;
     _consecutiveMissedTelemetry = 0;
+    _telemetryGraceSlotsRemaining = 0;
+    _uplinkGraceSlotsRemaining = 0;
     _gotRcThisTick = false;
     _gotSyncThisTick = false;
     _gotTlmThisTick = false;
@@ -63,6 +65,17 @@ void Link::resetAcquisition(LinkState state) {
     _pendingTxTickResync = 0;
     _syncAnchorTxTick = 0;
     _syncAnchorLocalTick = 0;
+    _rxTimingResetPending = false;
+#if defined(XLRS_PICO_SDK)
+    _hwUplinkLqTick = UINT32_MAX;
+    _hwUplinkLqClosed = true;
+    _hwUplinkDecodeTick = UINT32_MAX;
+    _hwUplinkDecodeOk = false;
+    _hwTlmLqTick = UINT32_MAX;
+    _hwTlmLqClosed = true;
+    _hwTlmDecodeTick = UINT32_MAX;
+    _hwTlmDecodeOk = false;
+#endif
 }
 
 void Link::begin(Role role, const uint8_t uid[8], uint8_t rateIndex, int8_t maxPowerDbm, bool useDynamicPower) {
@@ -156,14 +169,28 @@ bool Link::takeSyncResyncTick(uint32_t& txTick, bool& resetPfd) {
     return true;
 }
 
-void Link::snapSchedulerTick(uint32_t tick) {
-    _tick = tick;
+bool Link::takeRxTimingResetPending() {
+    if (!_rxTimingResetPending) return false;
+    _rxTimingResetPending = false;
+    return true;
+}
+
+void Link::snapSchedulerTick(uint32_t txTick, uint32_t localSchedulerTick) {
     if (_role == Role::Rx && _locked) {
-        _rxPos = txPos(tick);
-        _syncAnchorTxTick = tick;
-        _syncAnchorLocalTick = tick;
+        _syncAnchorTxTick = txTick;
+        _syncAnchorLocalTick = localSchedulerTick;
+        _rxPos = txPos(txTick);
     }
-    _stats.fhssIndex = (_role == Role::Tx) ? (uint8_t)txPos(tick) : (uint8_t)_rxPos;
+    _stats.fhssIndex = (_role == Role::Tx)
+                       ? (uint8_t)txPos(localSchedulerTick)
+                       : (uint8_t)txPos(effectiveTxTick(localSchedulerTick));
+}
+
+uint32_t Link::effectiveTxTick(uint32_t localTick) const {
+    if (_role == Role::Rx && _locked) {
+        return _syncAnchorTxTick + (localTick - _syncAnchorLocalTick);
+    }
+    return localTick;
 }
 
 void Link::requestRate(uint8_t rateIndex) {
@@ -197,8 +224,7 @@ float Link::freqForPos(uint16_t pos) const {
 
 uint32_t Link::txTickForNonce(uint32_t rxPacketStartUs) const {
     (void)rxPacketStartUs;
-    if (_role != Role::Rx || !_locked) return _tick;
-    return _syncAnchorTxTick + (_tick - _syncAnchorLocalTick);
+    return effectiveTxTick(_tick);
 }
 
 void Link::onTick(uint32_t tick) {
@@ -207,13 +233,14 @@ void Link::onTick(uint32_t tick) {
     const uint16_t hop = hopInterval();
     const uint8_t seqLen = _fhss.count();
     const bool atHopBoundary = (tick % hop) == 0;
+    const uint32_t et = effectiveTxTick(tick);
 
     if (_role == Role::Rx && _locked) {
-        _rxPos = txPos(tick);
+        _rxPos = txPos(et);
     }
 
     const bool atSequenceBoundary = atHopBoundary &&
-        ((_role == Role::Tx) ? (txPos(tick) == 0) : (_locked && txPos(tick) == 0));
+        ((_role == Role::Tx) ? (txPos(tick) == 0) : (_locked && txPos(et) == 0));
 
     if (_role == Role::Tx) {
         const uint16_t seqPeriod = hop * seqLen;
@@ -234,7 +261,7 @@ void Link::onTick(uint32_t tick) {
         }
     }
 
-    _stats.fhssIndex = (_role == Role::Tx) ? (uint8_t)txPos(tick) : (uint8_t)_rxPos;
+    _stats.fhssIndex = (_role == Role::Tx) ? (uint8_t)txPos(tick) : (uint8_t)txPos(et);
     _stats.txPowerDbm = _txPowerDbm;
 }
 
@@ -246,13 +273,14 @@ float Link::freqForTick(uint32_t tick) const {
         return freqForPos(txPos(tick));
     }
     if (!_locked) return freqForPos(0);
-    return freqForPos(txPos(tick));
+    return freqForPos(txPos(effectiveTxTick(tick)));
 }
 
 Slot Link::slotForTick(uint32_t tick) const {
-    const uint16_t pos = (_role == Role::Tx || _locked) ? txPos(tick) : _rxPos;
+    const uint32_t et = effectiveTxTick(tick);
+    const uint16_t pos = (_role == Role::Tx || _locked) ? txPos(et) : _rxPos;
     if (pos == 0) return Slot::Sync;
-    if (_rate.tlmRatioDenom && (tick % _rate.tlmRatioDenom) == 0) return Slot::Telemetry;
+    if (_rate.tlmRatioDenom && (et % _rate.tlmRatioDenom) == 0) return Slot::Telemetry;
     return Slot::Uplink;
 }
 
@@ -341,7 +369,8 @@ bool Link::getTxPayload(uint32_t tick, uint16_t pos, uint8_t* outBuf, uint8_t& o
         return false;
     } else {
         if (!_locked) return false;
-        SlotKind k = slotKind(tick, pos);
+        const uint32_t et = effectiveTxTick(tick);
+        SlotKind k = slotKind(et, pos);
         if (k == SlotKind::Telemetry) {
             ICipher* c = _cipher ? _cipher : &s_nullCipher;
             TelemetryChunk chunk{};
@@ -351,7 +380,7 @@ bool Link::getTxPayload(uint32_t tick, uint16_t pos, uint8_t* outBuf, uint8_t& o
                 outBuf[1] = chunk.seq;
                 outBuf[2] = chunk.length;
                 memcpy(outBuf + 3, chunk.data, 13);
-                c->seal(outBuf + 1, 15, Nonce96::build(_sessionSalt, tick, pos));
+                c->seal(outBuf + 1, 15, Nonce96::build(_sessionSalt, et, pos));
                 outLen = (uint8_t)(1 + 15 + c->overhead());
                 return true;
             }
@@ -400,6 +429,8 @@ bool Link::processRxPayload(uint32_t tick, uint16_t pos, const uint8_t* data, ui
                 _rxPos = s.fhssIndex;
             }
             _syncFhssSkew = (int8_t)((int)s.fhssIndex - (int)txPos(s.txTick));
+            _syncAnchorTxTick = s.txTick;
+            _syncAnchorLocalTick = tick;
             _pendingTxTickResync = s.txTick;
             _syncResyncPending = true;
             _syncResyncResetPfd = !wasLocked;
@@ -445,7 +476,8 @@ bool Link::processRxPayload(uint32_t tick, uint16_t pos, const uint8_t* data, ui
         if (len >= (uint8_t)(1 + 15 + c->overhead())) {
             uint8_t decBuf[64];
             memcpy(decBuf, data, len);
-            if (c->open(decBuf + 1, 15, Nonce96::build(_sessionSalt, tick, pos))) {
+            const uint32_t nonceTick = effectiveTxTick(tick);
+            if (c->open(decBuf + 1, 15, Nonce96::build(_sessionSalt, nonceTick, pos))) {
                 TelemetryChunk chunk{};
                 chunk.seq = decBuf[1];
                 chunk.length = decBuf[2];
@@ -453,7 +485,7 @@ bool Link::processRxPayload(uint32_t tick, uint16_t pos, const uint8_t* data, ui
                 uint8_t ackSeq = 0;
                 _tlmReceiver.processChunk(chunk, ackSeq);
                 _localAckSeq = ackSeq;
-                if (_role == Role::Rx && slotKind(tick, pos) == SlotKind::Uplink) {
+                if (_role == Role::Rx && slotKind(nonceTick, pos) == SlotKind::Uplink) {
                     _gotValidUplinkThisTick = true;
                 } else if (_role == Role::Tx && slotKind(tick, pos) == SlotKind::Telemetry) {
                     _gotValidTelemetryThisTick = true;
@@ -465,18 +497,23 @@ bool Link::processRxPayload(uint32_t tick, uint16_t pos, const uint8_t* data, ui
     } else if (otaType(data[0]) == OtaType::Rc && _role == Role::Rx) {
         if (!_locked || !_syncSeen) return false;
         ICipher* c = _cipher ? _cipher : &s_nullCipher;
-        uint32_t nonceTick = tick;
-#if defined(XLRS_PICO_SDK)
-        if (_locked) {
-            nonceTick = _syncAnchorTxTick + (tick - _syncAnchorLocalTick);
-        }
-#endif
+        const uint32_t nonceTick = effectiveTxTick(tick);
 
-        auto tryNonceTicks = [&](auto&& tryFrame) -> bool {
-            for (int32_t delta = -1; delta <= 1; ++delta) {
+        auto tryNonceTicks = [&](auto&& tryFrame, uint32_t& matchedTxTick) -> bool {
+#if defined(XLRS_PICO_SDK)
+            const int32_t maxDelta = 16;
+#else
+            const int32_t maxDelta = 1;
+#endif
+            for (int32_t delta = -maxDelta; delta <= maxDelta; ++delta) {
                 const int32_t tryTick = (int32_t)nonceTick + delta;
                 if (tryTick < 0) continue;
-                if (tryFrame((uint32_t)tryTick)) return true;
+                const uint32_t ut = (uint32_t)tryTick;
+                if (txPos(ut) != pos) continue;
+                if (tryFrame(ut)) {
+                    matchedTxTick = ut;
+                    return true;
+                }
             }
             return false;
         };
@@ -484,6 +521,7 @@ bool Link::processRxPayload(uint32_t tick, uint16_t pos, const uint8_t* data, ui
         // Try compact 8-byte frame first
         if (len >= (uint8_t)(8 + c->overhead())) {
             uint8_t decBuf[32];
+            uint32_t matchedTxTick = 0;
             if (tryNonceTicks([&](uint32_t tryTick) -> bool {
                     memcpy(decBuf, data, len);
                     if (!c->open(decBuf + 1, 7, Nonce96::build(_sessionSalt, tryTick, pos))) return false;
@@ -497,7 +535,10 @@ bool Link::processRxPayload(uint32_t tick, uint16_t pos, const uint8_t* data, ui
                     _receivedAckSeq = decSeq;
                     _tlmSender.receiveAck(_receivedAckSeq);
                     return true;
-                })) {
+                }, matchedTxTick)) {
+#if defined(XLRS_PICO_SDK)
+                snapSchedulerTick(matchedTxTick, tick);
+#endif
                 return true;
             }
         }
@@ -506,6 +547,7 @@ bool Link::processRxPayload(uint32_t tick, uint16_t pos, const uint8_t* data, ui
         const uint8_t p = packedSize(RC_CHANNELS);
         if (len >= (uint8_t)(1 + p + c->overhead())) {
             uint8_t decBuf[32];
+            uint32_t matchedTxTick = 0;
             if (tryNonceTicks([&](uint32_t tryTick) -> bool {
                     memcpy(decBuf, data, len);
                     if (!c->open(decBuf + 1, p, Nonce96::build(_sessionSalt, tryTick, pos))) return false;
@@ -516,7 +558,10 @@ bool Link::processRxPayload(uint32_t tick, uint16_t pos, const uint8_t* data, ui
                     _lastRxTick = tick; _everRx = true;
                     _stats.rssiDbm = rssi; _stats.snr = snr;
                     return true;
-                })) {
+                }, matchedTxTick)) {
+#if defined(XLRS_PICO_SDK)
+                snapSchedulerTick(matchedTxTick, tick);
+#endif
                 return true;
             }
         }
@@ -524,16 +569,108 @@ bool Link::processRxPayload(uint32_t tick, uint16_t pos, const uint8_t* data, ui
     return false;
 }
 
-void Link::service(uint32_t tick) {
+void Link::refreshRxPosForTick(uint32_t localTick) {
+    if (_role == Role::Rx && _locked) {
+        _rxPos = txPos(effectiveTxTick(localTick));
+    }
+}
+
+#if defined(XLRS_PICO_SDK)
+void Link::advanceHwUplinkLqSlot(uint32_t tick) {
+    if (_role != Role::Rx || !_locked) {
+        return;
+    }
+    const uint32_t et = effectiveTxTick(tick);
+    _rxPos = txPos(et);
+    if (slotKind(et, _rxPos) != SlotKind::Uplink) {
+        return;
+    }
+    if (_hwUplinkLqTick != UINT32_MAX && !_hwUplinkLqClosed && tick > _hwUplinkLqTick) {
+        // Defer closing by one tick so poll() can process onRxDone for the pending slot first.
+        if (tick > _hwUplinkLqTick + 1 || _hwUplinkDecodeTick == _hwUplinkLqTick) {
+            const bool received =
+                (_hwUplinkDecodeTick == _hwUplinkLqTick && _hwUplinkDecodeOk);
+            _lq.update(received);
+            _stats.lqUp = _lq.lq();
+            _hwUplinkLqClosed = true;
+        }
+    }
+    _hwUplinkLqTick = tick;
+    _hwUplinkLqClosed = false;
+}
+
+void Link::noteHwUplinkDecode(uint32_t tick, bool received) {
+    if (_role != Role::Rx || !_locked) {
+        return;
+    }
+    _hwUplinkDecodeTick = tick;
+    _hwUplinkDecodeOk = received;
+    if (_hwUplinkLqTick == tick && !_hwUplinkLqClosed) {
+        _lq.update(received);
+        _stats.lqUp = _lq.lq();
+        _hwUplinkLqClosed = true;
+    }
+}
+
+void Link::advanceHwTelemetryLqSlot(uint32_t tick) {
+    if (_role != Role::Tx) {
+        return;
+    }
+    const uint16_t pos = txPos(tick);
+    if (slotKind(tick, pos) != SlotKind::Telemetry) {
+        return;
+    }
+    if (_hwTlmLqTick != UINT32_MAX && !_hwTlmLqClosed && tick > _hwTlmLqTick) {
+        // Telemetry slots are sparse (1:N); allow extra tick slack for async decode.
+        if (tick > _hwTlmLqTick + 16 || _hwTlmDecodeTick == _hwTlmLqTick) {
+            const bool received =
+                (_hwTlmDecodeTick == _hwTlmLqTick && _hwTlmDecodeOk);
+            _lqDown.update(received);
+            _stats.lqDown = _lqDown.lq();
+            _hwTlmLqClosed = true;
+        }
+    }
+    _hwTlmLqTick = tick;
+    _hwTlmLqClosed = false;
+}
+
+void Link::noteHwTelemetryDecode(uint32_t tick, bool received) {
+    if (_role != Role::Tx) {
+        return;
+    }
+    _hwTlmDecodeTick = tick;
+    _hwTlmDecodeOk = received;
+    if (_hwTlmLqTick == tick && !_hwTlmLqClosed) {
+        _lqDown.update(received);
+        _stats.lqDown = _lqDown.lq();
+        _hwTlmLqClosed = true;
+    }
+}
+#endif
+
+void Link::service(uint32_t tick, bool recordLq) {
     const uint16_t hop    = hopInterval();
     const uint8_t  seqLen = _fhss.count();
+    const uint32_t et    = effectiveTxTick(tick);
 
     if (_role == Role::Tx) {
         const uint16_t txPos = (uint16_t)((tick / hop) % seqLen);
-        if (slotKind(tick, txPos) == SlotKind::Telemetry) {     // downlink LQ over tlm slots
+        if (recordLq && slotKind(tick, txPos) == SlotKind::Telemetry) {
+#if defined(XLRS_PICO_SDK)
+            noteHwTelemetryDecode(tick, _gotValidTelemetryThisTick);
+#else
             _lqDown.update(_gotValidTelemetryThisTick);
             _stats.lqDown = _lqDown.lq();
-            if (_gotValidTelemetryThisTick) {
+#endif
+        }
+        if (slotKind(tick, txPos) == SlotKind::Telemetry) {
+            if (_telemetryGraceSlotsRemaining > 0) {
+                _telemetryGraceSlotsRemaining--;
+                if (_gotValidTelemetryThisTick) {
+                    _telemetryGraceSlotsRemaining = 0;
+                }
+                _consecutiveMissedTelemetry = 0;
+            } else if (_gotValidTelemetryThisTick) {
                 _consecutiveMissedTelemetry = 0;
             } else {
                 _consecutiveMissedTelemetry++;
@@ -545,24 +682,41 @@ void Link::service(uint32_t tick) {
         }
     } else {
         // RX uplink LQ: count UPLINK slots only (Sync/Telemetry excluded) — once locked.
-        if (_locked && slotKind(tick, _rxPos) == SlotKind::Uplink) {
+#if defined(XLRS_PICO_SDK)
+        if (recordLq && _locked && slotKind(et, _rxPos) == SlotKind::Uplink) {
+            noteHwUplinkDecode(tick, _gotValidUplinkThisTick);
+        }
+#else
+        if (recordLq && _locked && slotKind(et, _rxPos) == SlotKind::Uplink) {
             _lq.update(_gotValidUplinkThisTick);
             _stats.lqUp = _lq.lq();
         }
+#endif
     }
 
     const bool got = _gotRcThisTick || _gotSyncThisTick ||
                      _gotValidUplinkThisTick || _gotValidTelemetryThisTick;
     
-    if (got) {
+    if (_role == Role::Rx && _locked && slotKind(et, _rxPos) == SlotKind::Uplink) {
+        if (_uplinkGraceSlotsRemaining > 0) {
+            _uplinkGraceSlotsRemaining--;
+            if (_gotValidUplinkThisTick) {
+                _uplinkGraceSlotsRemaining = 0;
+            }
+            _consecutiveMissedUplinks = 0;
+        } else if (got) {
+            _consecutiveMissedUplinks = 0;
+        } else {
+            _consecutiveMissedUplinks++;
+        }
+    } else if (got) {
         _consecutiveMissedUplinks = 0;
-    } else if (_role == Role::Rx && _locked && slotKind(tick, _rxPos) == SlotKind::Uplink) {
-        _consecutiveMissedUplinks++;
     }
 
-    const uint32_t misses = (_role == Role::Rx) 
-                            ? _consecutiveMissedUplinks 
-                            : (_everRx ? (tick - _lastRxTick) : (FAILSAFE_MISS + 1));
+    const uint32_t misses = (_role == Role::Rx)
+                            ? _consecutiveMissedUplinks
+                            : (_everRx ? _consecutiveMissedTelemetry : (FAILSAFE_MISS + 1));
+    const LinkState prevState = _state;
     switch (_state) {
         case LinkState::Disconnected:
         case LinkState::Connecting:
@@ -588,6 +742,21 @@ void Link::service(uint32_t tick) {
             break;
         case LinkState::Binding:
             break;
+    }
+
+    if (_state == LinkState::Connected && prevState != LinkState::Connected) {
+        if (_role == Role::Tx) {
+            _telemetryGraceSlotsRemaining = FAILSAFE_GRACE_TELEMETRY_SLOTS;
+        } else if (_role == Role::Rx) {
+            _uplinkGraceSlotsRemaining = FAILSAFE_GRACE_UPLINK_SLOTS;
+        }
+    }
+
+    // Keep PFD/phase lock through failsafe when hop lock is retained — resetting here
+    // was forcing nominal cadence and breaking quick recovery on the bench.
+    if (_role == Role::Rx && prevState == LinkState::Connected &&
+        _state == LinkState::Failsafe && !_locked) {
+        _rxTimingResetPending = true;
     }
 
     // Reset tick flags

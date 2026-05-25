@@ -348,6 +348,10 @@ If uplink works but TX telemetry is zero/stale:
 2. Check RX status is Connected and RX PHY counters are stable.
 3. Check TX PHY CRC/timeout counters; downlink can fail independently of uplink.
 4. Verify telemetry ratio/rate config is the same on both sides.
+5. On D250, TX defers arming telemetry RX until `interval/8 + TX_GUARD` after the
+   telemetry slot boundary (RX downlink turnaround). If `tlmOk` climbs but `LQdown`
+   stays low, check that uplink slots are not aborting an active telemetry listen
+   (TX waits for `_tlmListenUntilUs` before the next uplink TX).
 
 If flight-controller telemetry is missing in a CRSF RC controller:
 
@@ -385,6 +389,11 @@ PFD/timing lock guidance:
 - FHSS when locked: RX hop index is tick-derived (same as TX), not a free-running counter — bench `fhss` and `exp` should match on both boards at the same wall time when clocks are aligned.
 - PFD during acquisition: hold nominal timer until **Connected**; do not nudge from Sync beacons (different airtime). See [../hardware/bench-link-acquisition-retrospective.md](../hardware/bench-link-acquisition-retrospective.md).
 - TX must not adjust its master clock based on downlink telemetry.
+- TX failsafe counts **consecutive missed telemetry slots** (`_consecutiveMissedTelemetry`),
+  not raw scheduler ticks. At F1000 (tlm 1:64), do not expect Failsafe within 10 ms of the
+  last downlink — the next telemetry slot may be ~54 ms later.
+- RX holds the hardware timer at nominal `intervalUs` whenever `state != Connected`; PFD
+  state is cleared on Connected→Failsafe so a biased timer cannot block re-acquire.
 
 Symptoms of timing sign problems:
 

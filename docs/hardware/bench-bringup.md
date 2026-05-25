@@ -55,6 +55,22 @@ cmake --build build --target xlrs_tx xlrs_rx
 If GP10 is confirmed in the serial boot line but the LED stays dark, try
 `-DXLRS_STATUS_LED_ACTIVE_LOW=OFF` for active-high wiring.
 
+## Rate selection
+
+Flash-backed default rate is **D250** (250 Hz, 4000 µs tick, index 2 in `kRates`).
+The name follows ELRS-style labeling; there is no separate `F250` row — use **D250**.
+
+| Rate | Interval | Why use it |
+| --- | --- | --- |
+| F1000 | 1000 µs | Lowest latency; tightest slot budget |
+| **D250** | 4000 µs | **Default** — 4× longer slots, more margin for async PHY + PFD on bench |
+| F500 | 2000 µs | Middle ground |
+
+Both boards must match (stored in RF config flash). After a firmware update that bumps
+`RF_CONFIG_VERSION`, invalid flash config is replaced with defaults on first boot.
+
+Confirm D250 on the wire: `tmr:4000/4000` in status lines (nominal interval).
+
 ## Link diagnostics (USB status lines)
 
 Both TX and RX append tick/FHSS/timer fields to the periodic `[TX STATUS]` /
@@ -68,7 +84,8 @@ When debugging FHSS alignment on the bench:
 2. On RX, `fhss` and `exp` should always match when locked; wild `fhss` with
    `lock:1` was the pre-fix symptom of a tick-derived hop index diverging from TX.
 3. Watch `pfd` on RX — it should stay small (tens of µs) once the PI loop has
-   converged; large sustained error means phase lock is failing.
+   converged; large sustained error means phase lock is failing. While **Connected**,
+   `adj` shows the last timer nudge and `n` counts PFD updates (should climb).
 4. Compare TX `tick`/`fhss` with RX — they track once acquisition succeeds.
 
 Clock sync summary: TX is the master timer; RX snaps its tick from every Sync

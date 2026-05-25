@@ -81,7 +81,10 @@ private:
 class Link {
 public:
     static constexpr uint8_t  RC_CHANNELS   = 8;   // M3: 8 packed 11-bit channels / RC frame
-    static constexpr uint16_t FAILSAFE_MISS = 10;  // consecutive missed uplink slots → Failsafe
+    static constexpr uint16_t FAILSAFE_MISS = 10;  // consecutive missed uplink (RX) or telemetry (TX) slots
+    // Post-connect grace: flaky bench links need time for PFD/phase to converge before failsafe.
+    static constexpr uint16_t FAILSAFE_GRACE_TELEMETRY_SLOTS = 96;
+    static constexpr uint16_t FAILSAFE_GRACE_UPLINK_SLOTS    = 48;
 
     void begin(Role role, const uint8_t uid[8], uint8_t rateIndex, int8_t maxPowerDbm = 10, bool useDynamicPower = true);
     void setRegion(FhssRegion region) { _region = region; }
@@ -99,7 +102,9 @@ public:
     bool takeReceivedBindUid(uint8_t uid[LINK_UID_SIZE]);
     // RX: one-shot TX tick from the latest acquisition Sync (scheduler resync).
     bool takeSyncResyncTick(uint32_t& txTick, bool& resetPfd);
-    void snapSchedulerTick(uint32_t tick);
+    // RX: set when Connected→Failsafe so the scheduler restores nominal timer/PFD state.
+    bool takeRxTimingResetPending();
+    void snapSchedulerTick(uint32_t txTick, uint32_t localSchedulerTick);
 
     void onTick(uint32_t tick);
     float freqForTick(uint32_t tick) const;
@@ -107,7 +112,14 @@ public:
     bool getTxPayload(uint32_t tick, uint16_t pos, uint8_t* outBuf, uint8_t& outLen);
     bool processRxPayload(uint32_t tick, uint16_t pos, const uint8_t* data, uint8_t len,
                           int16_t rssi, int8_t snr, uint32_t rxPacketStartUs = 0);
-    void service(uint32_t tick);   // timing-independent timeout, LQ and state machine updater
+    void service(uint32_t tick, bool recordLq = true);
+    void refreshRxPosForTick(uint32_t localTick);
+#if defined(XLRS_PICO_SDK)
+    void advanceHwUplinkLqSlot(uint32_t tick);
+    void noteHwUplinkDecode(uint32_t tick, bool received);
+    void advanceHwTelemetryLqSlot(uint32_t tick);
+    void noteHwTelemetryDecode(uint32_t tick, bool received);
+#endif
     void notePhyRecovery(bool success);
     void noteMissedDeadlines(uint16_t n);  // scheduler fell behind by n slots (saturating count)
     void noteSchedulerOverrun(uint16_t n); // scheduler skipped stale slots; RX must re-acquire
@@ -124,6 +136,7 @@ public:
     uint32_t         lastRxTick() const { return _lastRxTick; }
     uint16_t         rxPos() const { return _rxPos; }
     uint16_t         txPos(uint32_t tick) const { return (uint16_t)((tick / hopInterval()) % _fhss.count()); }
+    uint32_t         effectiveTxTick(uint32_t localTick) const;
     uint8_t          tlmRatioDenom() const { return _rate.tlmRatioDenom; }
     uint16_t         syncEveryNTicks() const { return _fhss.count() * hopInterval(); }
     uint16_t         syncWord() const { return _syncWord; }
@@ -182,6 +195,8 @@ private:
     bool         _gotValidTelemetryThisTick = false;
     uint32_t     _consecutiveMissedUplinks = 0;
     uint32_t     _consecutiveMissedTelemetry = 0;
+    uint16_t     _telemetryGraceSlotsRemaining = 0;
+    uint16_t     _uplinkGraceSlotsRemaining = 0;
     StubbornSender   _tlmSender;
     StubbornReceiver _tlmReceiver;
     uint8_t          _receivedAckSeq = 0;
@@ -195,6 +210,17 @@ private:
     bool             _receivedBindUidReady = false;
     bool             _syncResyncPending = false;
     uint32_t         _pendingTxTickResync = 0;
+    bool             _rxTimingResetPending = false;
+#if defined(XLRS_PICO_SDK)
+    uint32_t         _hwUplinkLqTick = UINT32_MAX;
+    bool             _hwUplinkLqClosed = true;
+    uint32_t         _hwUplinkDecodeTick = UINT32_MAX;
+    bool             _hwUplinkDecodeOk = false;
+    uint32_t         _hwTlmLqTick = UINT32_MAX;
+    bool             _hwTlmLqClosed = true;
+    uint32_t         _hwTlmDecodeTick = UINT32_MAX;
+    bool             _hwTlmDecodeOk = false;
+#endif
 };
 
 } // namespace xlrs

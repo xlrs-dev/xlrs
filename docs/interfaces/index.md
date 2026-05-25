@@ -304,7 +304,7 @@ Defaults:
 | Field | Default |
 | --- | --- |
 | Region | US |
-| Rate | `F1000` |
+| Rate | `D250` (index 2, 250 Hz) |
 | Max power | 10 dBm |
 | Failsafe | `NoPulses` |
 | Dynamic power | Enabled |

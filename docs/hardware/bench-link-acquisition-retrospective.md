@@ -13,7 +13,7 @@ Hardware used throughout:
 | Binding phrase | `Kikobot-02` |
 | Link UID | `0x72E16DB67E0C894D` |
 | Sync word | `0x894D` |
-| Rate | F1000 (1000 µs tick, hop every 4 packets) |
+| Rate | F1000 (1000 µs tick, hop every 4 packets) — **default is now D250** (see `RfConfig.h`) |
 | Bench distance | ~1 m, no RC handset (TX sends midstick RC autonomously) |
 | USB serial (typical) | TX `/dev/cu.usbmodem1201`, RX `/dev/cu.usbmodem1101` |
 | Flash by serial | TX `E4654C16430F4223`, RX `E4654C16432C3B22` |
@@ -201,6 +201,81 @@ TX shows **State 4 (Failsafe)** on a bench TX with no RC handset — expected, b
 TX failsafe is driven by uplink/controller path. RF downlink still works (`LQdown: 50%`,
 `RSSI: -67 dBm`, `dlrx:29`).
 
+### Pass 7 — Post-connection PFD validation (2026-05-25)
+
+**Goal:** Confirm the PFD/PI loop runs only after **Connected** and nudges the RX timer
+from RC/telemetry packet timing (not Sync beacons).
+
+**Host tests** (`test/timing_tests.cpp`, 11/11 native tests pass):
+
+- `test_scheduler_pfd_skipped_until_connected` — `pfdUpdateCount == 0` and `tmr == 4000`
+  on every tick before the first **Connected** transition.
+- `test_scheduler_timing_pfd_lock` — after **Connected**, with TX clock drifting +12 µs/tick,
+  RX `pfdUpdateCount` increases, phase error stays within ±20 µs, and simulated timer period
+  converges to ~4012 µs.
+
+**Bench diagnostics added:** RX status now prints `adj:<us>` (last timer correction) and
+`n:<count>` (PFD updates since boot). These make PFD activity visible even when the 500 ms
+status line misses a short **Connected** window.
+
+**Bench capture** (fresh flash, `Kikobot-02`, ~1 m, no handset):
+
+| Observation | Interpretation |
+| --- | --- |
+| Brief **Connected** then **Failsafe** within ~2–4 s of boot | Same RC-decode fragility as pass 6; status prints often land in State 4 |
+| `n:19` frozen in State 4 | PFD ran **19 times while Connected** before failsafe — post-connection path is live |
+| `adj:-52us` `tmr:948/1000` | Timer was nudged by PFD (−52 µs correction → 948 µs period) |
+| `pfd:-216us` in Failsafe | Stale last phase error; PFD does not update in Failsafe |
+| Pass 6 stable log | `State:3 … pfd:0us tmr:1000/1000 out:1` — PFD converged when link stayed up |
+
+Example (Failsafe, but PFD already ran):
+
+```text
+[RX STATUS] State: 4 … lock:1 sync:1 … pfd:-216us adj:-52us n:19 tmr:948/1000 | out:0 crsf_rc:87 age:359ms
+```
+
+**How to validate on bench:**
+
+1. Flash both ends; start `scripts/monitor.sh both` within 1 s of reboot.
+2. While **State: 3**, watch `n` increment every ~500 ms (roughly one status line per
+   batch of RC decodes) and `adj` vary in the ± tens of µs range.
+3. Stable link: `pfd` small, `tmr` near `1000/1000`, `n` climbing, `out:1`.
+4. If `n` stays `0` in State 3, PFD is not running — check Connected gating in
+   `RfScheduler::onRxDone()`.
+
+### Pass 8 — Link stability: TX failsafe bug + RX timer recovery (2026-05-25)
+
+**Why TX dropped to Failsafe (root cause):**
+
+TX failsafe used **`tick − lastRxTick ≥ 10`** (10 ms at F1000). Downlink telemetry
+only occurs on **1-in-64** ticks (`tlmRatioDenom = 64`), so the next telemetry slot can
+be **~54 ms** after the last one. TX was declaring Failsafe in the gap **before the next
+valid downlink slot**, even though nothing was wrong.
+
+RX already counted **consecutive missed uplink slots** correctly; TX did not mirror that
+for telemetry slots.
+
+**Why the link felt flaky end-to-end:**
+
+1. TX entered Failsafe spuriously → state churn on the bench pair.
+2. RX entered Failsafe after ~10 missed RC uplink slots (~10 ms of decode loss).
+3. While briefly Connected, PFD could bias the RX timer (e.g. `tmr:948/1000`); after
+   Failsafe the biased timer was not always restored, making RC re-acquire harder.
+
+**Fixes:**
+
+| Fix | File |
+| --- | --- |
+| TX failsafe counts `_consecutiveMissedTelemetry` (slot-aware) | `Link.cpp` |
+| RX holds nominal timer whenever `state != Connected` | `RfScheduler.cpp` |
+| Reset PFD + timer on RX Connected→Failsafe | `Link.cpp`, `RfScheduler.cpp` |
+| Clamp PFD per-period adjustment to `interval/16` | `Pfd.h` |
+| Test: `test_link_tx_failsafe_counts_telemetry_slots` | `link_tests.cpp` |
+
+**After fix (late capture):** RX in Failsafe shows `tmr:1000/1000` (timer restored);
+`n:8` confirms PFD ran during a short Connected window at boot. Re-flash both boards and
+monitor from boot to validate sustained **State: 3** / **out:1**.
+
 ---
 
 ## Diagnostic field cheat sheet
@@ -214,6 +289,8 @@ Use these on every bench session (see [serial-logs.md](../troubleshooting/serial
 | `skew` | `0` (Sync beacon `fhssIndex` matches `txPos(txTick)`) |
 | `tmr` | `1000/1000` at F1000 during acquisition; small delta after Connected OK |
 | `pfd` | Small tens of µs once Connected; `0us` during acquisition is normal |
+| `adj` | Last PFD timer correction in µs (non-zero while Connected and PFD is tracking) |
+| `n` | Monotonic count of PFD updates **since boot** — increments only while Connected on non-Sync decodes |
 | RX `out` | `1` when State 3 |
 | RX `crsf_rc age` | Low ms (actively emitting CRSF) |
 | RX `LQ` | Non-zero when RC decodes |
@@ -236,14 +313,39 @@ TX_PORT=/dev/cu.usbmodem1201 RX_PORT=/dev/cu.usbmodem1101 scripts/monitor.sh bot
 Allow 5–10 s after boot for acquisition. Expect RX **State: 3**, **out:1** within ~30 s
 at 1 m separation.
 
+For a **180 s steady-state LQ bench** (D250, `Kikobot-02`, after connect):
+
+```bash
+tools/bench-run-capture.sh tools/bench-capture-victory
+```
+
+The script flashes both boards, waits for **State: 3**, then captures 180 s of status
+lines. Target on both sides: **LQ / LQdown ≥ 70%** sustained (May 2026 bench pass below).
+
+---
+
+### Pass 8 — D250 >70% LQ both sides (May 2026, uncommitted at doc write)
+
+**Changes:** Hardware async LQ ledger (`advanceHw*LqSlot` / `noteHw*Decode` with decode
+tick attribution); deferred telemetry RX arm at `interval/8 + TX_GUARD`; extended
+telemetry listen window; RF-core poll burst; connect-gated bench capture.
+
+| Phase | Representative log |
+| --- | --- |
+| **Target** | RX **LQ ≥ 70%**, TX **LQdown ≥ 70%** on D250 at ~1 m |
+| **After** | `[RX STATUS] State: 3 LQ: 77% ... lock:1 sync:1 ... out:1` (≥70% on 217/361 status samples, best run 29) |
+| **After** | `[TX STATUS] State: 3 LQdown: 84% ... tlmOk:288 dlrx:*` (≥70% on 68/180 samples, best run 42) |
+
+Capture dir: `tools/bench-capture-victory/` (180 s after confirmed connect).
+
 ---
 
 ## Follow-up work
 
 Tracked in GitHub issue [#8](https://github.com/xlrs-dev/xlrs/issues/8). Summary:
 
-1. **Re-enable PFD during Connected** — validate it converges without pulling timer
-   back to ~953 µs; consider clamping max adjustment.
+1. **Post-connection PFD** — host tests + bench `n`/`adj` fields confirm the loop runs
+   after Connected; tune convergence when link drops quickly (timer can stay biased in Failsafe).
 2. **TX bench failsafe** — TX reaches Failsafe without handset; consider bench mode
    or downlink-only Connected criteria for TX status/LED.
 3. **Status LED** — verify GP10 active-low wiring; user reported no blinks early in

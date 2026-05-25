@@ -281,7 +281,7 @@ static void app_core_loop() {
         g_crsfLinkStatsOut++;
         const uint32_t fcAge = g_lastFcCrsfFrameMs == 0 ? 0 : now - g_lastFcCrsfFrameMs;
         const uint32_t rcOutAge = g_lastCrsfRcOutMs == 0 ? 0 : now - g_lastCrsfRcOutMs;
-        printf("[RX STATUS] State: %d LQ: %u%% RSSI: %d dBm | PHY timeouts: %lu CRC: %lu Phase: %s/%s LastOp: 0x%02X LastOk: 0x%02X LastFailOp: 0x%02X | lock:%u sync:%u tick:%lu fhss:%u exp:%u skew:%d pfd:%ldus tmr:%lu/%lu | out:%u crsf_rc:%lu age:%lums stats:%lu fc:%lu fcq:%lu fcdrop:%lu fcage:%lums qdrop:%lu%s\n",
+        printf("[RX STATUS] State: %d LQ: %u%% RSSI: %d dBm | PHY timeouts: %lu CRC: %lu Phase: %s/%s LastOp: 0x%02X LastOk: 0x%02X LastFailOp: 0x%02X | lock:%u sync:%u tick:%lu fhss:%u exp:%u skew:%d pfd:%ldus adj:%ldus n:%lu tmr:%lu/%lu | out:%u crsf_rc:%lu age:%lums stats:%lu fc:%lu fcq:%lu fcdrop:%lu fcage:%lums qdrop:%lu%s\n",
                (int)state, (unsigned)rfData.stats.lqUp, (int)rfData.stats.rssiDbm,
                (unsigned long)g_phy.spiTimeouts(), (unsigned long)g_phy.crcErrors(),
                xlrs::Sx1280NativePhy::diagPhaseName(g_phy.lastDiagPhase()),
@@ -296,6 +296,8 @@ static void app_core_loop() {
                (unsigned)rfData.linkDiag.fhssExpected,
                (int)rfData.linkDiag.syncFhssSkew,
                (long)rfData.linkDiag.pfdPhaseUs,
+               (long)rfData.linkDiag.pfdAdjUs,
+               (unsigned long)rfData.linkDiag.pfdUpdates,
                (unsigned long)rfData.linkDiag.timerIntervalUs,
                (unsigned long)rfData.linkDiag.nomIntervalUs,
                outputActive ? 1u : 0u,
@@ -360,6 +362,10 @@ static void rf_core_main() {
     }
 
     while (true) {
+        for (int pollBurst = 0; pollBurst < 4; ++pollBurst) {
+            g_scheduler.poll();
+        }
+
         static bool bindScanning = false;
         static uint32_t nextBindScanSwitchMs = xlrs::hal::nowMs() + BIND_SCAN_NORMAL_WINDOW_MS;
         static bool bindPacketReceived = false;
@@ -407,8 +413,6 @@ static void rf_core_main() {
                 }
             }
         }
-
-        g_scheduler.poll();
 
         static uint32_t lastServiceTick = 0;
         uint32_t currentTick = g_scheduler.processedTick();

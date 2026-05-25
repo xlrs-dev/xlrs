@@ -48,6 +48,9 @@ static void test_scheduler_timing_pfd_lock() {
     }
     TEST_ASSERT_TRUE(env.rx.state() == LinkState::Connected);
 
+    uint32_t pfdUpdatesAtConnect = env.rxSched.pfdUpdateCount();
+    int32_t phaseAtConnect = env.rxSched.pfdPhaseErrorUs();
+
     for (uint32_t t = 51; t <= 450; ++t) {
         txClock += 4012;
         rxClock += getSimulatedIntervalUs();
@@ -56,7 +59,39 @@ static void test_scheduler_timing_pfd_lock() {
         simTick(env, t);
     }
 
+    TEST_ASSERT_TRUE(env.rx.state() == LinkState::Connected);
     TEST_ASSERT_INT_WITHIN(2, 4012, getSimulatedIntervalUs());
+    TEST_ASSERT_TRUE(env.rxSched.pfdUpdateCount() > pfdUpdatesAtConnect);
+    TEST_ASSERT_INT_WITHIN(20, 0, env.rxSched.pfdPhaseErrorUs());
+    TEST_ASSERT_INT_WITHIN(20, 0, phaseAtConnect);
+}
+
+static void test_scheduler_pfd_skipped_until_connected() {
+    uint8_t uid[LINK_UID_SIZE];
+    linkUidFromPhrase("Kikobot-02", uid);
+
+    SimEnvironment env;
+    env.setup(uid, 2);
+
+    uint32_t txClock = 100000;
+    uint32_t rxClock = 100000;
+    setSimulatedTimeUs(rxClock);
+    bool sawConnected = false;
+
+    for (uint32_t t = 1; t <= 50; ++t) {
+        txClock += 4000;
+        rxClock += getSimulatedIntervalUs();
+        env.txPhy.setClockUs(txClock);
+        setSimulatedTimeUs(rxClock);
+        simTick(env, t);
+        if (env.rx.state() == LinkState::Connected) {
+            sawConnected = true;
+        } else {
+            TEST_ASSERT_EQUAL_UINT32(0, env.rxSched.pfdUpdateCount());
+            TEST_ASSERT_EQUAL_UINT32(4000, getSimulatedIntervalUs());
+        }
+    }
+    TEST_ASSERT_TRUE(sawConnected);
 }
 
 void setUp() {}
@@ -67,5 +102,6 @@ int main() {
     RUN_TEST(test_pfd_step_settles);
     RUN_TEST(test_pfd_nulls_drift);
     RUN_TEST(test_scheduler_timing_pfd_lock);
+    RUN_TEST(test_scheduler_pfd_skipped_until_connected);
     return UNITY_END();
 }

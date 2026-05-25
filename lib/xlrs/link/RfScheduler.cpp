@@ -59,7 +59,7 @@ bool RfScheduler::begin(IRadioPhy* phy, Link* link, uint8_t rateIndex) {
 #if defined(XLRS_PICO_SDK)
     // On hardware, run a true Tiny ISR: latch the fire timestamp, then bump the event counter.
     // The timestamp is captured HERE (in ISR context) — not later in onTick() — so the PFD's
-    // phase reference is the true tick time, free of task wake-latency jitter (docs/troubleshooting/index.md §1.1).
+    // phase reference is the true tick time, free of task wake-latency jitter.
     if (_timer) {
         _timer->begin(_rate.intervalUs, []() {
             if (s_activeScheduler) {
@@ -115,18 +115,27 @@ void RfScheduler::onTick(uint32_t tick) {
 
     _tick = tick;
 #if defined(XLRS_PICO_SDK)
-    // Use the ISR-latched fire time (set in the timer callback above), not nowUs() sampled here:
-    // this slot is being processed some wake-latency after the timer actually fired.
     _tickStartUs = _lastTickFireUs.load(std::memory_order_acquire);
 #else
-    // Sim/host: tests call onTick() directly with the clock already set, so nowUs() IS the
-    // expected tick time. (The timer ISR path isn't exercised for these direct calls.)
     _tickStartUs = _timer ? _timer->nowUs() : 0;
 #endif
 
     // 1. Advance timing/hop position at the start of the tick slot.
     _link->onTick(tick);
     syncPhyIdentity();
+
+    if (_link->role() == Role::Rx) {
+        if (_link->takeRxTimingResetPending()) {
+            _pfd.begin(_rate.intervalUs);
+            _lastPfdAdjUs = 0;
+        }
+        // Hold nominal cadence only before FHSS lock. While Connecting/Failsafe with lock,
+        // PFD and Sync phase-resync own the timer interval — resetting here was undoing
+        // every PFD nudge each tick (n:1 on the bench, telemetry window drift).
+        if (!_link->isLocked() && _timer) {
+            _timer->setIntervalUs(_rate.intervalUs);
+        }
+    }
 
     // Dynamically adopt rate changes initiated by Link after onTick(), because
     // synchronized rate switches are applied exactly on the slot boundary.
@@ -160,6 +169,20 @@ void RfScheduler::onTick(uint32_t tick) {
 
     if (_link->role() == Role::Tx) {
         if (_currentSlot == Slot::Sync || _currentSlot == Slot::Uplink) {
+#if defined(XLRS_PICO_SDK)
+            // After a telemetry slot, wait out any extended listen window before uplink TX
+            // so downlink can land without aborting RX — but still send this slot's RC frame.
+            if (_currentSlot == Slot::Uplink && tick > 0 &&
+                _link->slotForTick(tick - 1) == Slot::Telemetry) {
+                if (telemetryListenActive() && _timer) {
+                    const int32_t waitUs = (int32_t)(_tlmListenUntilUs - _timer->nowUs());
+                    if (waitUs > 0) {
+                        hal::sleepUs((uint32_t)waitUs);
+                    }
+                    _tlmListenUntilUs = 0;
+                }
+            }
+#endif
             uint8_t buf[OTA16_LEN];
             uint8_t len = 0;
             uint16_t pos = _link->txPos(tick);
@@ -176,16 +199,38 @@ void RfScheduler::onTick(uint32_t tick) {
                 }
             }
         } else if (_currentSlot == Slot::Telemetry) {
-            if (_phy) {
-                _armedTick = tick; _armedPos = _link->txPos(tick); _armedTickStartUs = _tickStartUs;
-                _phy->startRx(freq);
-            }
+            _armedTick = tick;
+            _armedPos = _link->txPos(tick);
+            _armedTickStartUs = _tickStartUs;
+#if defined(XLRS_PICO_SDK)
+            _link->advanceHwTelemetryLqSlot(tick);
+#endif
+            _pendingTlmRx = true;
+            _pendingTlmRxFreq = freq;
+            _pendingTlmArmedTick = tick;
+            _pendingTlmArmedPos = _armedPos;
+            _pendingTlmArmedTickStartUs = _tickStartUs;
+            tryArmTelemetryRx();
         }
     } else {
         // RX Role
         if (_currentSlot == Slot::Sync || _currentSlot == Slot::Uplink) {
             if (_phy) {
-                _armedTick = tick; _armedPos = _link->rxPos(); _armedTickStartUs = _tickStartUs;
+                _armedTick = tick;
+                _armedPos = _link->isLocked()
+                            ? _link->txPos(_link->effectiveTxTick(tick))
+                            : _link->rxPos();
+                _armedTickStartUs = _tickStartUs;
+#if defined(XLRS_PICO_SDK)
+                if (_link->isLocked() && _currentSlot == Slot::Uplink) {
+                    _link->advanceHwUplinkLqSlot(tick);
+                }
+                const uint32_t nowUs = _timer ? _timer->nowUs() : _tickStartUs;
+                const int32_t elapsed = (int32_t)(nowUs - _tickStartUs);
+                if (elapsed >= 0 && elapsed < (int32_t)TX_GUARD_US) {
+                    hal::sleepUs((uint32_t)(TX_GUARD_US - (uint32_t)elapsed));
+                }
+#endif
                 _phy->startRx(freq);
             }
         } else if (_currentSlot == Slot::Telemetry) {
@@ -196,8 +241,13 @@ void RfScheduler::onTick(uint32_t tick) {
                 if (_link->getTxPayload(tick, pos, buf, len)) {
                     if (_phy) {
 #if defined(XLRS_PICO_SDK)
+                        uint32_t delayUs = (_rate.intervalUs / 8) + TX_GUARD_US;
                         uint32_t latency = _phy->txLatencyUs();
-                        uint32_t delayUs = (TX_GUARD_US > latency) ? (TX_GUARD_US - latency) : 0;
+                        if (delayUs > latency) {
+                            delayUs -= latency;
+                        } else {
+                            delayUs = 0;
+                        }
                         if (delayUs > 0) {
                             hal::sleepUs(delayUs);
                         }
@@ -210,52 +260,143 @@ void RfScheduler::onTick(uint32_t tick) {
     }
 }
 
+void RfScheduler::applyLockedRxPhaseResync(uint32_t packetStartUs) {
+#if defined(XLRS_PICO_SDK)
+    if (!_timer || !_link || _link->role() != Role::Rx || !_link->isLocked()) {
+        return;
+    }
+    if (_link->slotForTick(_armedTick) == Slot::Sync) {
+        // Sync uses takeSyncResyncTick() for hard tick snap; still track phase between beacons.
+    }
+    // TX airtime begins TX_GUARD after the ISR-latched slot boundary; both peers schedule from
+    // tickStartUs so PFD expects arrival at that offset, not at the raw boundary.
+    const int32_t offsetUs =
+        (int32_t)packetStartUs - (int32_t)(_armedTickStartUs + TX_GUARD_US);
+    const int32_t adjUs = _pfd.update(offsetUs);
+    _lastPfdAdjUs = adjUs;
+    _pfdUpdateCount++;
+    // Track phase only — timer resync is reserved for Sync beacons (hard snap).
+    _timer->setIntervalUs(_rate.intervalUs);
+#else
+    (void)packetStartUs;
+#endif
+}
+
+bool RfScheduler::telemetrySlotStillOpen() const {
+    if (!_pendingTlmRx) {
+        return false;
+    }
+    const uint32_t nowUs = _timer ? _timer->nowUs() : 0;
+    const int32_t elapsed = (int32_t)(nowUs - _pendingTlmArmedTickStartUs);
+    return elapsed >= 0 && elapsed < (int32_t)(_rate.intervalUs + (_rate.intervalUs / 2));
+}
+
 void RfScheduler::onRxDone() {
     if (!_phy || !_link) return;
+    const bool tlmListen = (_link->role() == Role::Tx &&
+                            (_link->slotForTick(_armedTick) == Slot::Telemetry ||
+                             telemetryListenActive()));
     RxPacket pkt;
     if (_phy->readRx(pkt)) {
+        if (tlmListen) {
+            _tlmRxPhyOkCount++;
+        }
         // Decode/authenticate against the slot the radio was ARMED with (not the current tick),
         // so a packet drained after a tick advance is still matched to its own (tick,pos) nonce
         // and PFD reference. More reachable now that poll() can fast-forward the tick.
         uint32_t airtime = (pkt.len <= 8) ? _rate.airtime8Us : _rate.airtime16Us;
         uint32_t packetStartUs = pkt.timestampUs - airtime;
-#if defined(XLRS_PICO_SDK)
-        packetStartUs -= TX_GUARD_US;
-#endif
         const bool success = _link->processRxPayload(_armedTick, _armedPos, pkt.data, pkt.len, pkt.rssiDbm, pkt.snr,
                                                      packetStartUs);
         if (success) {
+            const bool isSyncSlot =
+                _link->slotForTick(_armedTick) == Slot::Sync;
+            if (_link->role() == Role::Rx && _link->isLocked() && !isSyncSlot) {
+                applyLockedRxPhaseResync(packetStartUs);
+            }
+        }
+        if (tlmListen) {
+            if (success) {
+                _tlmRxDecodeOkCount++;
+                _tlmListenUntilUs = 0;
+                _tlmDecodeSlotTick = 0;
+            } else {
+                _tlmRxDecodeFailCount++;
+#if defined(XLRS_PICO_SDK)
+                if (_link->role() == Role::Tx) {
+                    const uint32_t tlmTick =
+                        _tlmDecodeSlotTick ? _tlmDecodeSlotTick : _armedTick;
+                    if (_link->slotForTick(tlmTick) == Slot::Telemetry) {
+                        _link->noteHwTelemetryDecode(tlmTick, false);
+                    }
+                }
+#endif
+            }
+        }
+#if defined(XLRS_PICO_SDK)
+        if (!success && _link->role() == Role::Rx && _link->isLocked() &&
+            _link->slotForTick(_armedTick) == Slot::Uplink) {
+            _link->noteHwUplinkDecode(_armedTick, false);
+        }
+#endif
+        if (success) {
+#if defined(XLRS_PICO_SDK)
+            if (_link->role() == Role::Rx) {
+                _link->refreshRxPosForTick(_armedTick);
+                if (_link->isLocked() && _link->slotForTick(_armedTick) == Slot::Uplink) {
+                    _link->noteHwUplinkDecode(_armedTick, true);
+                }
+                _link->service(_armedTick, false);
+            } else if (_link->role() == Role::Tx && tlmListen) {
+                const uint32_t tlmTick =
+                    _tlmDecodeSlotTick ? _tlmDecodeSlotTick : _armedTick;
+                if (_link->slotForTick(tlmTick) == Slot::Telemetry) {
+                    _link->noteHwTelemetryDecode(tlmTick, true);
+                }
+                _link->service(_armedTick, false);
+            }
+#else
+            if (_link->role() == Role::Rx) {
+                _link->refreshRxPosForTick(_armedTick);
+            }
+            // Sim: service() runs from simTick() after onTick completes.
+#endif
             uint32_t txTick = 0;
             bool resetPfd = false;
             if (_link->role() == Role::Rx && _link->takeSyncResyncTick(txTick, resetPfd)) {
-                _tick = txTick;
-                _link->snapSchedulerTick(txTick);
-                (void)resetPfd;
-                _pfd.begin(_rate.intervalUs);
+                _link->snapSchedulerTick(txTick, _armedTick);
+                if (resetPfd) {
+                    _pfd.begin(_rate.intervalUs);
+                }
                 if (_timer) {
-                    _timer->setIntervalUs(_rate.intervalUs);
+                    if (resetPfd) {
+                        _timer->setIntervalUs(_rate.intervalUs);
+                    }
+                    int32_t offsetUs =
+                        (int32_t)packetStartUs - (int32_t)(_armedTickStartUs + TX_GUARD_US);
+                    const int32_t half = (int32_t)_rate.intervalUs / 2;
+                    while (offsetUs > half) offsetUs -= (int32_t)_rate.intervalUs;
+                    while (offsetUs < -half) offsetUs += (int32_t)_rate.intervalUs;
+                    const int32_t nextUs =
+                        (int32_t)(_armedTickStartUs + _rate.intervalUs) - offsetUs;
+                    _timer->resyncNextTickUs((uint32_t)nextUs);
                 }
             }
-            // Hardware RX is async: the packet often arrives after service() already
-            // ran for _armedTick in an earlier poll iteration. Re-run service now
-            // so state/LQ updates see the decoded payload flags.
-#if defined(XLRS_PICO_SDK)
-            _link->service(_armedTick);
-#endif
-            // Hold nominal cadence during acquisition; PFD nudges from Sync biased the
-            // timer (~953 µs) and desynced tick numbers from TX, breaking RC nonce match.
-            if (_link->role() == Role::Rx && _link->state() == LinkState::Connected &&
+            // Sim: flags are consumed by SimEnvironment::simTick() after onTick returns.
+#if !defined(XLRS_PICO_SDK)
+            if (_link->role() == Role::Rx && _link->isLocked() &&
                 _link->slotForTick(_armedTick) != Slot::Sync) {
-#if defined(XLRS_PICO_SDK)
-                int32_t offsetUs = (int32_t)packetStartUs - (int32_t)_armedTickStartUs;
-#else
                 int32_t offsetUs = (int32_t)(pkt.timestampUs - airtime) - (int32_t)_armedTickStartUs;
-#endif
                 int32_t adjUs = _pfd.update(offsetUs);
+                _lastPfdAdjUs = adjUs;
+                _pfdUpdateCount++;
                 if (_timer) {
                     _timer->setIntervalUs(_rate.intervalUs + adjUs);
                 }
-            } else if (_link->role() == Role::Rx && _timer) {
+            } else
+#endif
+            if (_link->role() == Role::Rx && _timer && !_link->isLocked()) {
+                _lastPfdAdjUs = 0;
                 _timer->setIntervalUs(_rate.intervalUs);
             }
         }
@@ -263,7 +404,52 @@ void RfScheduler::onRxDone() {
 }
 
 void RfScheduler::onTxDone() {
-    // No-op or minor timing/telemetry tracking.
+    tryArmTelemetryRx();
+}
+
+void RfScheduler::tryArmTelemetryRx() {
+    if (!_pendingTlmRx || !_phy || !_link || _link->role() != Role::Tx) {
+        return;
+    }
+    if (!telemetrySlotStillOpen()) {
+        _pendingTlmRx = false;
+        _tlmRxArmAtUs = 0;
+        _tlmRxArmDroppedCount++;
+        return;
+    }
+    if (_phy->txInProgress()) {
+        _tlmRxArmDeferredCount++;
+        return;
+    }
+#if defined(XLRS_PICO_SDK)
+    const uint32_t nowUs = _timer ? _timer->nowUs() : 0;
+    const uint32_t downlinkEarliestUs =
+        _pendingTlmArmedTickStartUs + (_rate.intervalUs / 8) + TX_GUARD_US;
+    if (nowUs < downlinkEarliestUs) {
+        _tlmRxArmAtUs = downlinkEarliestUs;
+        return;
+    }
+#endif
+    _tlmRxArmAtUs = 0;
+    _armedTick = _pendingTlmArmedTick;
+    _armedPos = _pendingTlmArmedPos;
+    _armedTickStartUs = _pendingTlmArmedTickStartUs;
+    _tlmDecodeSlotTick = _pendingTlmArmedTick;
+    _phy->startRx(_pendingTlmRxFreq);
+    _pendingTlmRx = false;
+    if (_timer) {
+        const uint32_t listenUs =
+            (_rate.intervalUs / 2) + _rate.airtime16Us + TX_GUARD_US + 800;
+        _tlmListenUntilUs = _timer->nowUs() + listenUs;
+    }
+    _tlmRxArmedCount++;
+}
+
+bool RfScheduler::telemetryListenActive() const {
+    if (!_timer || _tlmListenUntilUs == 0) {
+        return false;
+    }
+    return (int32_t)(_timer->nowUs() - _tlmListenUntilUs) < 0;
 }
 
 Slot RfScheduler::currentSlot() const {
@@ -331,23 +517,33 @@ void RfScheduler::poll() {
         if (diff > MAX_TICK_CATCHUP) {
             // Core 1 fell badly behind (long stall). Replaying every backlogged slot would
             // burst blocking SPI + TX_GUARD sleeps for stale FHSS positions and keep us behind.
-            // Fast-forward to the latest tick instead: TX FHSS is tick-derived so a jump stays
-            // correct, and an RX this far behind has lost its slot lock and re-acquires from the
-            // next Sync beacon. Record the gap as missed deadlines so the overrun is observable.
-            if (_link) _link->noteSchedulerOverrun(diff);
-            onTick(currentTicks);
-            if (_link) _link->service(currentTicks);
+            if (_link && _link->role() == Role::Rx && _link->isLocked()) {
+                // Stay hop-locked: discard stale backlog and wait for the next Sync snap
+                // instead of fast-forwarding a local tick that diverges from TX cadence.
+                _link->noteMissedDeadlines((uint16_t)diff);
+            } else {
+                if (_link) _link->noteSchedulerOverrun((uint16_t)diff);
+                const uint32_t targetTick = _tick + diff;
+                onTick(targetTick);
+                if (_link) _link->service(targetTick);
+            }
         } else {
             for (uint32_t i = 0; i < diff; ++i) {
                 uint32_t nextTick = _tick + 1;
                 onTick(nextTick);
                 if (_link) {
+#if defined(XLRS_PICO_SDK)
+                    _link->service(nextTick, false);
+#else
                     _link->service(nextTick);
+#endif
                 }
             }
         }
         _lastProcessedTickEvent = currentTicks;
     }
+
+    tryArmTelemetryRx();
 
     recoverPhyIfNeeded();
 }

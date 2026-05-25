@@ -646,7 +646,7 @@ static void app_core_loop() {
 
             // Core-0 diagnostic: surface PHY fault counters so a wedged radio is visible on the
             // bench console, not just an opaque healthy()=false (docs/troubleshooting/index.md §3).
-            printf("[TX STATUS] State: %d LQdown: %u%% RSSI: %d dBm | PHY timeouts: %lu CRC: %lu Phase: %s/%s LastOp: 0x%02X LastOk: 0x%02X LastFailOp: 0x%02X | tick:%lu fhss:%u exp:%u tmr:%lu/%lu dlrx:%lu",
+            printf("[TX STATUS] State: %d LQdown: %u%% RSSI: %d dBm | PHY timeouts: %lu CRC: %lu Phase: %s/%s LastOp: 0x%02X LastOk: 0x%02X LastFailOp: 0x%02X | tick:%lu fhss:%u exp:%u tmr:%lu/%lu dlrx:%lu tlmArm:%lu tlmDef:%lu tlmDrop:%lu tlmPhy:%lu tlmOk:%lu tlmBad:%lu",
                    (int)rfData.state, (unsigned)rfData.stats.lqDown, (int)rfData.stats.rssiDbm,
                    (unsigned long)g_phy.spiTimeouts(), (unsigned long)g_phy.crcErrors(),
                    xlrs::Sx1280NativePhy::diagPhaseName(g_phy.lastDiagPhase()),
@@ -659,7 +659,13 @@ static void app_core_loop() {
                    (unsigned)rfData.linkDiag.fhssExpected,
                    (unsigned long)rfData.linkDiag.timerIntervalUs,
                    (unsigned long)rfData.linkDiag.nomIntervalUs,
-                   (unsigned long)rfData.ticksSinceLastDownlink);
+                   (unsigned long)rfData.ticksSinceLastDownlink,
+                   (unsigned long)rfData.linkDiag.tlmRxArmed,
+                   (unsigned long)rfData.linkDiag.tlmRxArmDeferred,
+                   (unsigned long)rfData.linkDiag.tlmRxArmDropped,
+                   (unsigned long)rfData.linkDiag.tlmRxPhyOk,
+                   (unsigned long)rfData.linkDiag.tlmRxDecodeOk,
+                   (unsigned long)rfData.linkDiag.tlmRxDecodeFail);
 #if XLRS_TX_CONTROLLER_CRSF
             const uint32_t rcAge = g_crsfDebug.lastRcMs == 0 ? 0 : now - g_crsfDebug.lastRcMs;
             printf(" | CRSF rc:%lu age:%lums ping:%lu pr:%lu pw:%lu fc:%lu bad:%lu qdrop:%lu dldrop:%lu",
@@ -721,6 +727,10 @@ static void rf_core_main() {
     }
 
     while (true) {
+        for (int pollBurst = 0; pollBurst < 4; ++pollBurst) {
+            g_scheduler.poll();
+        }
+
         static uint32_t bindTransmitUntilMs = 0;
         static bool telemetryPending = false;
         static xlrs::AppTelemetryMessage pendingTelemetryMessage{};
@@ -754,8 +764,6 @@ static void rf_core_main() {
         if (g_appToRf.load(appData)) {
             g_link.setChannels(appData.channels, xlrs::Link::RC_CHANNELS);
         }
-
-        g_scheduler.poll();
 
         static uint32_t lastServiceTick = 0;
         uint32_t currentTick = g_scheduler.processedTick();

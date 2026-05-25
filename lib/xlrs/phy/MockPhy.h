@@ -40,6 +40,7 @@ public:
     void setSyncWord(uint16_t w) override { _cfg.syncWord = w; }
     void reconfigure(const PhyConfig& cfg) override { _cfg = cfg; }
     uint32_t txLatencyUs() const override { return 0; }
+    bool txInProgress() const override { return false; }
     bool healthy() const override { return !_forceFault; }
     bool recover() override {
         if (_recoverFailsRemaining > 0) { --_recoverFailsRemaining; return false; }  // models a radio that needs retries

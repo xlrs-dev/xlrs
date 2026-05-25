@@ -65,6 +65,7 @@ public:
     void setSyncWord(uint16_t uidDerived) override;
     void reconfigure(const PhyConfig& cfg) override;
     uint32_t txLatencyUs() const override;
+    bool txInProgress() const override;
     bool healthy() const override { return !_hardwareError.load(std::memory_order_acquire); }
     bool recover() override;
 

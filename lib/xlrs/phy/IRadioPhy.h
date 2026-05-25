@@ -71,6 +71,7 @@ public:
     virtual void setSyncWord(uint16_t uidDerived) = 0;
     virtual void reconfigure(const PhyConfig& cfg) = 0;
     virtual uint32_t txLatencyUs() const = 0;
+    virtual bool txInProgress() const { return false; }
     virtual bool healthy() const = 0;
     virtual bool recover() = 0;
 

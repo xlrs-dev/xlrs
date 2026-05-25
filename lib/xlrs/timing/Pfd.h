@@ -37,7 +37,11 @@ public:
         if (_freqAccum >  cap) _freqAccum =  cap;
         if (_freqAccum < -cap) _freqAccum = -cap;
 
-        return (offsetUs / 4) + (_freqAccum / 256);    // PI: Kp = 1/4, Ki = 1/256
+        int32_t adj = (offsetUs / 4) + (_freqAccum / 256);    // PI: Kp = 1/4, Ki = 1/256
+        const int32_t maxAdj = _interval / 16;                // per-period clamp (~62 µs @ F1000)
+        if (adj >  maxAdj) adj =  maxAdj;
+        if (adj < -maxAdj) adj = -maxAdj;
+        return adj;
     }
 
     int32_t phaseError() const { return _phaseErr; }

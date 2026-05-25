@@ -67,6 +67,14 @@ public:
     uint32_t rxDoneEvents() const { return _rxDoneEvents.load(std::memory_order_relaxed); }
     uint32_t txDoneEvents() const { return _txDoneEvents.load(std::memory_order_relaxed); }
     int32_t  pfdPhaseErrorUs() const { return _pfd.phaseError(); }
+    int32_t  pfdLastAdjUs() const { return _lastPfdAdjUs; }
+    uint32_t pfdUpdateCount() const { return _pfdUpdateCount; }
+    uint32_t tlmRxArmedCount() const { return _tlmRxArmedCount; }
+    uint32_t tlmRxArmDeferredCount() const { return _tlmRxArmDeferredCount; }
+    uint32_t tlmRxArmDroppedCount() const { return _tlmRxArmDroppedCount; }
+    uint32_t tlmRxPhyOkCount() const { return _tlmRxPhyOkCount; }
+    uint32_t tlmRxDecodeOkCount() const { return _tlmRxDecodeOkCount; }
+    uint32_t tlmRxDecodeFailCount() const { return _tlmRxDecodeFailCount; }
     uint32_t timerIntervalUs() const {
         return _timer ? _timer->intervalUs() : _rate.intervalUs;
     }
@@ -74,6 +82,10 @@ public:
 private:
     bool recoverPhyIfNeeded();
     void syncPhyIdentity(bool force = false);
+    void tryArmTelemetryRx();
+    void applyLockedRxPhaseResync(uint32_t packetStartUs);
+    bool telemetrySlotStillOpen() const;
+    bool telemetryListenActive() const;
 
     std::atomic<uint32_t> _tickEvents{0};
     std::atomic<uint32_t> _rxDoneEvents{0};
@@ -100,6 +112,14 @@ private:
     uint16_t     _armedPos = 0;
     uint32_t     _armedTickStartUs = 0;
     Pfd          _pfd{};
+    int32_t      _lastPfdAdjUs = 0;
+    uint32_t     _pfdUpdateCount = 0;
+    uint32_t     _tlmRxArmedCount = 0;
+    uint32_t     _tlmRxArmDeferredCount = 0;
+    uint32_t     _tlmRxArmDroppedCount = 0;
+    uint32_t     _tlmRxPhyOkCount = 0;
+    uint32_t     _tlmRxDecodeOkCount = 0;
+    uint32_t     _tlmRxDecodeFailCount = 0;
     HwTimer*     _timer = nullptr;
     uint32_t     _syncedIdentityRevision = 0;
     bool         _identitySynced = false;
@@ -107,6 +127,14 @@ private:
     uint32_t _lastProcessedTickEvent = 0;
     uint32_t _lastProcessedRxEvent = 0;
     uint32_t _lastProcessedTxEvent = 0;
+    bool     _pendingTlmRx = false;
+    float    _pendingTlmRxFreq = 0;
+    uint32_t _pendingTlmArmedTick = 0;
+    uint16_t _pendingTlmArmedPos = 0;
+    uint32_t _pendingTlmArmedTickStartUs = 0;
+    uint32_t _tlmListenUntilUs = 0;
+    uint32_t _tlmRxArmAtUs = 0;
+    uint32_t _tlmDecodeSlotTick = 0;
 };
 
 } // namespace xlrs

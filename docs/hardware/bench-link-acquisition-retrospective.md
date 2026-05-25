@@ -338,6 +338,37 @@ telemetry listen window; RF-core poll burst; connect-gated bench capture.
 
 Capture dir: `tools/bench-capture-victory/` (180 s after confirmed connect).
 
+### Pass 9 — Bench TX mode (May 2026)
+
+**Problem:** On a bench TX with no RC handset, TX enters **State 4 (Failsafe)** even when
+downlink telemetry decodes (`tlmOk` climbing). That makes 180 s LQ captures report mostly
+Failsafe lines and understates `LQdown`.
+
+**Fix:** CMake option `-DXLRS_BENCH_TX=ON` → `Link::setBenchTxMode(true)` on the TX RF core:
+
+- TX **Connected** from downlink telemetry alone (`txLinkValid = txTlmTick`).
+- While `lqDown > 0`, suppress TX failsafe (`misses = 0`).
+
+**Tried and reverted (regressed vs Pass 8):**
+
+| Change | Result |
+| --- | --- |
+| Gated RX phase resync (`resyncNextTickUs` when \|phase\| > 120 µs) | RX max 53–57%, heavy failsafe; `n` 2000+ with large `pfd` swings |
+| RF-core poll burst 16× when Connected/locked | No benefit once phase resync removed; kept 4× like Pass 8 |
+
+Pass 8 PFD behavior retained: track phase on non-Sync RC decodes; timer snap only on Sync
+beacons.
+
+**After fix (bench TX only, D250, ~1 m):**
+
+| Side | Max LQ | Samples ≥70% | Best sustained run | States |
+| --- | --- | --- | --- | --- |
+| **RX** | **77%** | 190/360 | 44 | 255 Connected, 105 Failsafe |
+| **TX** | **76%** | 34/180 | 34 | 180 Connected (bench mode) |
+
+Capture dir: `tools/bench-capture-benchtx/`. Bench script builds with `-DXLRS_BENCH_TX=ON`;
+production TX builds leave it OFF.
+
 ---
 
 ## Follow-up work
@@ -346,8 +377,8 @@ Tracked in GitHub issue [#8](https://github.com/xlrs-dev/xlrs/issues/8). Summary
 
 1. **Post-connection PFD** — host tests + bench `n`/`adj` fields confirm the loop runs
    after Connected; tune convergence when link drops quickly (timer can stay biased in Failsafe).
-2. **TX bench failsafe** — TX reaches Failsafe without handset; consider bench mode
-   or downlink-only Connected criteria for TX status/LED.
+2. ~~**TX bench failsafe**~~ — addressed by `-DXLRS_BENCH_TX=ON` (Pass 9); use for bench
+   captures only, not production TX with a real controller.
 3. **Status LED** — verify GP10 active-low wiring; user reported no blinks early in
    bring-up (stale CMake `XLRS_STATUS_LED_PIN=13` vs GP10).
 4. **Bind-scan vs lock loss** — after ~70 s without RC, RX dropped lock and cycled

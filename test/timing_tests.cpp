@@ -1,5 +1,6 @@
 #include <unity.h>
 
+#include "link/RfScheduler.h"
 #include "link/Uid.h"
 #include "timing/HwTimer.h"
 #include "timing/Pfd.h"

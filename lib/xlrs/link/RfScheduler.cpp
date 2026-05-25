@@ -265,9 +265,6 @@ void RfScheduler::applyLockedRxPhaseResync(uint32_t packetStartUs) {
     if (!_timer || !_link || _link->role() != Role::Rx || !_link->isLocked()) {
         return;
     }
-    if (_link->slotForTick(_armedTick) == Slot::Sync) {
-        // Sync uses takeSyncResyncTick() for hard tick snap; still track phase between beacons.
-    }
     // TX airtime begins TX_GUARD after the ISR-latched slot boundary; both peers schedule from
     // tickStartUs so PFD expects arrival at that offset, not at the raw boundary.
     const int32_t offsetUs =

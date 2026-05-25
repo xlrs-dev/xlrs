@@ -359,6 +359,42 @@ static void test_link_tx_failsafe_grace_after_connect() {
     TEST_ASSERT_TRUE(env.tx.state() == LinkState::Connected);
 }
 
+static void test_link_tx_bench_mode_stays_connected_on_downlink() {
+    uint8_t uid[LINK_UID_SIZE];
+    linkUidFromPhrase("Kikobot-02", uid);
+    SimEnvironment env;
+    env.setup(uid, 2); // D250: tlm 1:16
+
+    env.tx.setBenchTxMode(true);
+    // No setChannels — simulates bench TX without a controller handset.
+
+    for (uint32_t t = 1; t <= 200; ++t) simTick(env, t);
+    TEST_ASSERT_TRUE(env.tx.state() == LinkState::Connected);
+    TEST_ASSERT_TRUE(env.tx.stats().lqDown > 0);
+
+    // Brief downlink loss must not failsafe while LQ window still shows healthy telemetry.
+    env.txPhy.corruptNextDeliveries(80);
+    for (uint32_t t = 201; t <= 280; ++t) simTick(env, t);
+    TEST_ASSERT_TRUE(env.tx.stats().lqDown > 0);
+    TEST_ASSERT_TRUE(env.tx.state() == LinkState::Connected);
+}
+
+static void test_link_tx_bench_mode_failsafe_when_downlink_lost() {
+    uint8_t uid[LINK_UID_SIZE];
+    linkUidFromPhrase("Kikobot-02", uid);
+    SimEnvironment env;
+    env.setup(uid, 2);
+
+    env.tx.setBenchTxMode(true);
+    for (uint32_t t = 1; t <= 100; ++t) simTick(env, t);
+    TEST_ASSERT_TRUE(env.tx.state() == LinkState::Connected);
+
+    env.txPhy.corruptNextDeliveries(100000);
+    for (uint32_t t = 101; t <= 2500; ++t) simTick(env, t);
+    TEST_ASSERT_TRUE(env.tx.stats().lqDown == 0);
+    TEST_ASSERT_TRUE(env.tx.state() == LinkState::Failsafe);
+}
+
 static void test_link_tx_failsafe_counts_telemetry_slots() {
     uint8_t uid[LINK_UID_SIZE];
     linkUidFromPhrase("Kikobot-02", uid);
@@ -396,6 +432,8 @@ int main() {
     RUN_TEST(test_link_long_soak);
     RUN_TEST(test_link_corrupt_rc_rejected);
     RUN_TEST(test_link_tx_failsafe_grace_after_connect);
+    RUN_TEST(test_link_tx_bench_mode_stays_connected_on_downlink);
+    RUN_TEST(test_link_tx_bench_mode_failsafe_when_downlink_lost);
     RUN_TEST(test_link_tx_failsafe_counts_telemetry_slots);
     return UNITY_END();
 }

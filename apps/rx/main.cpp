@@ -74,7 +74,6 @@ static constexpr uint32_t BIND_SCAN_NORMAL_WINDOW_MS = 4000;
 static constexpr uint32_t BIND_SCAN_WINDOW_MS = 1500;
 // Defer bind-scan cycling so a bound pair can acquire before the RX retunes to bind mode.
 static constexpr uint32_t BIND_SCAN_GRACE_MS = 30000;
-
 xlrs::Link g_link;
 xlrs::RfScheduler g_scheduler;
 xlrs::Sx1280NativePhy g_phy;

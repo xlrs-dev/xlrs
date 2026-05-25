@@ -352,6 +352,9 @@ If uplink works but TX telemetry is zero/stale:
    telemetry slot boundary (RX downlink turnaround). If `tlmOk` climbs but `LQdown`
    stays low, check that uplink slots are not aborting an active telemetry listen
    (TX waits for `_tlmListenUntilUs` before the next uplink TX).
+6. **Bench TX builds** (`-DXLRS_BENCH_TX=ON`): TX stays Connected from downlink telemetry
+   alone (no RC handset). Use for bench LQ captures; leave OFF for production TX with
+   a real controller.
 
 If flight-controller telemetry is missing in a CRSF RC controller:
 

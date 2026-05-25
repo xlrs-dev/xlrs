@@ -70,7 +70,6 @@ static constexpr uint32_t WATCHDOG_TIMEOUT_MS    = 1000; // HW reboots if not fe
 static constexpr uint32_t RF_STALL_MS            = 500;  // stop feeding if RF core stalls this long
 static constexpr uint32_t WATCHDOG_BOOT_GRACE_MS = 3000; // feed unconditionally until RF core is up
 static constexpr uint32_t BIND_TRANSMIT_WINDOW_MS = 30000;
-
 xlrs::Link g_link;
 xlrs::RfScheduler g_scheduler;
 xlrs::Sx1280NativePhy g_phy;
@@ -718,6 +717,9 @@ static void rf_core_main() {
 
     g_link.begin(xlrs::Role::Tx, uid, g_rfConfig.defaultRate, g_rfConfig.maxPowerDbm, g_rfConfig.dynamicPower == 1);
     g_link.setRegion(g_rfConfig.region == (uint8_t)xlrs::RfRegion::EU ? xlrs::FhssRegion::EU_CE : xlrs::FhssRegion::US_FCC);
+#if XLRS_BENCH_TX
+    g_link.setBenchTxMode(true);
+#endif
 
     xlrs::PhyConfig phyCfg = xlrs::makePhyConfig(xlrs::kRates[g_rfConfig.defaultRate], 2400.0f, g_rfConfig.maxPowerDbm, xlrs::syncWordFromUid(uid));
     if (!g_phy.init(phyCfg) ||

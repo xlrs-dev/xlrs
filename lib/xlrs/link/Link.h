@@ -89,6 +89,9 @@ public:
     void begin(Role role, const uint8_t uid[8], uint8_t rateIndex, int8_t maxPowerDbm = 10, bool useDynamicPower = true);
     void setRegion(FhssRegion region) { _region = region; }
     void setFailsafeMode(FailsafeMode mode) { _fsMode = mode; }
+    // Bench TX: stay Connected from downlink telemetry alone (no controller RC required).
+    void setBenchTxMode(bool on) { _benchTxMode = on; }
+    bool benchTxMode() const { return _benchTxMode; }
     void requestRate(uint8_t rateIndex);   // TX: switch rate (conveyed to RX via the Sync beacon)
     void setCipher(ICipher* c) { _cipher = c; }              // opt-in AEAD over the RC payload
     void setSessionSalt(uint32_t salt) { _sessionSalt = salt; }  // negotiated at Connect (real); fixed in sim
@@ -179,6 +182,7 @@ private:
     uint32_t     _syncAnchorTxTick = 0;
     uint32_t     _syncAnchorLocalTick = 0;
     FailsafeMode _fsMode   = FailsafeMode::NoPulses;
+    bool         _benchTxMode = false;
     LinkState    _state    = LinkState::Disconnected;
     uint16_t     _ch[RC_CHANNELS] = {0};
     uint32_t     _lastRxTick = 0;

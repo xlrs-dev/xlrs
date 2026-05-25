@@ -4,6 +4,7 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO"
 
 bash scripts/test.sh 2>&1 | tail -3
+cmake -S "$REPO" -B "$REPO/build" -G Ninja -DXLRS_BENCH_TX=ON 2>&1 | tail -3
 cmake --build build --target xlrs_tx xlrs_rx 2>&1 | tail -3
 picotool load -x -f --ser E4654C16430F4223 "$REPO/build/xlrs_tx.elf"
 picotool load -x -f --ser E4654C16432C3B22 "$REPO/build/xlrs_rx.elf"

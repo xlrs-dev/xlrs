@@ -696,7 +696,9 @@ void Link::service(uint32_t tick, bool recordLq) {
 
     const bool got = _gotRcThisTick || _gotSyncThisTick ||
                      _gotValidUplinkThisTick || _gotValidTelemetryThisTick;
-    
+    const bool txTlmTick = _gotValidTelemetryThisTick || _gotTlmThisTick;
+    const bool txLinkValid = _benchTxMode ? txTlmTick : got;
+
     if (_role == Role::Rx && _locked && slotKind(et, _rxPos) == SlotKind::Uplink) {
         if (_uplinkGraceSlotsRemaining > 0) {
             _uplinkGraceSlotsRemaining--;
@@ -713,16 +715,20 @@ void Link::service(uint32_t tick, bool recordLq) {
         _consecutiveMissedUplinks = 0;
     }
 
-    const uint32_t misses = (_role == Role::Rx)
-                            ? _consecutiveMissedUplinks
-                            : (_everRx ? _consecutiveMissedTelemetry : (FAILSAFE_MISS + 1));
+    uint32_t misses = (_role == Role::Rx)
+                      ? _consecutiveMissedUplinks
+                      : (_everRx ? _consecutiveMissedTelemetry : (FAILSAFE_MISS + 1));
+    // Bench TX: downlink LQ reflects recent telemetry; do not failsafe while it is healthy.
+    if (_benchTxMode && _role == Role::Tx && _stats.lqDown > 0) {
+        misses = 0;
+    }
     const LinkState prevState = _state;
     switch (_state) {
         case LinkState::Disconnected:
         case LinkState::Connecting:
             if (_role == Role::Rx) {
                 if (_locked && _syncSeen && _gotRcThisTick) _state = LinkState::Connected;
-            } else if (got) {
+            } else if (txLinkValid) {
                 _state = LinkState::Connected;
             }
             break;
@@ -736,7 +742,7 @@ void Link::service(uint32_t tick, bool recordLq) {
         case LinkState::Failsafe:
             if (_role == Role::Rx) {
                 if (_locked && _syncSeen && _gotRcThisTick) _state = LinkState::Connected;
-            } else if (got) {
+            } else if (txLinkValid) {
                 _state = LinkState::Connected;
             }
             break;

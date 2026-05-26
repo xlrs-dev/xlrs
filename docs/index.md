@@ -28,6 +28,7 @@ extending the XLRS TX/RX firmware.
 - [Telemetry And Link Stats](developer/telemetry-and-link-stats.md)
 - [Configuration](developer/configuration.md)
 - [Safety And Failsafe](developer/safety-and-failsafe.md)
+- [Open Issues](developer/open-issues.md)
 
 ## Interfaces
 

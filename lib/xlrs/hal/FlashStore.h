@@ -13,6 +13,7 @@ bool commit();
 
 #if !defined(XLRS_PICO_SDK)
 void resetSim();
+void seedLegacySim(const uint8_t* data, size_t len);
 void simulatePowerCutOnNextCommit();
 #endif
 

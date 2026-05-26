@@ -105,6 +105,10 @@ const uint8_t* flashSlot(uint8_t slot) {
     return reinterpret_cast<const uint8_t*>(XIP_BASE + kStoreOffset + (slot * kSlotSize));
 }
 
+const uint8_t* legacyFlashStore() {
+    return reinterpret_cast<const uint8_t*>(XIP_BASE + PICO_FLASH_SIZE_BYTES - FLASH_SECTOR_SIZE);
+}
+
 void programSlotSector(uint8_t slot, const uint8_t* image) {
     const uint32_t offset = kStoreOffset + (slot * kSlotSize);
     flash_range_erase(offset, FLASH_SECTOR_SIZE);
@@ -131,6 +135,10 @@ const uint8_t* flashSlot(uint8_t slot) {
     return s_flash[slot];
 }
 
+const uint8_t* legacyFlashStore() {
+    return s_flash[1];
+}
+
 void ensureHostFlashInit() {
     if (!s_flashInitialized) {
         memset(s_flash, 0xFF, sizeof(s_flash));
@@ -138,6 +146,13 @@ void ensureHostFlashInit() {
     }
 }
 #endif
+
+bool looksErased(const uint8_t* data, size_t len) {
+    for (size_t i = 0; i < len; ++i) {
+        if (data[i] != 0xFF) return false;
+    }
+    return true;
+}
 
 } // namespace
 
@@ -162,14 +177,23 @@ bool begin() {
         }
     }
     if (!found) {
-        memset(s_cache, 0xFF, sizeof(s_cache));
+        const uint8_t* legacy = legacyFlashStore();
+        if (!looksErased(legacy, kStoreSize)) {
+            memcpy(s_cache, legacy, kStoreSize);
+            s_dirty = true;
+            bestSlot = 1;
+        } else {
+            memset(s_cache, 0xFF, sizeof(s_cache));
+            s_dirty = false;
+            bestSlot = 0;
+        }
         bestSeq = 0;
-        bestSlot = 0;
+    } else {
+        s_dirty = false;
     }
     s_sequence = bestSeq;
     s_activeSlot = bestSlot;
     s_loaded = true;
-    s_dirty = false;
     return true;
 }
 
@@ -226,6 +250,14 @@ bool commit() {
     memcpy(s_flash[nextSlot], image, kSlotSize);
 #endif
 
+    uint8_t verify[kStoreSize];
+    uint32_t verifiedSeq = 0;
+    if (!decodeSlot(flashSlot(nextSlot), verify, verifiedSeq) ||
+        verifiedSeq != nextSeq ||
+        memcmp(verify, s_cache, kStoreSize) != 0) {
+        return false;
+    }
+
     s_sequence = nextSeq;
     s_activeSlot = nextSlot;
     s_dirty = false;
@@ -238,6 +270,19 @@ void resetSim() {
     memset(s_cache, 0xFF, sizeof(s_cache));
     s_flashInitialized = true;
     s_cutNextCommit = false;
+    s_loaded = false;
+    s_dirty = false;
+    s_sequence = 0;
+    s_activeSlot = 0;
+}
+
+void seedLegacySim(const uint8_t* data, size_t len) {
+    ensureHostFlashInit();
+    memset(s_flash, 0xFF, sizeof(s_flash));
+    if (data && len > 0) {
+        if (len > kStoreSize) len = kStoreSize;
+        memcpy(s_flash[1], data, len);
+    }
     s_loaded = false;
     s_dirty = false;
     s_sequence = 0;

@@ -506,6 +506,7 @@ bool Link::processRxPayload(uint32_t tick, uint16_t pos, const uint8_t* data, ui
             const int32_t maxDelta = 1;
 #endif
             for (int32_t delta = -maxDelta; delta <= maxDelta; ++delta) {
+                if (delta < 0 && nonceTick < (uint32_t)(-delta)) continue;
                 const uint32_t ut = delta < 0
                                     ? nonceTick - (uint32_t)(-delta)
                                     : nonceTick + (uint32_t)delta;

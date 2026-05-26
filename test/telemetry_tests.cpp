@@ -61,10 +61,12 @@ static void test_stubborn_sender_resets_after_peer_reboot_ack() {
 
     sender.receiveAck(0);
     TEST_ASSERT_FALSE(sender.idle());
-    sender.receiveAck(0);
-    TEST_ASSERT_FALSE(sender.idle());
-    sender.receiveAck(0);
-    TEST_ASSERT_TRUE(sender.idle());
+
+    TelemetryChunk restarted{};
+    TEST_ASSERT_TRUE(sender.getNextChunk(restarted));
+    TEST_ASSERT_EQUAL_UINT8(0, restarted.seq);
+    TEST_ASSERT_EQUAL_UINT8(first.length, restarted.length);
+    TEST_ASSERT_EQUAL_MEMORY(first.data, restarted.data, first.length & 0x7F);
 }
 
 static void test_link_stubborn_telemetry_integrated() {

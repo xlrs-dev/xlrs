@@ -44,6 +44,14 @@ public:
     }
 
     void receiveAck(uint8_t ackSeq) {
+        if (ackSeq == 0 && _currentSeq != 0 && _offset < _len) {
+            _offset = 0;
+            _currentSeq = 0;
+            _staleAckCount = 0;
+            _lastStaleAck = 0;
+            return;
+        }
+
         uint8_t expectedNext = (uint8_t)(_currentSeq + 1);
         if (ackSeq == expectedNext && _offset < _len) {
             _staleAckCount = 0;

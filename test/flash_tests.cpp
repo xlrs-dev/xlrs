@@ -37,6 +37,39 @@ static void test_flash_store_power_cut_keeps_last_committed_binding() {
     TEST_ASSERT_EQUAL_MEMORY(customA, afterReboot, LINK_UID_SIZE);
 }
 
+static void test_flash_store_migrates_legacy_layout_without_erasing_on_cut() {
+    uint8_t legacy[4096] = {};
+    memset(legacy, 0xFF, sizeof(legacy));
+
+    xlrs::hal::FlashStore::resetSim();
+    TEST_ASSERT_TRUE(xlrs::hal::FlashStore::begin());
+    BindingStore legacyWriter;
+    TEST_ASSERT_TRUE(legacyWriter.setBindingPhrase("LEGACY-PHRASE"));
+    for (size_t i = 0; i < sizeof(legacy); ++i) {
+        legacy[i] = xlrs::hal::FlashStore::read(i);
+    }
+    uint8_t legacyUid[LINK_UID_SIZE] = {};
+    TEST_ASSERT_TRUE(legacyWriter.getBindingUid(legacyUid));
+
+    xlrs::hal::FlashStore::seedLegacySim(legacy, sizeof(legacy));
+    TEST_ASSERT_TRUE(xlrs::hal::FlashStore::begin());
+    BindingStore migrated;
+    TEST_ASSERT_TRUE(migrated.begin());
+    uint8_t migratedUid[LINK_UID_SIZE] = {};
+    TEST_ASSERT_TRUE(migrated.getBindingUid(migratedUid));
+    TEST_ASSERT_EQUAL_MEMORY(legacyUid, migratedUid, LINK_UID_SIZE);
+
+    xlrs::hal::FlashStore::simulatePowerCutOnNextCommit();
+    TEST_ASSERT_FALSE(xlrs::hal::FlashStore::commit());
+
+    TEST_ASSERT_TRUE(xlrs::hal::FlashStore::begin());
+    BindingStore afterCut;
+    TEST_ASSERT_TRUE(afterCut.begin());
+    uint8_t afterCutUid[LINK_UID_SIZE] = {};
+    TEST_ASSERT_TRUE(afterCut.getBindingUid(afterCutUid));
+    TEST_ASSERT_EQUAL_MEMORY(legacyUid, afterCutUid, LINK_UID_SIZE);
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -44,5 +77,6 @@ int main() {
     UNITY_BEGIN();
     RUN_TEST(test_flash_boot_counter);
     RUN_TEST(test_flash_store_power_cut_keeps_last_committed_binding);
+    RUN_TEST(test_flash_store_migrates_legacy_layout_without_erasing_on_cut);
     return UNITY_END();
 }

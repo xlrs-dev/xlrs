@@ -148,9 +148,7 @@ void Link::endBindScan(const uint8_t uid[LINK_UID_SIZE]) {
     configureIdentity(uid);
     _bindTransmitActive = false;
     _bindScanActive = false;
-    if (_state == LinkState::Binding) {
-        _state = LinkState::Connecting;
-    }
+    resetAcquisition(LinkState::Connecting);
 }
 
 bool Link::takeReceivedBindUid(uint8_t uid[LINK_UID_SIZE]) {
@@ -220,11 +218,6 @@ Link::SlotKind Link::slotKind(uint32_t tick, uint16_t pos) const {
 
 float Link::freqForPos(uint16_t pos) const {
     return fhssFreqForIndex(_fhss.at((uint8_t)(pos % _fhss.count())), _region);
-}
-
-uint32_t Link::txTickForNonce(uint32_t rxPacketStartUs) const {
-    (void)rxPacketStartUs;
-    return effectiveTxTick(_tick);
 }
 
 void Link::onTick(uint32_t tick) {
@@ -389,6 +382,8 @@ bool Link::getTxPayload(uint32_t tick, uint16_t pos, uint8_t* outBuf, uint8_t& o
             outLen = otaEncodeTlmDown(_stats.lqUp, _stats.rssiDbm, _stats.snr, outBuf);
             outBuf[outLen] = _localAckSeq;
             outLen += 1;
+            c->seal(outBuf + 1, 4, Nonce96::build(_sessionSalt, et, pos));
+            outLen += c->overhead();
             return true;
         }
         return false;
@@ -396,7 +391,7 @@ bool Link::getTxPayload(uint32_t tick, uint16_t pos, uint8_t* outBuf, uint8_t& o
 }
 
 bool Link::processRxPayload(uint32_t tick, uint16_t pos, const uint8_t* data, uint8_t len,
-                            int16_t rssi, int8_t snr, uint32_t rxPacketStartUs) {
+                            int16_t rssi, int8_t snr) {
     if (!data || len == 0) return false;
 
     SyncPayload s{};
@@ -456,7 +451,14 @@ bool Link::processRxPayload(uint32_t tick, uint16_t pos, const uint8_t* data, ui
             }
         }
         return true;
-    } else if (otaDecodeTlmDown(data, len, &upLq, &upRssi, &upSnr)) {
+    } else if (otaType(data[0]) == OtaType::TlmDown) {
+        ICipher* c = _cipher ? _cipher : &s_nullCipher;
+        if (len < (uint8_t)(5 + c->overhead())) return false;
+        uint8_t decBuf[32];
+        memcpy(decBuf, data, len);
+        const uint32_t nonceTick = (_role == Role::Tx) ? tick : effectiveTxTick(tick);
+        if (!c->open(decBuf + 1, 4, Nonce96::build(_sessionSalt, nonceTick, pos))) return false;
+        if (!otaDecodeTlmDown(decBuf, 4, &upLq, &upRssi, &upSnr)) return false;
         _gotTlmThisTick = true;
         _gotValidTelemetryThisTick = true;
         if (_role == Role::Tx) {                   // RX-reported uplink view
@@ -465,10 +467,8 @@ bool Link::processRxPayload(uint32_t tick, uint16_t pos, const uint8_t* data, ui
             _stats.downlinkSnr = snr;
             _lastRxTick = tick; _everRx = true;
             _txPowerDbm = _power.update(upLq, upRssi);
-            if (len >= 5) {
-                _receivedAckSeq = data[4];
-                _tlmSender.receiveAck(_receivedAckSeq);
-            }
+            _receivedAckSeq = decBuf[4];
+            _tlmSender.receiveAck(_receivedAckSeq);
         }
         return true;
     } else if (otaType(data[0]) == OtaType::Msp) {
@@ -506,9 +506,9 @@ bool Link::processRxPayload(uint32_t tick, uint16_t pos, const uint8_t* data, ui
             const int32_t maxDelta = 1;
 #endif
             for (int32_t delta = -maxDelta; delta <= maxDelta; ++delta) {
-                const int32_t tryTick = (int32_t)nonceTick + delta;
-                if (tryTick < 0) continue;
-                const uint32_t ut = (uint32_t)tryTick;
+                const uint32_t ut = delta < 0
+                                    ? nonceTick - (uint32_t)(-delta)
+                                    : nonceTick + (uint32_t)delta;
                 if (txPos(ut) != pos) continue;
                 if (tryFrame(ut)) {
                     matchedTxTick = ut;
@@ -740,10 +740,8 @@ void Link::service(uint32_t tick, bool recordLq) {
     uint32_t misses = (_role == Role::Rx)
                       ? _consecutiveMissedUplinks
                       : (_everRx ? _consecutiveMissedTelemetry : (FAILSAFE_MISS + 1));
-    // Healthy sliding-window LQ — do not failsafe on consecutive-miss skew alone.
-    if (_role == Role::Rx && _stats.lqUp >= FAILSAFE_LQ_HOLDOFF) {
-        misses = 0;
-    }
+    // Sliding-window LQ is diagnostic only for RX failsafe. Consecutive RC misses
+    // remain authoritative so a stale or slow-draining LQ window cannot mask signal loss.
     // Bench TX: downlink LQ reflects recent telemetry; do not failsafe while it is healthy.
     if (_benchTxMode && _role == Role::Tx && _stats.lqDown > 0) {
         misses = 0;
@@ -787,7 +785,7 @@ void Link::service(uint32_t tick, bool recordLq) {
     // Keep PFD/phase lock through failsafe when hop lock is retained — resetting here
     // was forcing nominal cadence and breaking quick recovery on the bench.
     if (_role == Role::Rx && prevState == LinkState::Connected &&
-        _state == LinkState::Failsafe && !_locked) {
+        _state == LinkState::Failsafe) {
         _rxTimingResetPending = true;
     }
 

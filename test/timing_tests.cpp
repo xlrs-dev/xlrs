@@ -95,6 +95,43 @@ static void test_scheduler_pfd_skipped_until_connected() {
     TEST_ASSERT_TRUE(sawConnected);
 }
 
+static void test_rc_decode_across_int32_tick_boundary() {
+    uint8_t uid[LINK_UID_SIZE];
+    linkUidFromPhrase("Kikobot-02", uid);
+
+    Link tx;
+    Link rx;
+    tx.begin(Role::Tx, uid, 2);
+    rx.begin(Role::Rx, uid, 2);
+
+    uint32_t syncTick = 0x7FFFFFF0u;
+    while (tx.slotForTick(syncTick) != Slot::Sync) {
+        ++syncTick;
+    }
+    uint8_t buf[OTA16_LEN] = {};
+    uint8_t len = 0;
+    const uint16_t syncPos = tx.txPos(syncTick);
+    tx.onTick(syncTick);
+    TEST_ASSERT_TRUE(tx.getTxPayload(syncTick, syncPos, buf, len));
+    TEST_ASSERT_TRUE(rx.processRxPayload(syncTick, syncPos, buf, len, -45, 0));
+
+    uint32_t uplinkTick = 0x80000000u;
+    while (tx.slotForTick(uplinkTick) != Slot::Uplink) {
+        ++uplinkTick;
+    }
+    uint16_t channels[4] = {333, 777, 1024, 1666};
+    tx.setChannels(channels, 4);
+    tx.onTick(uplinkTick);
+    rx.onTick(uplinkTick);
+    const uint16_t pos = tx.txPos(uplinkTick);
+    TEST_ASSERT_TRUE(tx.getTxPayload(uplinkTick, pos, buf, len));
+    TEST_ASSERT_TRUE(rx.processRxPayload(uplinkTick, pos, buf, len, -45, 0));
+
+    uint16_t out[4] = {};
+    rx.getChannels(out, 4);
+    for (int i = 0; i < 4; ++i) TEST_ASSERT_EQUAL_UINT16(channels[i], out[i]);
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -104,5 +141,6 @@ int main() {
     RUN_TEST(test_pfd_nulls_drift);
     RUN_TEST(test_scheduler_timing_pfd_lock);
     RUN_TEST(test_scheduler_pfd_skipped_until_connected);
+    RUN_TEST(test_rc_decode_across_int32_tick_boundary);
     return UNITY_END();
 }

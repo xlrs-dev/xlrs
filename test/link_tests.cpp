@@ -247,8 +247,11 @@ static void test_link_encrypted() {
     txC.setKey(key);
     rxC.setKey(key);
 
-    env.tx.setCipher(&txC);
-    env.rx.setCipher(&rxC);
+    TEST_ASSERT_FALSE(env.tx.setCipher(&txC));
+    TEST_ASSERT_TRUE(env.tx.setSessionSalt(0x12345678u));
+    TEST_ASSERT_TRUE(env.rx.setSessionSalt(0x12345678u));
+    TEST_ASSERT_TRUE(env.tx.setCipher(&txC));
+    TEST_ASSERT_TRUE(env.rx.setCipher(&rxC));
     uint16_t ch[4] = {222, 1444, 1999, 55};
     env.tx.setChannels(ch, 4);
 
@@ -275,8 +278,10 @@ static void test_link_wrong_key() {
     txC.setKey(k1);
     rxC.setKey(k2);
 
-    env.tx.setCipher(&txC);
-    env.rx.setCipher(&rxC);
+    TEST_ASSERT_TRUE(env.tx.setSessionSalt(0x12345678u));
+    TEST_ASSERT_TRUE(env.rx.setSessionSalt(0x12345678u));
+    TEST_ASSERT_TRUE(env.tx.setCipher(&txC));
+    TEST_ASSERT_TRUE(env.rx.setCipher(&rxC));
     uint16_t ch[4] = {200, 200, 200, 200};
     env.tx.setChannels(ch, 4);
 
@@ -395,7 +400,7 @@ static void test_link_tx_bench_mode_failsafe_when_downlink_lost() {
     TEST_ASSERT_TRUE(env.tx.state() == LinkState::Failsafe);
 }
 
-static void test_link_rx_lq_holdoff_suppresses_burst_failsafe() {
+static void test_link_rx_lq_holdoff_does_not_mask_rc_loss() {
     uint8_t uid[LINK_UID_SIZE];
     linkUidFromPhrase("Kikobot-02", uid);
     SimEnvironment env;
@@ -409,9 +414,10 @@ static void test_link_rx_lq_holdoff_suppresses_burst_failsafe() {
     TEST_ASSERT_TRUE(env.rx.stats().lqUp >= Link::FAILSAFE_LQ_HOLDOFF);
 
     // Burst longer than FAILSAFE_MISS while the LQ window still shows a healthy link.
+    // Failsafe must follow RC freshness, not a slow-draining LQ diagnostic.
     for (uint32_t t = 201; t <= 220; ++t) simTick(env, t, false);
     TEST_ASSERT_TRUE(env.rx.stats().lqUp >= Link::FAILSAFE_LQ_HOLDOFF);
-    TEST_ASSERT_TRUE(env.rx.state() == LinkState::Connected);
+    TEST_ASSERT_TRUE(env.rx.state() == LinkState::Failsafe);
 }
 
 static void test_link_rx_lq_holdoff_failsafe_on_total_loss() {
@@ -470,7 +476,7 @@ int main() {
     RUN_TEST(test_link_tx_failsafe_grace_after_connect);
     RUN_TEST(test_link_tx_bench_mode_stays_connected_on_downlink);
     RUN_TEST(test_link_tx_bench_mode_failsafe_when_downlink_lost);
-    RUN_TEST(test_link_rx_lq_holdoff_suppresses_burst_failsafe);
+    RUN_TEST(test_link_rx_lq_holdoff_does_not_mask_rc_loss);
     RUN_TEST(test_link_rx_lq_holdoff_failsafe_on_total_loss);
     RUN_TEST(test_link_tx_failsafe_counts_telemetry_slots);
     return UNITY_END();

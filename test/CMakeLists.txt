@@ -33,6 +33,7 @@ enable_testing()
 set(XLRS_TEST_LIB_SOURCES
     ${XLRS_LIB_DIR}/xlrs/link/Link.cpp
     ${XLRS_LIB_DIR}/xlrs/link/RfScheduler.cpp
+    ${XLRS_LIB_DIR}/xlrs/hal/FlashStore.cpp
     ${XLRS_LIB_DIR}/xlrs/timing/HwTimer.cpp
     ${XLRS_LIB_DIR}/xlrs/util/FlashBootCounter.cpp
 )

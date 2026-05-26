@@ -46,7 +46,7 @@ inline uint8_t otaEncodeSync(const SyncPayload& s, uint8_t* out) {
 }
 
 inline bool otaDecodeSync(const uint8_t* in, uint8_t len, SyncPayload& s) {
-    if (len < 10)                         return false;
+    if (len < 14)                         return false;
     if (otaVersion(in[0]) != OTA_VERSION) return false;
     if (otaType(in[0]) != OtaType::Sync)  return false;
     s.fhssIndex     = in[1];
@@ -58,14 +58,10 @@ inline bool otaDecodeSync(const uint8_t* in, uint8_t len, SyncPayload& s) {
                       in[7];
     s.tlmRatioDenom = in[8];
     s.uidCrc        = in[9];
-    if (len >= 14) {
-        s.txTick = ((uint32_t)in[10] << 24) |
-                   ((uint32_t)in[11] << 16) |
-                   ((uint32_t)in[12] << 8)  |
-                   in[13];
-    } else {
-        s.txTick = 0;
-    }
+    s.txTick = ((uint32_t)in[10] << 24) |
+               ((uint32_t)in[11] << 16) |
+               ((uint32_t)in[12] << 8)  |
+               in[13];
     return true;
 }
 

@@ -37,7 +37,14 @@ public:
     }
 
     void setOutputPowerDbm(int8_t dbm) override { _cfg.powerDbm = dbm; }
-    void setSyncWord(uint16_t w) override { _cfg.syncWord = w; }
+    bool setSyncWord(uint16_t w) override {
+        if (_syncWordFailuresRemaining > 0) {
+            --_syncWordFailuresRemaining;
+            return false;
+        }
+        _cfg.syncWord = w;
+        return true;
+    }
     void reconfigure(const PhyConfig& cfg) override { _cfg = cfg; }
     uint32_t txLatencyUs() const override { return 0; }
     bool txInProgress() const override { return false; }
@@ -56,6 +63,7 @@ public:
     void setSnr(int8_t s)        { _snr = s; }
     void forceFault()            { _forceFault = true; }
     void setRecoveryFailures(int n) { _recoverFailsRemaining = n; }  // recover() fails n times, then succeeds
+    void setSyncWordFailures(int n) { _syncWordFailuresRemaining = n; }
     void corruptNextDeliveries(int n) { _corruptRemaining = n; }     // flip a byte on the next n incoming frames (on-air bit errors)
     bool listening() const       { return _listening; }
     int8_t outputPowerDbm() const { return _cfg.powerDbm; }   // observe dynamic-power output
@@ -82,6 +90,7 @@ private:
     bool      _hasRx = false;
     bool      _forceFault = false;
     int       _recoverFailsRemaining = 0;
+    int       _syncWordFailuresRemaining = 0;
     int       _corruptRemaining = 0;
     float     _rxFreq = 0.0f;
     uint32_t  _clockUs = 0;

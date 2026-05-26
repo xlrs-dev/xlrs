@@ -68,7 +68,7 @@ public:
 
     // Cheap runtime controls.
     virtual void setOutputPowerDbm(int8_t dbm) = 0;
-    virtual void setSyncWord(uint16_t uidDerived) = 0;
+    virtual bool setSyncWord(uint16_t uidDerived) = 0;
     virtual void reconfigure(const PhyConfig& cfg) = 0;
     virtual uint32_t txLatencyUs() const = 0;
     virtual bool txInProgress() const { return false; }

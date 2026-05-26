@@ -83,7 +83,8 @@ inline void linkStatusLedUpdate(uint8_t pin, LinkState state, const LinkStatusLe
     if (flags.configFault || flags.hardwareError) {
         on = true;
     } else if (flags.bindPacketReceived) {
-        on = (msCounter % 100) < 75;
+        const uint32_t phase = msCounter % 200;
+        on = phase < 50 || (phase >= 100 && phase < 150);
     } else if (flags.bindScanOpen) {
         const uint32_t phase = msCounter % 600;
         on = phase < 70 || (phase >= 140 && phase < 210);

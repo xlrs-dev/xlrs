@@ -46,6 +46,7 @@ public:
     void receiveAck(uint8_t ackSeq) {
         uint8_t expectedNext = (uint8_t)(_currentSeq + 1);
         if (ackSeq == expectedNext && _offset < _len) {
+            _staleAckCount = 0;
             size_t remaining = _len - _offset;
             size_t chunkSize = remaining > 13 ? 13 : remaining;
             _offset += chunkSize;
@@ -54,6 +55,17 @@ public:
             if (_offset >= _len) {
                 _len = 0;
                 _offset = 0;
+            }
+        } else if (_offset < _len && ackSeq != _currentSeq) {
+            if (ackSeq != _lastStaleAck) {
+                _lastStaleAck = ackSeq;
+                _staleAckCount = 0;
+            }
+            if (++_staleAckCount >= 3) {
+                _len = 0;
+                _offset = 0;
+                _currentSeq = ackSeq;
+                _staleAckCount = 0;
             }
         }
     }
@@ -65,6 +77,8 @@ private:
     size_t  _len = 0;
     size_t  _offset = 0;
     uint8_t _currentSeq = 0;
+    uint8_t _lastStaleAck = 0;
+    uint8_t _staleAckCount = 0;
 };
 
 class StubbornReceiver {

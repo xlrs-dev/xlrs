@@ -37,6 +37,38 @@ blame. Line references are approximate and should be refreshed before patching.
 4. **Security lifecycle:** OI-019.
 5. **Reliability and observability:** OI-006, OI-007, OI-008, OI-016.
 
+## Branch Fix Status
+
+On branch `codex/open-issues-fixes`, the concrete firmware defects have matching
+code fixes and host regression tests where practical. Two items are intentionally
+recorded as mitigations rather than complete product features: OI-016 still needs
+the larger async simulation architecture described in
+[sim_test_enhancements_plan.md](sim_test_enhancements_plan.md), and OI-019 now
+fails closed unless a nonzero session salt is set, but a production salt handshake
+is still future work before AEAD can ship.
+
+| ID | Branch status | Verification |
+| --- | --- | --- |
+| OI-001 | Fixed | `test_rc_decode_across_int32_tick_boundary` |
+| OI-002 | Fixed | two-slot flash journal plus `test_flash_store_power_cut_keeps_last_committed_binding` |
+| OI-003 | Fixed | `test_sync_decode_rejects_truncated_tx_tick` |
+| OI-004 | Fixed | Pico build applies PFD adjustment; native PFD suite remains green |
+| OI-005 | Fixed | timing reset is requested on RX Connected-to-Failsafe regardless of retained lock |
+| OI-006 | Fixed | `test_stubborn_sender_resets_after_peer_reboot_ack` |
+| OI-007 | Fixed | LED bind-packet pattern no longer aliases at the 50 ms sample period |
+| OI-008 | Fixed | CMake validates `XLRS_BENCH_RATE`; app startup clamps the selected rate |
+| OI-009 | Fixed | scheduler event drains use modular counter differences |
+| OI-010 | Fixed | packet-start timing stays owned by `RfScheduler`; unused Link parameter removed |
+| OI-011 | Fixed | RX failsafe now follows consecutive RC misses, not healthy/stale LQ |
+| OI-012 | Fixed | frozen LQ can no longer mask consecutive RC misses |
+| OI-013 | Fixed | `TlmDown` payload and ACK pass through the cipher layer before dynamic power update |
+| OI-014 | Fixed | bench TX mode is rejected in Release builds and warns loudly otherwise |
+| OI-015 | Fixed | RX-locked overrun fast-forwards to the latest scheduler tick |
+| OI-016 | Partially mitigated | added targeted host coverage; full async hardware-path sim remains planned |
+| OI-017 | Fixed | `setSyncWord()` reports success/failure and scheduler retries failed writes |
+| OI-018 | Fixed | bind-scan exit now resets acquisition under the restored bound identity |
+| OI-019 | Mitigated | `setCipher()` fails closed until a nonzero session salt is configured |
+
 ## Firmware Area Map
 
 This map groups the same bugs by the part of the XLRS firmware someone would

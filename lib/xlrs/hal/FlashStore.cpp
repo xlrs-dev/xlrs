@@ -211,13 +211,18 @@ uint8_t read(size_t offset) {
     return s_cache[offset];
 }
 
-void write(size_t offset, uint8_t value) {
+size_t capacity() {
+    return kStoreSize;
+}
+
+bool write(size_t offset, uint8_t value) {
     if (!s_loaded) begin();
-    if (offset >= kStoreSize) return;
+    if (offset >= kStoreSize) return false;
     if (s_cache[offset] != value) {
         s_cache[offset] = value;
         s_dirty = true;
     }
+    return true;
 }
 
 bool commit() {

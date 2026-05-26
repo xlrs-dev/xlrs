@@ -70,9 +70,15 @@ public:
                 _staleAckCount = 0;
             }
             if (++_staleAckCount >= 3) {
-                _len = 0;
-                _offset = 0;
-                _currentSeq = ackSeq;
+                const size_t rewindOffset = (size_t)ackSeq * 13u;
+                if (ackSeq < _currentSeq && rewindOffset < _len) {
+                    _offset = rewindOffset;
+                    _currentSeq = ackSeq;
+                } else {
+                    _len = 0;
+                    _offset = 0;
+                    _currentSeq = ackSeq;
+                }
                 _staleAckCount = 0;
             }
         }

@@ -14,6 +14,7 @@
 #include "app/CrsfLinkStats.h"
 #include "app/LinkStatusLed.h"
 #include "app/LinkRuntimeDiag.h"
+#include "app/PersistencePolicy.h"
 #include "crsfSerial.h"
 #include "fhss/Fhss.h"
 #include "hal/FlashStore.h"
@@ -76,6 +77,17 @@ xlrs::Sx1280NativePhy g_phy;
 xlrs::BindingStore g_bindingStore;
 xlrs::RfConfigData g_rfConfig;
 xlrs::hal::SerialPort g_controlUart(uart1, UART_PROTOCOL_TX, UART_PROTOCOL_RX);
+
+static bool txPersistenceAllowed(const char* label) {
+    RfToAppData rfData{};
+    if (g_rfToApp.load(rfData) &&
+        !xlrs::app::persistenceAllowed(rfData.state, false)) {
+        printf("[TX CONFIG] ERROR: Refusing to save %s while link is active\n", label);
+        return false;
+    }
+    return true;
+}
+
 #if XLRS_TX_CONTROLLER_CRSF
 CrsfSerial controllerCrsf(g_controlUart, CRSF_BAUDRATE);
 struct CrsfControllerDebug {
@@ -156,14 +168,21 @@ static bool enqueueAppTelemetryToRf(const xlrs::AppTelemetryMessage& message, co
     return false;
 }
 
-static bool saveRfConfigFromCrsf(const char* label) {
-    xlrs::RfConfig::refreshChecksum(g_rfConfig);
-    bool saved = xlrs::RfConfig::save(g_rfConfig);
+static bool saveRfConfigFromCrsf(const xlrs::RfConfigData& pendingConfig, const char* label) {
+    if (!txPersistenceAllowed(label)) return false;
+
+    xlrs::RfConfigData sanitized = pendingConfig;
+    xlrs::RfConfig::refreshChecksum(sanitized);
+    bool saved = xlrs::RfConfig::save(sanitized);
     xlrs::AppTelemetryMessage message{};
-    bool queued = xlrs::makeRxConfigMessage(g_rfConfig, message) &&
+    bool queued = saved &&
+                  xlrs::makeRxConfigMessage(sanitized, message) &&
                   enqueueAppTelemetryToRf(message, label);
     if (!saved) {
         printf("[CRSF] ERROR: Failed to save RF config for %s\n", label);
+    }
+    if (saved) {
+        g_rfConfig = sanitized;
     }
     return saved && queued;
 }
@@ -323,8 +342,9 @@ void onCrsfParameterWrite(uint8_t parameterNumber, const uint8_t* value, uint8_t
     switch (parameterNumber) {
         case CRSF_PARAM_RATE:
             if (valueLen >= 1 && value[0] < xlrs::kNumRates) {
-                g_rfConfig.defaultRate = value[0];
-                if (saveRfConfigFromCrsf("rate")) {
+                xlrs::RfConfigData pendingConfig = g_rfConfig;
+                pendingConfig.defaultRate = value[0];
+                if (saveRfConfigFromCrsf(pendingConfig, "rate")) {
                     sendCrsfParameterWriteAck(origin, parameterNumber, &g_rfConfig.defaultRate, 1);
                 } else {
                     sendCrsfParameter(origin, parameterNumber);
@@ -335,8 +355,9 @@ void onCrsfParameterWrite(uint8_t parameterNumber, const uint8_t* value, uint8_t
             if (valueLen >= 1) {
                 int8_t requested = (int8_t)value[0];
                 if (requested >= -18 && requested <= 13) {
-                    g_rfConfig.maxPowerDbm = requested;
-                    if (saveRfConfigFromCrsf("max power")) {
+                    xlrs::RfConfigData pendingConfig = g_rfConfig;
+                    pendingConfig.maxPowerDbm = requested;
+                    if (saveRfConfigFromCrsf(pendingConfig, "max power")) {
                         sendCrsfParameterWriteAck(origin, parameterNumber,
                                                   (const uint8_t*)&g_rfConfig.maxPowerDbm, 1);
                     } else {
@@ -347,8 +368,9 @@ void onCrsfParameterWrite(uint8_t parameterNumber, const uint8_t* value, uint8_t
             break;
         case CRSF_PARAM_DYNAMIC_POWER:
             if (valueLen >= 1 && value[0] <= 1) {
-                g_rfConfig.dynamicPower = value[0];
-                if (saveRfConfigFromCrsf("dynamic power")) {
+                xlrs::RfConfigData pendingConfig = g_rfConfig;
+                pendingConfig.dynamicPower = value[0];
+                if (saveRfConfigFromCrsf(pendingConfig, "dynamic power")) {
                     sendCrsfParameterWriteAck(origin, parameterNumber, &g_rfConfig.dynamicPower, 1);
                 } else {
                     sendCrsfParameter(origin, parameterNumber);
@@ -357,8 +379,9 @@ void onCrsfParameterWrite(uint8_t parameterNumber, const uint8_t* value, uint8_t
             break;
         case CRSF_PARAM_REGION:
             if (valueLen >= 1 && value[0] <= 1) {
-                g_rfConfig.region = value[0];
-                if (saveRfConfigFromCrsf("region")) {
+                xlrs::RfConfigData pendingConfig = g_rfConfig;
+                pendingConfig.region = value[0];
+                if (saveRfConfigFromCrsf(pendingConfig, "region")) {
                     sendCrsfParameterWriteAck(origin, parameterNumber, &g_rfConfig.region, 1);
                 } else {
                     sendCrsfParameter(origin, parameterNumber);
@@ -367,8 +390,9 @@ void onCrsfParameterWrite(uint8_t parameterNumber, const uint8_t* value, uint8_t
             break;
         case CRSF_PARAM_FAILSAFE:
             if (valueLen >= 1 && value[0] <= 1) {
-                g_rfConfig.failsafeMode = value[0];
-                if (saveRfConfigFromCrsf("failsafe")) {
+                xlrs::RfConfigData pendingConfig = g_rfConfig;
+                pendingConfig.failsafeMode = value[0];
+                if (saveRfConfigFromCrsf(pendingConfig, "failsafe")) {
                     sendCrsfParameterWriteAck(origin, parameterNumber, &g_rfConfig.failsafeMode, 1);
                 } else {
                     sendCrsfParameter(origin, parameterNumber);
@@ -460,6 +484,10 @@ void onCommandPayloadReceived(UARTMsgType cmd, const uint8_t* payload, uint8_t l
     printf("[UART] SET_BIND_TX command received: %s\n", phrase);
     uartProto.sendAck(UART_MSG_CMD_SET_BIND_TX);
     xlrs::hal::sleepMs(10);
+
+    if (!txPersistenceAllowed("binding phrase")) {
+        return;
+    }
 
     if (g_bindingStore.setBindingPhrase(phrase)) {
         printf("[UART] Binding phrase persisted. Rebooting TX...\n");

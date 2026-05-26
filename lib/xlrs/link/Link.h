@@ -148,7 +148,24 @@ public:
     int8_t           syncFhssSkew() const { return _syncFhssSkew; }
     uint32_t         lastRxTick() const { return _lastRxTick; }
     uint16_t         rxPos() const { return _rxPos; }
-    uint16_t         txPos(uint32_t tick) const { return (uint16_t)((tick / hopInterval()) % _fhss.count()); }
+    uint16_t         txPos(uint32_t tick) const {
+        const uint16_t hop = hopInterval();
+        uint32_t hopTick = 0;
+        switch (hop) {
+            case 1:  hopTick = tick;      break;
+            case 2:  hopTick = tick >> 1; break;
+            case 4:  hopTick = tick >> 2; break;
+            case 8:  hopTick = tick >> 3; break;
+            case 16: hopTick = tick >> 4; break;
+            default: hopTick = tick / hop; break;
+        }
+
+        const uint8_t count = _fhss.count();
+        if (count == kNumFhssChannels2g4) {
+            return (uint16_t)(hopTick % kNumFhssChannels2g4);
+        }
+        return count ? (uint16_t)(hopTick % count) : 0;
+    }
     uint32_t         effectiveTxTick(uint32_t localTick) const;
     uint8_t          tlmRatioDenom() const { return _rate.tlmRatioDenom; }
     uint16_t         syncEveryNTicks() const { return _fhss.count() * hopInterval(); }

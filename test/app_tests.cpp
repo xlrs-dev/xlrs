@@ -3,6 +3,7 @@
 #include "app/AppTelemetry.h"
 #include "app/CrsfChannels.h"
 #include "app/CrsfLinkStats.h"
+#include "app/PersistencePolicy.h"
 
 using namespace xlrs;
 
@@ -97,6 +98,15 @@ static void test_app_telemetry_messages() {
     TEST_ASSERT_EQUAL_UINT8_ARRAY(uid, parsedUid, LINK_UID_SIZE);
 }
 
+static void test_persistence_policy_blocks_active_link_states() {
+    TEST_ASSERT_TRUE(app::persistenceAllowed(LinkState::Disconnected, false));
+    TEST_ASSERT_TRUE(app::persistenceAllowed(LinkState::Connecting, false));
+    TEST_ASSERT_TRUE(app::persistenceAllowed(LinkState::Binding, false));
+    TEST_ASSERT_FALSE(app::persistenceAllowed(LinkState::Connected, false));
+    TEST_ASSERT_FALSE(app::persistenceAllowed(LinkState::Failsafe, false));
+    TEST_ASSERT_FALSE(app::persistenceAllowed(LinkState::Connecting, true));
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -107,5 +117,6 @@ int main() {
     RUN_TEST(test_crsf_packed_channels_to_rc_channels);
     RUN_TEST(test_crsf_frame_address_validation);
     RUN_TEST(test_app_telemetry_messages);
+    RUN_TEST(test_persistence_policy_blocks_active_link_states);
     return UNITY_END();
 }

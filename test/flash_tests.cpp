@@ -74,6 +74,15 @@ static void test_flash_store_migrates_legacy_layout_without_erasing_on_cut() {
     TEST_ASSERT_EQUAL_MEMORY(legacyUid, afterCutUid, LINK_UID_SIZE);
 }
 
+static void test_flash_store_reports_capacity_and_rejects_out_of_range_writes() {
+    xlrs::hal::FlashStore::resetSim();
+    TEST_ASSERT_TRUE(xlrs::hal::FlashStore::begin());
+    TEST_ASSERT_EQUAL_UINT32(4072, xlrs::hal::FlashStore::capacity());
+    TEST_ASSERT_TRUE(xlrs::hal::FlashStore::write(xlrs::hal::FlashStore::capacity() - 1, 0x42));
+    TEST_ASSERT_FALSE(xlrs::hal::FlashStore::write(xlrs::hal::FlashStore::capacity(), 0x24));
+    TEST_ASSERT_EQUAL_UINT8(0xFF, xlrs::hal::FlashStore::read(xlrs::hal::FlashStore::capacity()));
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -82,5 +91,6 @@ int main() {
     RUN_TEST(test_flash_boot_counter);
     RUN_TEST(test_flash_store_power_cut_keeps_last_committed_binding);
     RUN_TEST(test_flash_store_migrates_legacy_layout_without_erasing_on_cut);
+    RUN_TEST(test_flash_store_reports_capacity_and_rejects_out_of_range_writes);
     return UNITY_END();
 }

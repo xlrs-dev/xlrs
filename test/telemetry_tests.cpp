@@ -69,6 +69,29 @@ static void test_stubborn_sender_resets_after_peer_reboot_ack() {
     TEST_ASSERT_EQUAL_MEMORY(first.data, restarted.data, first.length & 0x7F);
 }
 
+static void test_stubborn_sender_rewinds_after_repeated_stale_ack() {
+    StubbornSender sender;
+    const char* payload = "fragmented telemetry payload that spans several chunks";
+    TEST_ASSERT_TRUE(sender.queuePayload((const uint8_t*)payload, strlen(payload)));
+
+    TelemetryChunk chunks[4]{};
+    for (uint8_t i = 0; i < 4; ++i) {
+        TEST_ASSERT_TRUE(sender.getNextChunk(chunks[i]));
+        TEST_ASSERT_EQUAL_UINT8(i, chunks[i].seq);
+        sender.receiveAck((uint8_t)(i + 1));
+    }
+
+    for (uint8_t i = 0; i < 3; ++i) {
+        sender.receiveAck(2);
+    }
+
+    TelemetryChunk rewound{};
+    TEST_ASSERT_TRUE(sender.getNextChunk(rewound));
+    TEST_ASSERT_EQUAL_UINT8(2, rewound.seq);
+    TEST_ASSERT_EQUAL_UINT8(chunks[2].length, rewound.length);
+    TEST_ASSERT_EQUAL_MEMORY(chunks[2].data, rewound.data, chunks[2].length & 0x7F);
+}
+
 static void test_link_stubborn_telemetry_integrated() {
     uint8_t uid[LINK_UID_SIZE];
     linkUidFromPhrase("Kikobot-02", uid);
@@ -131,6 +154,7 @@ int main() {
     UNITY_BEGIN();
     RUN_TEST(test_stubborn_telemetry_reliability);
     RUN_TEST(test_stubborn_sender_resets_after_peer_reboot_ack);
+    RUN_TEST(test_stubborn_sender_rewinds_after_repeated_stale_ack);
     RUN_TEST(test_link_stubborn_telemetry_integrated);
     RUN_TEST(test_msp_frames_count_toward_lq);
     return UNITY_END();

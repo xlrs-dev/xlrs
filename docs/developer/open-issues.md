@@ -50,11 +50,11 @@ is still future work before AEAD can ship.
 | ID | Branch status | Verification |
 | --- | --- | --- |
 | OI-001 | Fixed | `test_rc_decode_across_int32_tick_boundary` |
-| OI-002 | Fixed | two-slot flash journal plus `test_flash_store_power_cut_keeps_last_committed_binding` |
+| OI-002 | Fixed | two-slot flash journal, active-link persistence gate, and flash capacity checks |
 | OI-003 | Fixed | `test_sync_decode_rejects_truncated_tx_tick` |
 | OI-004 | Fixed | Pico build applies PFD adjustment; native PFD suite remains green |
 | OI-005 | Fixed | timing reset is requested on RX Connected-to-Failsafe regardless of retained lock |
-| OI-006 | Fixed | `test_stubborn_sender_resets_after_peer_reboot_ack` |
+| OI-006 | Fixed | peer-reboot reset plus stale-ACK rewind coverage |
 | OI-007 | Fixed | LED bind-packet pattern no longer aliases at the 50 ms sample period |
 | OI-008 | Fixed | CMake validates `XLRS_BENCH_RATE`; app startup clamps the selected rate |
 | OI-009 | Fixed | scheduler event drains use modular counter differences |
@@ -149,21 +149,22 @@ CMake cache values can masquerade as RF faults.
 ### OI-002: Flash Commit Can Erase Binding/Config On Power Loss
 
 - **Severity:** P0 safety/configuration risk.
-- **Status:** Confirmed mechanism; final binding impact depends on the compiled
-  `XLRS_DEFAULT_BINDING_PHRASE`.
-- **Evidence:** `FlashStore::commit()` erases the single flash sector and then
-  programs `s_cache` (`lib/xlrs/hal/FlashStore.cpp`). `BindingStore::begin()`
-  writes the default phrase when the persisted record is invalid
+- **Status:** Fixed on this branch with a two-slot journal, explicit flash-store
+  capacity, persisted-write failure propagation, and app-level blocking while
+  the link/output is active.
+- **Evidence:** The old `FlashStore::commit()` erased the single flash sector and
+  then programmed `s_cache` (`lib/xlrs/hal/FlashStore.cpp`). `BindingStore::begin()`
+  wrote the default phrase when the persisted record was invalid
   (`lib/xlrs/link/BindingStore.h`).
 - **Why it matters:** Power loss or reset between erase and program can leave the
   sector as `0xFF`. On next boot, binding/config validation fails and the device
   can silently fall back to the compiled default identity.
 - **Likely symptom:** A custom-bound TX/RX pair reverts to default identity after
   a brownout during a write, causing mismatch or unintended default binding.
-- **Proposed fix:** Replace the single-sector store with a two-slot journal:
-  sequence number, payload, checksum, and commit marker. Program the inactive
-  slot fully, verify it, then mark it active. Never overwrite the last known-good
-  slot until the replacement is complete.
+- **Fix:** Replace the single-sector store with a two-slot journal: sequence
+  number, payload, checksum, and commit marker. Program the inactive slot fully,
+  verify it, then mark it active. App persistence paths now refuse binding/RF
+  config writes while the link/output is active.
 
 ### OI-008: `XLRS_BENCH_RATE` Override Is Not Range-Checked
 
@@ -365,7 +366,7 @@ information used for dynamic power control.
 ### OI-006: Stubborn Telemetry Can Deadlock After Independent Peer Reboot
 
 - **Severity:** P1 for bidirectional telemetry reliability.
-- **Status:** Confirmed from sender/receiver state machines.
+- **Status:** Fixed on this branch.
 - **Evidence:** `StubbornSender::receiveAck()` only advances when
   `ackSeq == _currentSeq + 1`; `StubbornReceiver` resets `_expectedSeq` to zero
   on construction (`lib/xlrs/link/StubbornTelemetry.h`).
@@ -373,9 +374,9 @@ information used for dynamic power control.
   expectation while sender keeps retransmitting the old sequence forever.
 - **Likely symptom:** MSP/CRSF telemetry stream stalls permanently until both
   endpoints reboot or the sender state is otherwise reset.
-- **Proposed fix:** Add desync handling. Options: reset sender after repeated
-  stale ACKs, include a payload/session generation in chunks, or let receiver
-  advertise a reset ACK that causes sender to flush current payload.
+- **Fix:** `ackSeq == 0` rewinds the current transfer to fragment 0 after a peer
+  reboot. Repeated stale ACKs for an earlier sequence rewind to that fragment
+  instead of dropping the payload.
 
 ### OI-013: Unauthenticated Downlink Telemetry Steers TX Dynamic Power
 

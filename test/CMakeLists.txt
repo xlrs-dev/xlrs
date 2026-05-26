@@ -57,7 +57,7 @@ function(add_xlrs_test suite)
     add_test(NAME xlrs_${suite}_tests COMMAND xlrs_${suite}_tests)
 endfunction()
 
-foreach(suite core timing scheduler link telemetry power crypto app flash)
+foreach(suite core timing scheduler link telemetry power crypto app flash invariant)
     add_xlrs_test(${suite})
 endforeach()
 

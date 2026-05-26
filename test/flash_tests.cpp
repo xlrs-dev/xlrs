@@ -26,7 +26,11 @@ static void test_flash_store_power_cut_keeps_last_committed_binding() {
     TEST_ASSERT_TRUE(store.getBindingUid(customA));
 
     xlrs::hal::FlashStore::simulatePowerCutOnNextCommit();
-    TEST_ASSERT_TRUE(store.setBindingPhrase("CUSTOM-B"));
+    TEST_ASSERT_FALSE(store.setBindingPhrase("CUSTOM-B"));
+
+    uint8_t afterFailedCommit[LINK_UID_SIZE] = {};
+    TEST_ASSERT_TRUE(store.getBindingUid(afterFailedCommit));
+    TEST_ASSERT_EQUAL_MEMORY(customA, afterFailedCommit, LINK_UID_SIZE);
 
     TEST_ASSERT_TRUE(xlrs::hal::FlashStore::begin());
     BindingStore rebooted;

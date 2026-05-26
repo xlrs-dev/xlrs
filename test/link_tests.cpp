@@ -456,6 +456,31 @@ static void test_link_tx_failsafe_counts_telemetry_slots() {
     TEST_ASSERT_TRUE(env.tx.state() == LinkState::Connected);
 }
 
+// OI-019: AEAD must not run under the default (zero) session salt. Enabling a cipher before a
+// nonzero salt is set must be refused, setSessionSalt(0) must be rejected and disable the
+// cipher, and only a nonzero salt unlocks encryption. Guards against shipping a fixed/zero
+// nonce salt in production.
+static void test_link_cipher_requires_nonzero_session_salt() {
+    uint8_t uid[LINK_UID_SIZE];
+    linkUidFromPhrase("Kikobot-02", uid);
+    Link link;
+    link.begin(Role::Tx, uid, 2);
+
+    uint8_t key[32];
+    for (int i = 0; i < 32; ++i) key[i] = (uint8_t)i;
+    AeadCipher cipher;
+    cipher.setKey(key);
+
+    // Default salt is zero -> enabling a cipher is refused.
+    TEST_ASSERT_FALSE(link.setCipher(&cipher));
+    // Explicit zero salt is rejected and leaves AEAD disabled.
+    TEST_ASSERT_FALSE(link.setSessionSalt(0));
+    TEST_ASSERT_FALSE(link.setCipher(&cipher));
+    // A nonzero, negotiated salt unlocks the cipher.
+    TEST_ASSERT_TRUE(link.setSessionSalt(0xA5A5A5A5u));
+    TEST_ASSERT_TRUE(link.setCipher(&cipher));
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -479,5 +504,6 @@ int main() {
     RUN_TEST(test_link_rx_lq_holdoff_does_not_mask_rc_loss);
     RUN_TEST(test_link_rx_lq_holdoff_failsafe_on_total_loss);
     RUN_TEST(test_link_tx_failsafe_counts_telemetry_slots);
+    RUN_TEST(test_link_cipher_requires_nonzero_session_salt);
     return UNITY_END();
 }

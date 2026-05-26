@@ -68,6 +68,38 @@ inline void linkStatusLedInit(uint8_t pin) {
 #endif
 }
 
+// Pure on/off decision for the status LED, given link state, flags, and the running
+// millisecond counter. Extracted from the I/O wrapper below so the blink PATTERNS are
+// host-testable (the wrapper itself is Pico-only). No SDK calls here. Patterns are chosen
+// so that, sampled at the 50 ms update cadence, each distinct state yields a recognizably
+// different on/off sequence — e.g. bind-received must blink, not alias to solid-on
+// (see open-issues.md OI-007).
+inline bool linkStatusLedComputeOn(LinkState state, const LinkStatusLedFlags& flags,
+                                   uint32_t msCounter) {
+    if (flags.configFault || flags.hardwareError) {
+        return true;
+    } else if (flags.bindPacketReceived) {
+        const uint32_t phase = msCounter % 200;
+        return phase < 50 || (phase >= 100 && phase < 150);
+    } else if (flags.bindScanOpen) {
+        const uint32_t phase = msCounter % 600;
+        return phase < 70 || (phase >= 140 && phase < 210);
+    } else if (state == LinkState::Binding || flags.bindTransmitActive) {
+        return (msCounter % 100) < 50;
+    } else if (state == LinkState::Connected) {
+        if (!flags.requireOutputForConnected || flags.outputActive) {
+            return true;
+        }
+        return (msCounter % 500) < 250;
+    } else if (state == LinkState::Failsafe) {
+        const uint32_t phase = msCounter % 600;
+        return phase < 80 || (phase >= 160 && phase < 240);
+    } else if (state == LinkState::Connecting) {
+        return (msCounter % 500) < 250;
+    }
+    return (msCounter % 1000) < 500;
+}
+
 inline void linkStatusLedUpdate(uint8_t pin, LinkState state, const LinkStatusLedFlags& flags) {
 #if defined(XLRS_PICO_SDK)
     static uint32_t lastUpdateMs = 0;
@@ -79,32 +111,7 @@ inline void linkStatusLedUpdate(uint8_t pin, LinkState state, const LinkStatusLe
     lastUpdateMs = now;
     msCounter += kUpdateIntervalMs;
 
-    bool on = false;
-    if (flags.configFault || flags.hardwareError) {
-        on = true;
-    } else if (flags.bindPacketReceived) {
-        const uint32_t phase = msCounter % 200;
-        on = phase < 50 || (phase >= 100 && phase < 150);
-    } else if (flags.bindScanOpen) {
-        const uint32_t phase = msCounter % 600;
-        on = phase < 70 || (phase >= 140 && phase < 210);
-    } else if (state == LinkState::Binding || flags.bindTransmitActive) {
-        on = (msCounter % 100) < 50;
-    } else if (state == LinkState::Connected) {
-        if (!flags.requireOutputForConnected || flags.outputActive) {
-            on = true;
-        } else {
-            on = (msCounter % 500) < 250;
-        }
-    } else if (state == LinkState::Failsafe) {
-        const uint32_t phase = msCounter % 600;
-        on = phase < 80 || (phase >= 160 && phase < 240);
-    } else if (state == LinkState::Connecting) {
-        on = (msCounter % 500) < 250;
-    } else {
-        on = (msCounter % 1000) < 500;
-    }
-
+    const bool on = linkStatusLedComputeOn(state, flags, msCounter);
     linkStatusLedWrite(pin, on);
 #else
     (void)pin;

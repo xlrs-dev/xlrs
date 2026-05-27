@@ -383,6 +383,10 @@ despite **LQ 50–77%** — consecutive uplink miss counting ran in `service()` 
 | Count RX uplink misses when the HW LQ slot closes (not at `service()` time) | `Link.cpp` |
 | Suppress consecutive-miss failsafe while `lqUp ≥ 25%` (`FAILSAFE_LQ_HOLDOFF`) | `Link.cpp` |
 
+> Current branch note: the LQ holdoff suppression above was later removed for safety.
+> RX failsafe now follows consecutive missed uplink RC slots; LQ remains diagnostic and
+> can be stale if the async ledger stalls.
+
 **After fix (D250, ~1 m, bench TX build):**
 
 | Side | Max LQ | Samples ≥70% | States (3/4) |
@@ -405,15 +409,19 @@ TX **State 3** entire run, both sides **≥70% LQ** on D250 (`tmr:4000/4000`).
 Tracked in GitHub issue [#8](https://github.com/xlrs-dev/xlrs/issues/8). Summary:
 
 1. **Post-connection PFD** — host tests + bench `n`/`adj` fields confirm the loop runs
-   after Connected; tune convergence when link drops quickly (timer can stay biased in Failsafe).
+   after Connected. This branch applies the hardware timer nudge on Pico; capture a short
+   F1000 bench note for convergence/timer clamping before treating OI-004 as fully closed.
 2. ~~**TX bench failsafe**~~ — addressed by `-DXLRS_BENCH_TX=ON` (Pass 9); use for bench
    captures only, not production TX with a real controller.
-3. **AIO + RC handset (next milestone)** — replace bench TX autostick with a real CRSF RC
+3. **RX overrun fast-forward bench note** — host coverage verifies the intended
+   fast-forward behavior, but a brief stall/reconnect hardware run should be recorded before
+   treating OI-015 as fully closed.
+4. **AIO + RC handset (next milestone)** — replace bench TX autostick with a real CRSF RC
    controller on TX (`-DXLRS_TX_CONTROLLER_PROTOCOL=CRSF`) and wire RX CRSF to an AIO /
    flight controller. Build production TX (`XLRS_BENCH_TX=OFF`), confirm `CRSF rc`/`out:1`,
    stick-driven uplink, and FC telemetry loop (`fc`/`fcq`). See
    [bench-bringup.md](bench-bringup.md) and [../troubleshooting/index.md](../troubleshooting/index.md).
-4. **Status LED** — verify GP10 active-low wiring; user reported no blinks early in
+5. **Status LED** — verify GP10 active-low wiring; user reported no blinks early in
    bring-up (stale CMake `XLRS_STATUS_LED_PIN=13` vs GP10).
 5. **Bind-scan vs lock loss** — after ~70 s without RC, RX dropped lock and cycled
    bind-scan; tune timeout or keep lock longer during partial acquisition.

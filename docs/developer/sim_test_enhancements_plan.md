@@ -257,7 +257,7 @@ Test (`test/telemetry_tests.cpp`) — `test_telemetry_independent_reboot`:
 
 ## 5. Security & Failsafe Integrity (OI-011, OI-012, OI-013)
 
-`test_telemetry_power_spoofing` (OI-013) — reachable today (the `TlmDown` accept path and `_power.update()` are common code):
+`test_unauthenticated_tlmdown_does_not_steer_dynamic_power` (OI-013) — reachable today (the `TlmDown` accept path and `_power.update()` are common code):
 
 - Enable dynamic power on TX; via a **public** `MockPhy` inject seam (currently `deliver()` is private), feed forged unauthenticated `TlmDown` frames with extreme stats.
 - Assert TX power is unchanged. **Fails on current code (power *does* move); passes once `TlmDown` is authenticated or excluded from power control.**
@@ -410,7 +410,7 @@ invariant — that seed *is* the next OI.
 | OI-003 | Sync-length fuzzer (reject 10–13 B) | `link_tests.cpp` | No | Fails (then green) |
 | OI-006 | Mid-transfer receiver reset injector | `telemetry_tests.cpp` | No | Fails (then green) |
 | OI-011 | Sudden-loss latency, rate-aware bound | `link_tests.cpp` | No | Fails at slow rates |
-| OI-013 | Spoofed unauth `TlmDown` injector | `power_tests.cpp` | No | Fails (then green) |
+| OI-013 | Spoofed unauth `TlmDown` injector | `power_tests.cpp` | No | Green: unauthenticated `TlmDown` no longer steers power |
 | OI-004 | Async timeline; assert HW timer nudged | `timing_tests.cpp` | **Yes** | Not reproducible until seam |
 | OI-012 | Async timeline; stall slot stream | `link_tests.cpp` | **Yes** | Not reproducible until seam |
 | OI-015 | Async timeline; core-1 stall + overrun | `scheduler_tests.cpp` | **Yes** | Not reproducible until seam |

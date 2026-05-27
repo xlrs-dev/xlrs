@@ -52,18 +52,18 @@ is still future work before AEAD can ship.
 | OI-001 | Fixed | `test_rc_decode_across_int32_tick_boundary` |
 | OI-002 | Fixed | two-slot flash journal, active-link persistence gate, and flash capacity checks |
 | OI-003 | Fixed | `test_sync_decode_rejects_truncated_tx_tick` |
-| OI-004 | Fixed | Pico build applies PFD adjustment; native PFD suite remains green |
+| OI-004 | Code fixed; bench validation pending | Pico build applies PFD adjustment; native PFD suite remains green |
 | OI-005 | Fixed | timing reset is requested on RX Connected-to-Failsafe regardless of retained lock |
 | OI-006 | Fixed | peer-reboot reset plus stale-ACK rewind coverage |
 | OI-007 | Fixed | LED bind-packet pattern no longer aliases at the 50 ms sample period |
 | OI-008 | Fixed | CMake validates `XLRS_BENCH_RATE`; app startup clamps the selected rate |
-| OI-009 | Fixed | scheduler event drains use modular counter differences |
+| OI-009 | Fixed | scheduler event drains use modular counter differences; `test_scheduler_tick_event_counter_wrap` |
 | OI-010 | Fixed | packet-start timing stays owned by `RfScheduler`; unused Link parameter removed |
 | OI-011 | Fixed | RX failsafe now follows consecutive RC misses, not healthy/stale LQ |
-| OI-012 | Fixed | frozen LQ can no longer mask consecutive RC misses |
-| OI-013 | Fixed | `TlmDown` payload and ACK pass through the cipher layer before dynamic power update |
+| OI-012 | Partially fixed | failsafe unblocked from stale LQ; LQ display freeze still needs async-ledger decay |
+| OI-013 | Fixed for power steering; auth incomplete | unauthenticated `TlmDown` no longer drives dynamic power; telemetry authenticity waits for AEAD |
 | OI-014 | Fixed | bench TX mode is rejected in Release builds and warns loudly otherwise |
-| OI-015 | Fixed | RX-locked overrun fast-forwards to the latest scheduler tick |
+| OI-015 | Code fixed; bench validation pending | RX-locked overrun fast-forwards to the latest scheduler tick |
 | OI-016 | Partially mitigated | added targeted host coverage; full async hardware-path sim remains planned |
 | OI-017 | Fixed | `setSyncWord()` reports success/failure and scheduler retries failed writes |
 | OI-018 | Fixed | bind-scan exit now resets acquisition under the restored bound identity |
@@ -78,8 +78,8 @@ crosses module boundaries.
 | Firmware area | Issues | Why this area owns part of the fix | User impact from current bugs |
 | --- | --- | --- | --- |
 | Binding / identity | OI-002, OI-017, OI-018 | Binding state depends on persisted UID/phrase, PHY sync-word programming, and acquisition reset during bind-scan transitions. | Pair forgets binding after a write-time brownout; bind/rebind can appear randomly broken when software identity and radio/acquisition state disagree. |
-| Security / authentication | OI-013, OI-019 | Default plaintext, unauthenticated `TlmDown`, and unfinished AEAD session-salt lifecycle all live in the link crypto boundary. | Nearby spoofing can manipulate telemetry/TX power; default builds are plaintext, and AEAD is not field-ready until nonce lifecycle is finished. |
-| TX behavior | OI-006, OI-013, OI-014, OI-019 | TX consumes downlink telemetry for dynamic power, owns bench-TX behavior, and participates in stubborn telemetry/AEAD nonce state. | Telemetry can freeze after peer reboot; spoofed downlink can steer power; bench builds can make TX stay connected on telemetry alone. |
+| Security / authentication | OI-013, OI-019 | Default plaintext, unauthenticated `TlmDown`, and unfinished AEAD session-salt lifecycle all live in the link crypto boundary. | Nearby spoofing can manipulate displayed telemetry; default builds are plaintext, and AEAD is not field-ready until nonce lifecycle is finished. |
+| TX behavior | OI-006, OI-013, OI-014, OI-019 | TX consumes downlink telemetry for dynamic power, owns bench-TX behavior, and participates in stubborn telemetry/AEAD nonce state. | Telemetry can freeze after peer reboot; unauthenticated downlink telemetry must not steer power; bench builds can make TX stay connected on telemetry alone. |
 | RX behavior | OI-001, OI-002, OI-003, OI-005, OI-011, OI-012, OI-015, OI-018 | RX owns acquisition, RC decode, failsafe output, bind scanning, and the async LQ paths that decide whether control output remains active. | Receiver can drop after long uptime, delay failsafe, never failsafe after a stall, or extend a brief obstruction into a longer control loss. |
 | RF scheduler / timing | OI-004, OI-005, OI-009, OI-010, OI-015, OI-017 | Scheduler tick/event handling, PFD correction, packet-start timing, overrun recovery, and PHY identity sync are coupled here. | Fast modes can feel fragile; long-uptime event wrap can stop event handling; stale timing can cause dropouts that outlast the original hiccup. |
 | SX1280 PHY / radio driver | OI-004, OI-017 | Hardware timer behavior and sync-word writes must reflect actual SX1280 command success, not just software intent. | Radio may not apply the identity or timing correction the logs imply, so pairing or fast-rate performance can fail in misleading ways. |
@@ -280,19 +280,20 @@ core stalls.
 ### OI-004: Hardware PFD Records Corrections But Does Not Apply Them
 
 - **Severity:** P1, especially for F1000 and marginal clocks.
-- **Status:** Confirmed discrepancy.
-- **Evidence:** On Pico builds, `RfScheduler::applyLockedRxPhaseResync()` calls
-  `_pfd.update(offsetUs)` and records `adjUs`, then sets the timer to nominal
+- **Status:** Code fixed; bench validation pending.
+- **Evidence:** On Pico builds, `RfScheduler::applyLockedRxPhaseResync()` used to
+  call `_pfd.update(offsetUs)` and record `adjUs`, then set the timer to nominal
   `_rate.intervalUs` instead of `_rate.intervalUs + adjUs`
-  (`lib/xlrs/link/RfScheduler.cpp`). The host-test branch still applies the
-  adjustment.
+  (`lib/xlrs/link/RfScheduler.cpp`). The branch now applies `interval + adjUs`
+  on the Pico path, but F1000 bench evidence is still required before closing the
+  hardware risk.
 - **Why it matters:** Diagnostics can show `pfd`, `adj`, and `n` as active while
   the hardware timer is not actually nudged between Sync snaps.
 - **Likely symptom:** D250 works due to wide slots, but F1000 acquisition or long
   holds remain fragile; host tests overstate hardware timing behavior.
-- **Proposed fix:** Decide whether post-connect PFD should truly nudge hardware.
-  If yes, apply `interval + adjUs` on Pico and add a hardware-path simulation
-  test. If no, rename diagnostics so `adj` is not presented as applied.
+- **Fix:** Apply `interval + adjUs` on Pico. Remaining work: add a bench note for
+  F1000 PFD convergence / timer clamping, or a future hardware-path simulation
+  seam that can reproduce it off-board.
 
 ### OI-005: Connected-To-Failsafe Timer Reset Is Gated Off By Retained RX Lock
 
@@ -310,10 +311,11 @@ core stalls.
 ### OI-015: Scheduler Overrun While RX-Locked Leaves `_tick` Stale Until Next Sync
 
 - **Severity:** P2; interacts with OI-001 and OI-012.
-- **Status:** Confirmed from code.
-- **Evidence:** The RX-locked overrun path advances `_lastProcessedTickEvent` but
-  not `_tick` (`lib/xlrs/link/RfScheduler.cpp`). Subsequent `onTick()` continues
-  from the stale `_tick`.
+- **Status:** Code fixed; bench validation pending.
+- **Evidence:** The RX-locked overrun path used to advance `_lastProcessedTickEvent`
+  but not `_tick` (`lib/xlrs/link/RfScheduler.cpp`). The branch now fast-forwards
+  to the latest scheduler tick and has host coverage for the happy path; a brief
+  stall/reconnect bench run is still prudent.
 - **Why it matters:** Until the next Sync snap, the scheduler arms RX on FHSS
   channels derived from a stale position. If accumulated drift exceeds the RC
   nonce search window, RX cannot re-anchor on RC alone and must wait for Sync.
@@ -331,7 +333,7 @@ real failsafe.
 ### OI-011: Failsafe Onset Is Delayed By The LQ Holdoff Window Drain
 
 - **Severity:** P1 safety, worst on slow rates.
-- **Status:** Confirmed from code.
+- **Status:** Fixed.
 - **Evidence:** `Link::service()` forces `misses = 0` whenever
   `_stats.lqUp >= FAILSAFE_LQ_HOLDOFF` (25%). Uplink LQ is a 100-slot sliding
   window (`LqTracker<100>`).
@@ -341,21 +343,22 @@ real failsafe.
 - **Likely symptom:** RC output keeps streaming stale/last values for up to about
   75 ms at F1000, 300 ms at D250, 0.5 s at L150, or 1.5 s at L50 after true
   signal loss.
-- **Proposed fix:** Add an absolute RC-freshness backstop that is independent of
-  the sliding-window drain, and test worst-case onset latency per rate.
+- **Fix:** RX failsafe now follows consecutive missed uplinks directly; the LQ
+  window is diagnostic and no longer masks RC freshness.
 
 ### OI-012: Async Uplink LQ Ledger Has No Time-Based Flush; `lqUp` Can Freeze
 
 - **Severity:** P1; feeds OI-011.
-- **Status:** Confirmed from code.
+- **Status:** Partially fixed.
 - **Evidence:** `Link::advanceHwUplinkLqSlot()` closes a window only when the next
   uplink slot arrives; there is no tick/time watchdog. The RX-locked overrun path
   can discard backlog without calling `onTick()`/`service()`.
 - **Why it matters:** If the uplink-slot stream stalls, `_lq` stops updating and
-  `lqUp` holds its last value. Frozen at >=25%, it can suppress failsafe.
-- **Likely symptom:** RX shows stale healthy LQ and never failsafes after a slot
-  stall; recovery may require reboot.
-- **Proposed fix:** Flush/decay the LQ ledger on elapsed ticks, not solely on the
+  `lqUp` holds its last value. The failsafe path no longer trusts this stale value,
+  but CRSF/OSD/status can still display stale healthy LQ.
+- **Likely symptom:** RX can correctly enter failsafe while still showing stale
+  healthy LQ in diagnostics.
+- **Remaining fix:** Flush/decay the LQ ledger on elapsed ticks, not solely on the
   next slot; close any window older than a bounded number of ticks as a miss.
 
 ## Telemetry, Security, And Power-Control Integrity
@@ -381,20 +384,22 @@ information used for dynamic power control.
 ### OI-013: Unauthenticated Downlink Telemetry Steers TX Dynamic Power
 
 - **Severity:** P1 security.
-- **Status:** Confirmed from code.
+- **Status:** Fixed for dynamic-power steering; telemetry authenticity remains
+  incomplete until AEAD is active.
 - **Evidence:** Standard downlink telemetry is sent in clear text
-  (`otaEncodeTlmDown`) and accepted with no AEAD, then fed into dynamic power via
-  `_txPowerDbm = _power.update(upLq, upRssi)` (`lib/xlrs/link/Link.cpp`). RC
-  uplink and MSP downlink chunks pass through the cipher abstraction, but the default
-  production cipher is `NullCipher`; `TlmDown` does not even pass through that layer.
+  (`otaEncodeTlmDown`) and used to feed dynamic power via
+  `_txPowerDbm = _power.update(upLq, upRssi)` (`lib/xlrs/link/Link.cpp`). The
+  branch now seals/opens `TlmDown` through the cipher layer and refuses to let
+  unauthenticated/default-plaintext `TlmDown` update dynamic power.
 - **Why it matters:** An attacker who knows or guesses the UID-derived sync word
-  can inject `TlmDown` frames to spoof reported link health and drive TX power up
-  or down. Sync-word plus FHSS-channel filtering is not cryptographic, and this
-  remains true even if AEAD is later enabled for RC/MSP only.
-- **Likely symptom:** Manipulated TX power or bogus telemetry display with no
-  decode-failure indication.
-- **Proposed fix:** Authenticate `TlmDown`, or at least refuse to let
-  unauthenticated telemetry drive power/state transitions.
+  could inject `TlmDown` frames. Sync-word plus FHSS-channel filtering is not
+  cryptographic, so unauthenticated telemetry must not control safety-relevant
+  behavior.
+- **Likely symptom:** Bogus telemetry display with no decode-failure indication;
+  dynamic power is no longer steered by unauthenticated `TlmDown`.
+- **Fix:** Refuse to let unauthenticated telemetry drive power. Remaining work:
+  ship a real AEAD/session-salt handshake so `TlmDown` stats themselves are
+  authenticated.
 
 ### OI-019: AEAD Session Salt Is Not Negotiated In Production
 
@@ -469,8 +474,8 @@ the risk can be judged without reading the code. "When it bites" is the trigger;
 | OI-009 | Always-on installation (ground station / fixed link) running for weeks to months | Radio stops handling events after very long uptime; needs a reboot |
 | OI-010 | Internal test-coverage gap; surfaces as OI-004's fragility | No distinct symptom of its own — fast-rate reliability is worse than the test suite implies |
 | OI-011 | A genuine loss of signal (out of range, antenna failure, crash behind cover) | The aircraft keeps obeying the last stick command for a fraction of a second up to ~1.5 s on the long-range mode before failsafe triggers — it keeps doing whatever it was last told for longer than it should |
-| OI-012 | A rare processing stall while the link still reads "connected" | Worst case: failsafe never triggers at all — total loss of control with outputs frozen at the last command until power-cycle |
-| OI-013 | A nearby attacker who can guess or learn your link's ID | Spoofed telemetry readings and manipulated transmit power; in default builds, RC/MSP are also plaintext because `NullCipher` is the active cipher |
+| OI-012 | A rare processing stall while the link still reads "connected" | Failsafe now follows RC misses, but LQ/status can still look healthier than reality until the async ledger decays |
+| OI-013 | A nearby attacker who can guess or learn your link's ID | Spoofed telemetry readings remain possible until AEAD ships; unauthenticated frames no longer steer dynamic power |
 | OI-014 | Only if a unit is accidentally built/flashed with the bench flag | Transmitter is reluctant to failsafe and stays "connected" on telemetry alone; correct release builds are unaffected |
 | OI-015 | Receiver CPU briefly bogged down (heavy load, flash write) | A control dropout that lasts noticeably longer than the hiccup itself, recovering only at the next beacon |
 | OI-016 | Internal process/test gap | No direct symptom — it is the reason several of the above could reach the field without a host test catching them |

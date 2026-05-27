@@ -6,6 +6,11 @@ When the link is not valid and `NoPulses` is active, the RX stops emitting CRSF
 RC channel frames so the flight controller can enter RXLOSS and own aircraft
 policy. `Hold` mode is available as an explicit configuration option.
 
+RX failsafe is driven by consecutive missed uplink RC slots. Link quality (`LQ`)
+is a diagnostic sliding-window statistic; it must not mask stale RC data. A stale
+or slow-draining LQ display can remain nonzero briefly after a loss, but control
+output is gated by RC freshness.
+
 ```mermaid
 stateDiagram-v2
     [*] --> Disconnected : Boot/Initialization

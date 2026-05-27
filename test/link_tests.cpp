@@ -227,7 +227,7 @@ static void test_link_rate_switch_and_power() {
     for (uint32_t t = 1; t <= 800; ++t) simTick(env, t);
     TEST_ASSERT_TRUE(env.rx.state() == LinkState::Connected);
     TEST_ASSERT_EQUAL_UINT8(2, env.rx.stats().rateIndex);
-    TEST_ASSERT_TRUE(env.txPhy.outputPowerDbm() < 10);
+    TEST_ASSERT_EQUAL_INT8(10, env.txPhy.outputPowerDbm());
 
     env.tx.requestRate(4);
     for (uint32_t t = 801; t <= 1600; ++t) simTick(env, t);

@@ -466,7 +466,9 @@ bool Link::processRxPayload(uint32_t tick, uint16_t pos, const uint8_t* data, ui
             _stats.downlinkRssiDbm = rssi;
             _stats.downlinkSnr = snr;
             _lastRxTick = tick; _everRx = true;
-            _txPowerDbm = _power.update(upLq, upRssi);
+            if (_cipher) {
+                _txPowerDbm = _power.update(upLq, upRssi);
+            }
             _receivedAckSeq = decBuf[4];
             _tlmSender.receiveAck(_receivedAckSeq);
         }

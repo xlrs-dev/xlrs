@@ -71,6 +71,28 @@ static void test_scheduler_poll_caps_backlog() {
     TEST_ASSERT_EQUAL_UINT32(backlog, sched.processedTick());
 }
 
+static void test_scheduler_tick_event_counter_wrap() {
+    uint8_t uid[LINK_UID_SIZE];
+    linkUidFromPhrase("Kikobot-02", uid);
+    MockPhy phy;
+    PhyConfig cfg{};
+    cfg.freqMHz = 2420.0f;
+    phy.init(cfg);
+    Link link;
+    link.begin(Role::Tx, uid, 2);
+    RfScheduler sched;
+    sched.begin(&phy, &link, 2);
+
+    const uint32_t lastEvent = 0xFFFFFFF0u;
+    const uint32_t wrappedCurrent = 14u;
+    sched.forceSimTickEventsForTest(1000u, lastEvent, wrappedCurrent);
+
+    sched.poll();
+
+    TEST_ASSERT_EQUAL_UINT32(1030u, sched.processedTick());
+    TEST_ASSERT_EQUAL_UINT32(wrappedCurrent, sched.tickEvents());
+}
+
 static void test_scheduler_rx_overrun_fast_forwards_locked_rx() {
     uint8_t uid[LINK_UID_SIZE];
     linkUidFromPhrase("Kikobot-02", uid);
@@ -203,6 +225,7 @@ int main() {
     RUN_TEST(test_scheduler_phy_recovery);
     RUN_TEST(test_scheduler_poll_drains_ticks);
     RUN_TEST(test_scheduler_poll_caps_backlog);
+    RUN_TEST(test_scheduler_tick_event_counter_wrap);
     RUN_TEST(test_scheduler_rx_overrun_fast_forwards_locked_rx);
     RUN_TEST(test_scheduler_phy_recovery_failure);
     RUN_TEST(test_scheduler_retries_identity_sync_after_phy_rejects_write);

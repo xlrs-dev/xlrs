@@ -482,12 +482,13 @@ void onCommandPayloadReceived(UARTMsgType cmd, const uint8_t* payload, uint8_t l
     memcpy(phrase, payload, length);
     phrase[length] = '\0';
     printf("[UART] SET_BIND_TX command received: %s\n", phrase);
-    uartProto.sendAck(UART_MSG_CMD_SET_BIND_TX);
-    xlrs::hal::sleepMs(10);
 
     if (!txPersistenceAllowed("binding phrase")) {
         return;
     }
+
+    uartProto.sendAck(UART_MSG_CMD_SET_BIND_TX);
+    xlrs::hal::sleepMs(10);
 
     if (g_bindingStore.setBindingPhrase(phrase)) {
         printf("[UART] Binding phrase persisted. Rebooting TX...\n");

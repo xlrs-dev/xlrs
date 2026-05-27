@@ -78,6 +78,15 @@ public:
     uint32_t timerIntervalUs() const {
         return _timer ? _timer->intervalUs() : _rate.intervalUs;
     }
+#if !defined(XLRS_PICO_SDK)
+    void forceSimTickEventsForTest(uint32_t processedTick,
+                                   uint32_t lastProcessedTickEvent,
+                                   uint32_t currentTickEvents) {
+        _tick = processedTick;
+        _lastProcessedTickEvent = lastProcessedTickEvent;
+        _tickEvents.store(currentTickEvents, std::memory_order_release);
+    }
+#endif
 
 private:
     bool recoverPhyIfNeeded();

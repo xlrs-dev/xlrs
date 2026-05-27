@@ -355,9 +355,10 @@ If uplink works but TX telemetry is zero/stale:
 6. **Bench TX builds** (`-DXLRS_BENCH_TX=ON`): TX stays Connected from downlink telemetry
    alone (no RC handset). Use for bench LQ captures; leave OFF for production TX with
    a real controller.
-7. **RX failsafe vs LQ:** if RX drops to Failsafe while status still shows **LQ ≥ 25%**,
-   check for async miss-count skew (see retrospective Pass 10). Total link loss still
-   failsafes once the sliding window drains.
+7. **RX failsafe vs LQ:** RX failsafe follows consecutive missed uplink RC slots, not the
+   slow-draining LQ window. If RX drops to Failsafe while status still shows **LQ >= 25%**,
+   treat LQ as stale diagnostic data and inspect RF timing, missed deadlines, and the async
+   LQ ledger; control output is intentionally gated by RC freshness.
 
 If flight-controller telemetry is missing in a CRSF RC controller:
 

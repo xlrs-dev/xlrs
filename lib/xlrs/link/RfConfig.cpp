@@ -13,10 +13,11 @@ bool RfConfig::load(RfConfigData& cfg) {
 
 bool RfConfig::save(const RfConfigData& cfg) {
     const uint8_t* ptr = reinterpret_cast<const uint8_t*>(&cfg);
+    bool ok = true;
     for (size_t i = 0; i < sizeof(RfConfigData); ++i) {
-        hal::FlashStore::write(RF_CONFIG_EEPROM_BASE + i, ptr[i]);
+        ok = hal::FlashStore::write(RF_CONFIG_EEPROM_BASE + i, ptr[i]) && ok;
     }
-    return hal::FlashStore::commit();
+    return ok && hal::FlashStore::commit();
 }
 
 } // namespace xlrs

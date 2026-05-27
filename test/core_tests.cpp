@@ -7,6 +7,7 @@
 #include "link/RfScheduler.h"
 #include "link/Uid.h"
 #include "ota/ChannelPack.h"
+#include "ota/OtaCodec.h"
 #include "ota/OtaFrameShrink.h"
 #include "phy/MockPhy.h"
 #include "util/Mailbox.h"
@@ -140,6 +141,26 @@ static void test_ota_8_byte_packing() {
     for (int i = 5; i < 8; ++i) TEST_ASSERT_EQUAL_UINT16(1024, decCh[i]);
 }
 
+static void test_sync_decode_rejects_truncated_tx_tick() {
+    SyncPayload sync{};
+    sync.fhssIndex = 1;
+    sync.rateIndex = 2;
+    sync.nextRateIndex = 2;
+    sync.tlmRatioDenom = 16;
+    sync.uidCrc = 0xAA;
+    sync.txTick = 0x12345678u;
+    uint8_t buf[16] = {};
+    const uint8_t len = otaEncodeSync(sync, buf);
+    TEST_ASSERT_EQUAL_UINT8(14, len);
+
+    SyncPayload decoded{};
+    for (uint8_t truncated = 0; truncated < len; ++truncated) {
+        TEST_ASSERT_FALSE(otaDecodeSync(buf, truncated, decoded));
+    }
+    TEST_ASSERT_TRUE(otaDecodeSync(buf, len, decoded));
+    TEST_ASSERT_EQUAL_UINT32(sync.txTick, decoded.txTick);
+}
+
 static void test_lq_tracker() {
     LqTracker<4> lq;
     for (int i = 0; i < 4; ++i) lq.update((i % 4) != 3);
@@ -193,6 +214,7 @@ int main() {
     RUN_TEST(test_fhss_deterministic_and_balanced);
     RUN_TEST(test_fhss_80_channel_balance);
     RUN_TEST(test_ota_8_byte_packing);
+    RUN_TEST(test_sync_decode_rejects_truncated_tx_tick);
     RUN_TEST(test_lq_tracker);
     RUN_TEST(test_spsc_ring);
     RUN_TEST(test_latest_value_freshest_wins);

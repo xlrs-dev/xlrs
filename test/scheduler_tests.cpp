@@ -71,7 +71,29 @@ static void test_scheduler_poll_caps_backlog() {
     TEST_ASSERT_EQUAL_UINT32(backlog, sched.processedTick());
 }
 
-static void test_scheduler_rx_overrun_demotes_to_acquisition() {
+static void test_scheduler_tick_event_counter_wrap() {
+    uint8_t uid[LINK_UID_SIZE];
+    linkUidFromPhrase("Kikobot-02", uid);
+    MockPhy phy;
+    PhyConfig cfg{};
+    cfg.freqMHz = 2420.0f;
+    phy.init(cfg);
+    Link link;
+    link.begin(Role::Tx, uid, 2);
+    RfScheduler sched;
+    sched.begin(&phy, &link, 2);
+
+    const uint32_t lastEvent = 0xFFFFFFF0u;
+    const uint32_t wrappedCurrent = 14u;
+    sched.forceSimTickEventsForTest(1000u, lastEvent, wrappedCurrent);
+
+    sched.poll();
+
+    TEST_ASSERT_EQUAL_UINT32(1030u, sched.processedTick());
+    TEST_ASSERT_EQUAL_UINT32(wrappedCurrent, sched.tickEvents());
+}
+
+static void test_scheduler_rx_overrun_fast_forwards_locked_rx() {
     uint8_t uid[LINK_UID_SIZE];
     linkUidFromPhrase("Kikobot-02", uid);
     SimEnvironment env;
@@ -86,12 +108,12 @@ static void test_scheduler_rx_overrun_demotes_to_acquisition() {
     for (uint32_t i = 0; i < backlog; ++i) fireSimTimerTick();
     env.rxSched.poll();
 
-    TEST_ASSERT_EQUAL_UINT32(300u, env.rxSched.processedTick());
+    TEST_ASSERT_EQUAL_UINT32(300u + backlog, env.rxSched.processedTick());
     TEST_ASSERT_TRUE(env.rx.state() == LinkState::Connected);
     TEST_ASSERT_TRUE(env.rx.isLocked());
     TEST_ASSERT_TRUE(env.rx.outputActive());
     TEST_ASSERT_TRUE(env.rx.stats().missedDeadlines >= backlog);
-    TEST_ASSERT_EQUAL_UINT8(75, env.rx.stats().fhssIndex);
+    TEST_ASSERT_EQUAL_UINT8(env.rx.txPos(300u + backlog), env.rx.stats().fhssIndex);
 }
 
 static void test_scheduler_phy_recovery_failure() {
@@ -112,6 +134,39 @@ static void test_scheduler_phy_recovery_failure() {
     TEST_ASSERT_TRUE(env.rxPhy.healthy());
     TEST_ASSERT_EQUAL_UINT16(3, env.rx.stats().phyRecoveryFailures);
     TEST_ASSERT_EQUAL_UINT16(1, env.rx.stats().phyRecoveries);
+}
+
+static void test_scheduler_retries_identity_sync_after_phy_rejects_write() {
+    uint8_t uid[LINK_UID_SIZE];
+    linkUidFromPhrase("Kikobot-02", uid);
+
+    MockPhy txPhy;
+    MockPhy rxPhy;
+    PhyConfig cfg{};
+    cfg.freqMHz = 2420.0f;
+    cfg.payloadLen = OTA16_LEN;
+    TEST_ASSERT_TRUE(txPhy.init(cfg));
+    TEST_ASSERT_TRUE(rxPhy.init(cfg));
+    MockPhy::connect(txPhy, rxPhy);
+    txPhy.setSyncWordFailures(1);
+
+    Link link;
+    link.begin(Role::Tx, uid, 2);
+    TEST_ASSERT_TRUE(rxPhy.setSyncWord(link.syncWord()));
+    RfScheduler sched;
+    TEST_ASSERT_TRUE(sched.begin(&txPhy, &link, 2));
+
+    sched.onTick(1);
+    rxPhy.startRx(link.freqForTick(2));
+    uint8_t payload[OTA16_LEN] = {};
+    txPhy.startTx(link.freqForTick(2), payload, 1);
+    RxPacket pkt{};
+    TEST_ASSERT_FALSE(rxPhy.readRx(pkt));
+
+    sched.onTick(2);
+    rxPhy.startRx(link.freqForTick(3));
+    txPhy.startTx(link.freqForTick(3), payload, 1);
+    TEST_ASSERT_TRUE(rxPhy.readRx(pkt));
 }
 
 static void test_scheduler_phy_recovery_backoff() {
@@ -170,8 +225,10 @@ int main() {
     RUN_TEST(test_scheduler_phy_recovery);
     RUN_TEST(test_scheduler_poll_drains_ticks);
     RUN_TEST(test_scheduler_poll_caps_backlog);
-    RUN_TEST(test_scheduler_rx_overrun_demotes_to_acquisition);
+    RUN_TEST(test_scheduler_tick_event_counter_wrap);
+    RUN_TEST(test_scheduler_rx_overrun_fast_forwards_locked_rx);
     RUN_TEST(test_scheduler_phy_recovery_failure);
+    RUN_TEST(test_scheduler_retries_identity_sync_after_phy_rejects_write);
     RUN_TEST(test_scheduler_phy_recovery_backoff);
     RUN_TEST(test_scheduler_skips_ticks_while_phy_unhealthy);
     return UNITY_END();

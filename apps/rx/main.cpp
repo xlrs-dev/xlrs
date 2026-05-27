@@ -15,6 +15,7 @@
 #include "app/CrsfLinkStats.h"
 #include "app/LinkStatusLed.h"
 #include "app/LinkRuntimeDiag.h"
+#include "app/PersistencePolicy.h"
 #include "crsfSerial.h"
 #include "fhss/Fhss.h"
 #include "hal/FlashStore.h"
@@ -122,19 +123,36 @@ static void onCrsfFrameFromFlightController(const uint8_t *frame, uint8_t frameL
 static void applyRxAppTelemetry(const xlrs::AppTelemetryMessage& message) {
     xlrs::RfConfigData pendingConfig = g_rfConfig;
     if (xlrs::parseRxConfigMessage(message.data, message.len, pendingConfig)) {
+        RfToAppData rfData{};
+        if (g_rfToApp.load(rfData) &&
+            !xlrs::app::persistenceAllowed(rfData.state, rfData.outputActive)) {
+            printf("[RX CONFIG] ERROR: RF config save blocked while link/output is active.\n");
+            return;
+        }
+        if (!xlrs::RfConfig::save(pendingConfig)) {
+            printf("[RX CONFIG] ERROR: Failed to persist RF config from TX.\n");
+            return;
+        }
         g_rfConfig = pendingConfig;
-        xlrs::RfConfig::save(g_rfConfig);
         printf("[RX CONFIG] RF config updated from TX. Reboot both modules to apply.\n");
         return;
     }
 
     uint8_t uid[xlrs::LINK_UID_SIZE] = {};
     if (xlrs::parseBindUidMessage(message.data, message.len, uid)) {
+        RfToAppData rfData{};
+        if (g_rfToApp.load(rfData) &&
+            !xlrs::app::persistenceAllowed(rfData.state, rfData.outputActive)) {
+            printf("[RX CONFIG] ERROR: Binding identity save blocked while link/output is active.\n");
+            return;
+        }
         if (g_bindingStore.setBindingUid(uid)) {
             printf("[RX CONFIG] Binding identity updated from TX. Rebooting RX...\n");
             blinkStatusLedBlocking(5, 40, 40);
             xlrs::hal::sleepMs(100);
             watchdog_reboot(0, 0, 0);
+        } else {
+            printf("[RX CONFIG] ERROR: Failed to persist binding identity from TX.\n");
         }
         return;
     }
@@ -349,21 +367,18 @@ static void rf_core_main() {
         g_bindingStore.getBindingUid(uid);
     }
 
-    g_link.begin(xlrs::Role::Rx, uid,
 #if defined(XLRS_BENCH_RATE)
-                 XLRS_BENCH_RATE,
+    constexpr uint8_t configuredRateIndex = XLRS_BENCH_RATE;
 #else
-                 g_rfConfig.defaultRate,
+    const uint8_t configuredRateIndex = g_rfConfig.defaultRate;
 #endif
+    const uint8_t rfRateIndex = configuredRateIndex < xlrs::kNumRates ? configuredRateIndex : 0;
+
+    g_link.begin(xlrs::Role::Rx, uid, rfRateIndex,
                  g_rfConfig.maxPowerDbm, g_rfConfig.dynamicPower == 1);
     g_link.setRegion(g_rfConfig.region == (uint8_t)xlrs::RfRegion::EU ? xlrs::FhssRegion::EU_CE : xlrs::FhssRegion::US_FCC);
     g_link.setFailsafeMode(g_rfConfig.failsafeMode == 0 ? xlrs::FailsafeMode::NoPulses : xlrs::FailsafeMode::Hold);
 
-#if defined(XLRS_BENCH_RATE)
-    const uint8_t rfRateIndex = XLRS_BENCH_RATE;
-#else
-    const uint8_t rfRateIndex = g_rfConfig.defaultRate;
-#endif
     xlrs::PhyConfig phyCfg = xlrs::makePhyConfig(xlrs::kRates[rfRateIndex], 2400.0f, g_rfConfig.maxPowerDbm, xlrs::syncWordFromUid(uid));
     if (!g_phy.init(phyCfg) ||
         !g_scheduler.begin(&g_phy, &g_link, rfRateIndex)) {

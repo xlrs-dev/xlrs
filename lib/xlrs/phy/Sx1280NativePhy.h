@@ -62,7 +62,7 @@ public:
 
     // Cheap runtime controls.
     void setOutputPowerDbm(int8_t dbm) override;
-    void setSyncWord(uint16_t uidDerived) override;
+    bool setSyncWord(uint16_t uidDerived) override;
     void reconfigure(const PhyConfig& cfg) override;
     uint32_t txLatencyUs() const override;
     bool txInProgress() const override;

@@ -227,7 +227,7 @@ static void test_link_rate_switch_and_power() {
     for (uint32_t t = 1; t <= 800; ++t) simTick(env, t);
     TEST_ASSERT_TRUE(env.rx.state() == LinkState::Connected);
     TEST_ASSERT_EQUAL_UINT8(2, env.rx.stats().rateIndex);
-    TEST_ASSERT_TRUE(env.txPhy.outputPowerDbm() < 10);
+    TEST_ASSERT_EQUAL_INT8(10, env.txPhy.outputPowerDbm());
 
     env.tx.requestRate(4);
     for (uint32_t t = 801; t <= 1600; ++t) simTick(env, t);
@@ -247,8 +247,11 @@ static void test_link_encrypted() {
     txC.setKey(key);
     rxC.setKey(key);
 
-    env.tx.setCipher(&txC);
-    env.rx.setCipher(&rxC);
+    TEST_ASSERT_FALSE(env.tx.setCipher(&txC));
+    TEST_ASSERT_TRUE(env.tx.setSessionSalt(0x12345678u));
+    TEST_ASSERT_TRUE(env.rx.setSessionSalt(0x12345678u));
+    TEST_ASSERT_TRUE(env.tx.setCipher(&txC));
+    TEST_ASSERT_TRUE(env.rx.setCipher(&rxC));
     uint16_t ch[4] = {222, 1444, 1999, 55};
     env.tx.setChannels(ch, 4);
 
@@ -275,8 +278,10 @@ static void test_link_wrong_key() {
     txC.setKey(k1);
     rxC.setKey(k2);
 
-    env.tx.setCipher(&txC);
-    env.rx.setCipher(&rxC);
+    TEST_ASSERT_TRUE(env.tx.setSessionSalt(0x12345678u));
+    TEST_ASSERT_TRUE(env.rx.setSessionSalt(0x12345678u));
+    TEST_ASSERT_TRUE(env.tx.setCipher(&txC));
+    TEST_ASSERT_TRUE(env.rx.setCipher(&rxC));
     uint16_t ch[4] = {200, 200, 200, 200};
     env.tx.setChannels(ch, 4);
 
@@ -395,7 +400,7 @@ static void test_link_tx_bench_mode_failsafe_when_downlink_lost() {
     TEST_ASSERT_TRUE(env.tx.state() == LinkState::Failsafe);
 }
 
-static void test_link_rx_lq_holdoff_suppresses_burst_failsafe() {
+static void test_link_rx_lq_holdoff_does_not_mask_rc_loss() {
     uint8_t uid[LINK_UID_SIZE];
     linkUidFromPhrase("Kikobot-02", uid);
     SimEnvironment env;
@@ -409,9 +414,10 @@ static void test_link_rx_lq_holdoff_suppresses_burst_failsafe() {
     TEST_ASSERT_TRUE(env.rx.stats().lqUp >= Link::FAILSAFE_LQ_HOLDOFF);
 
     // Burst longer than FAILSAFE_MISS while the LQ window still shows a healthy link.
+    // Failsafe must follow RC freshness, not a slow-draining LQ diagnostic.
     for (uint32_t t = 201; t <= 220; ++t) simTick(env, t, false);
     TEST_ASSERT_TRUE(env.rx.stats().lqUp >= Link::FAILSAFE_LQ_HOLDOFF);
-    TEST_ASSERT_TRUE(env.rx.state() == LinkState::Connected);
+    TEST_ASSERT_TRUE(env.rx.state() == LinkState::Failsafe);
 }
 
 static void test_link_rx_lq_holdoff_failsafe_on_total_loss() {
@@ -450,6 +456,31 @@ static void test_link_tx_failsafe_counts_telemetry_slots() {
     TEST_ASSERT_TRUE(env.tx.state() == LinkState::Connected);
 }
 
+// OI-019: AEAD must not run under the default (zero) session salt. Enabling a cipher before a
+// nonzero salt is set must be refused, setSessionSalt(0) must be rejected and disable the
+// cipher, and only a nonzero salt unlocks encryption. Guards against shipping a fixed/zero
+// nonce salt in production.
+static void test_link_cipher_requires_nonzero_session_salt() {
+    uint8_t uid[LINK_UID_SIZE];
+    linkUidFromPhrase("Kikobot-02", uid);
+    Link link;
+    link.begin(Role::Tx, uid, 2);
+
+    uint8_t key[32];
+    for (int i = 0; i < 32; ++i) key[i] = (uint8_t)i;
+    AeadCipher cipher;
+    cipher.setKey(key);
+
+    // Default salt is zero -> enabling a cipher is refused.
+    TEST_ASSERT_FALSE(link.setCipher(&cipher));
+    // Explicit zero salt is rejected and leaves AEAD disabled.
+    TEST_ASSERT_FALSE(link.setSessionSalt(0));
+    TEST_ASSERT_FALSE(link.setCipher(&cipher));
+    // A nonzero, negotiated salt unlocks the cipher.
+    TEST_ASSERT_TRUE(link.setSessionSalt(0xA5A5A5A5u));
+    TEST_ASSERT_TRUE(link.setCipher(&cipher));
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -470,8 +501,9 @@ int main() {
     RUN_TEST(test_link_tx_failsafe_grace_after_connect);
     RUN_TEST(test_link_tx_bench_mode_stays_connected_on_downlink);
     RUN_TEST(test_link_tx_bench_mode_failsafe_when_downlink_lost);
-    RUN_TEST(test_link_rx_lq_holdoff_suppresses_burst_failsafe);
+    RUN_TEST(test_link_rx_lq_holdoff_does_not_mask_rc_loss);
     RUN_TEST(test_link_rx_lq_holdoff_failsafe_on_total_loss);
     RUN_TEST(test_link_tx_failsafe_counts_telemetry_slots);
+    RUN_TEST(test_link_cipher_requires_nonzero_session_salt);
     return UNITY_END();
 }

@@ -46,9 +46,11 @@ bool RfScheduler::begin(IRadioPhy* phy, Link* link, uint8_t rateIndex) {
     _lastProcessedRxEvent = 0;
     _lastProcessedTxEvent = 0;
 
-    // init() already applied sync word and packet params; track revision for bind/rate changes.
-    _syncedIdentityRevision = _link->identityRevision();
-    _identitySynced = true;
+    // Force the scheduler/PHY contract to prove the current identity was accepted.
+    // init() normally applies it, but mocks and recovery paths should not let us
+    // mark an identity synced without a successful setSyncWord() call.
+    _syncedIdentityRevision = 0;
+    _identitySynced = false;
 
     if (!_timer) {
         _timer = createHwTimer();
@@ -272,8 +274,7 @@ void RfScheduler::applyLockedRxPhaseResync(uint32_t packetStartUs) {
     const int32_t adjUs = _pfd.update(offsetUs);
     _lastPfdAdjUs = adjUs;
     _pfdUpdateCount++;
-    // Track phase only — timer resync is reserved for Sync beacons (hard snap).
-    _timer->setIntervalUs(_rate.intervalUs);
+    _timer->setIntervalUs(_rate.intervalUs + adjUs);
 #else
     (void)packetStartUs;
 #endif
@@ -303,8 +304,7 @@ void RfScheduler::onRxDone() {
         // and PFD reference. More reachable now that poll() can fast-forward the tick.
         uint32_t airtime = (pkt.len <= 8) ? _rate.airtime8Us : _rate.airtime16Us;
         uint32_t packetStartUs = pkt.timestampUs - airtime;
-        const bool success = _link->processRxPayload(_armedTick, _armedPos, pkt.data, pkt.len, pkt.rssiDbm, pkt.snr,
-                                                     packetStartUs);
+        const bool success = _link->processRxPayload(_armedTick, _armedPos, pkt.data, pkt.len, pkt.rssiDbm, pkt.snr);
         if (success) {
             const bool isSyncSlot =
                 _link->slotForTick(_armedTick) == Slot::Sync;
@@ -462,8 +462,8 @@ bool RfScheduler::recoverPhyIfNeeded() {
     }
     const bool ok = _phy->recover();
     if (ok) {
-        _syncedIdentityRevision = _link->identityRevision();
-        _identitySynced = true;
+        _syncedIdentityRevision = 0;
+        _identitySynced = false;
     }
     if (_link) {
         _link->notePhyRecovery(ok);
@@ -477,14 +477,15 @@ void RfScheduler::syncPhyIdentity(bool force) {
     const uint32_t revision = _link->identityRevision();
     if (!force && _identitySynced && revision == _syncedIdentityRevision) return;
 
-    _phy->setSyncWord(_link->syncWord());
-    _syncedIdentityRevision = revision;
-    _identitySynced = true;
+    if (_phy->setSyncWord(_link->syncWord())) {
+        _syncedIdentityRevision = revision;
+        _identitySynced = true;
+    }
 }
 
 void RfScheduler::drainPendingRxDone() {
     uint32_t currentRx = _rxDoneEvents.load(std::memory_order_acquire);
-    if (currentRx > _lastProcessedRxEvent) {
+    if (currentRx != _lastProcessedRxEvent) {
         const uint32_t diff = currentRx - _lastProcessedRxEvent;
         for (uint32_t i = 0; i < diff; ++i) {
             onRxDone();
@@ -503,7 +504,7 @@ void RfScheduler::poll() {
 
     // 2. Process TX Done
     uint32_t currentTx = _txDoneEvents.load(std::memory_order_acquire);
-    if (currentTx > _lastProcessedTxEvent) {
+    if (currentTx != _lastProcessedTxEvent) {
         uint32_t diff = currentTx - _lastProcessedTxEvent;
         for (uint32_t i = 0; i < diff; ++i) {
             onTxDone();
@@ -513,15 +514,18 @@ void RfScheduler::poll() {
 
     // 3. Process ticks
     uint32_t currentTicks = _tickEvents.load(std::memory_order_acquire);
-    if (currentTicks > _lastProcessedTickEvent) {
+    if (currentTicks != _lastProcessedTickEvent) {
         uint32_t diff = currentTicks - _lastProcessedTickEvent;
         if (diff > MAX_TICK_CATCHUP) {
             // Core 1 fell badly behind (long stall). Replaying every backlogged slot would
             // burst blocking SPI + TX_GUARD sleeps for stale FHSS positions and keep us behind.
             if (_link && _link->role() == Role::Rx && _link->isLocked()) {
-                // Stay hop-locked: discard stale backlog and wait for the next Sync snap
-                // instead of fast-forwarding a local tick that diverges from TX cadence.
+                // Stay hop-locked but jump to the newest scheduler tick instead of
+                // leaving _tick stale until the next Sync beacon.
                 _link->noteMissedDeadlines((uint16_t)diff);
+                const uint32_t targetTick = _tick + diff;
+                onTick(targetTick);
+                _link->service(targetTick);
             } else {
                 if (_link) _link->noteSchedulerOverrun((uint16_t)diff);
                 const uint32_t targetTick = _tick + diff;

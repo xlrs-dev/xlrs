@@ -35,8 +35,11 @@ public:
         const size_t len = strlen(phrase);
         if (len == 0 || len > 32) return false;
 
-        linkUidFromPhrase(phrase, _uid);
-        persistUid();
+        uint8_t uid[LINK_UID_SIZE];
+        linkUidFromPhrase(phrase, uid);
+        if (!persistUid(uid)) return false;
+        memcpy(_uid, uid, LINK_UID_SIZE);
+        _loaded = true;
         return true;
     }
 
@@ -51,8 +54,9 @@ public:
         }
         if (!any) return false;
 
+        if (!persistUid(uid)) return false;
         memcpy(_uid, uid, LINK_UID_SIZE);
-        persistUid();
+        _loaded = true;
         return true;
     }
 
@@ -63,21 +67,21 @@ public:
     }
 
 private:
-    // Persist the current _uid to flash. Both setBinding* paths populate _uid then call this,
+    // Persist the candidate UID to flash. Both setBinding* paths call this,
     // so the magic/version/UID/checksum storage layout (a safety-sensitive flash schema) lives
     // in exactly one place.
-    void persistUid() {
-        hal::FlashStore::write(BINDING_STORE_MAGIC_ADDR + 0, (BINDING_STORE_MAGIC >> 24) & 0xFF);
-        hal::FlashStore::write(BINDING_STORE_MAGIC_ADDR + 1, (BINDING_STORE_MAGIC >> 16) & 0xFF);
-        hal::FlashStore::write(BINDING_STORE_MAGIC_ADDR + 2, (BINDING_STORE_MAGIC >> 8) & 0xFF);
-        hal::FlashStore::write(BINDING_STORE_MAGIC_ADDR + 3, BINDING_STORE_MAGIC & 0xFF);
-        hal::FlashStore::write(BINDING_STORE_VERSION_ADDR, BINDING_STORE_VERSION);
+    bool persistUid(const uint8_t uid[LINK_UID_SIZE]) {
+        bool ok = true;
+        ok = hal::FlashStore::write(BINDING_STORE_MAGIC_ADDR + 0, (BINDING_STORE_MAGIC >> 24) & 0xFF) && ok;
+        ok = hal::FlashStore::write(BINDING_STORE_MAGIC_ADDR + 1, (BINDING_STORE_MAGIC >> 16) & 0xFF) && ok;
+        ok = hal::FlashStore::write(BINDING_STORE_MAGIC_ADDR + 2, (BINDING_STORE_MAGIC >> 8) & 0xFF) && ok;
+        ok = hal::FlashStore::write(BINDING_STORE_MAGIC_ADDR + 3, BINDING_STORE_MAGIC & 0xFF) && ok;
+        ok = hal::FlashStore::write(BINDING_STORE_VERSION_ADDR, BINDING_STORE_VERSION) && ok;
         for (uint8_t i = 0; i < LINK_UID_SIZE; ++i) {
-            hal::FlashStore::write(BINDING_STORE_UID_ADDR + i, _uid[i]);
+            ok = hal::FlashStore::write(BINDING_STORE_UID_ADDR + i, uid[i]) && ok;
         }
-        writeChecksum(checksum());
-        hal::FlashStore::commit();
-        _loaded = true;
+        ok = writeChecksum(checksum()) && ok;
+        return ok && hal::FlashStore::commit();
     }
 
     bool valid() const {
@@ -132,11 +136,13 @@ private:
         return value;
     }
 
-    void writeChecksum(uint32_t value) {
-        hal::FlashStore::write(BINDING_STORE_CHECKSUM_ADDR + 0, (value >> 24) & 0xFF);
-        hal::FlashStore::write(BINDING_STORE_CHECKSUM_ADDR + 1, (value >> 16) & 0xFF);
-        hal::FlashStore::write(BINDING_STORE_CHECKSUM_ADDR + 2, (value >> 8) & 0xFF);
-        hal::FlashStore::write(BINDING_STORE_CHECKSUM_ADDR + 3, value & 0xFF);
+    bool writeChecksum(uint32_t value) {
+        bool ok = true;
+        ok = hal::FlashStore::write(BINDING_STORE_CHECKSUM_ADDR + 0, (value >> 24) & 0xFF) && ok;
+        ok = hal::FlashStore::write(BINDING_STORE_CHECKSUM_ADDR + 1, (value >> 16) & 0xFF) && ok;
+        ok = hal::FlashStore::write(BINDING_STORE_CHECKSUM_ADDR + 2, (value >> 8) & 0xFF) && ok;
+        ok = hal::FlashStore::write(BINDING_STORE_CHECKSUM_ADDR + 3, value & 0xFF) && ok;
+        return ok;
     }
 
     uint8_t _uid[LINK_UID_SIZE] = {};

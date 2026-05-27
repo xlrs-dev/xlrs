@@ -3,6 +3,8 @@
 #include "app/AppTelemetry.h"
 #include "app/CrsfChannels.h"
 #include "app/CrsfLinkStats.h"
+#include "app/LinkStatusLed.h"
+#include "app/PersistencePolicy.h"
 
 using namespace xlrs;
 
@@ -97,6 +99,44 @@ static void test_app_telemetry_messages() {
     TEST_ASSERT_EQUAL_UINT8_ARRAY(uid, parsedUid, LINK_UID_SIZE);
 }
 
+static void test_persistence_policy_blocks_active_link_states() {
+    TEST_ASSERT_TRUE(app::persistenceAllowed(LinkState::Disconnected, false));
+    TEST_ASSERT_TRUE(app::persistenceAllowed(LinkState::Connecting, false));
+    TEST_ASSERT_TRUE(app::persistenceAllowed(LinkState::Binding, false));
+    TEST_ASSERT_FALSE(app::persistenceAllowed(LinkState::Connected, false));
+    TEST_ASSERT_FALSE(app::persistenceAllowed(LinkState::Failsafe, false));
+    TEST_ASSERT_FALSE(app::persistenceAllowed(LinkState::Connecting, true));
+}
+// OI-007: the "bind packet received" LED pattern must actually blink when sampled at the
+// 50 ms update cadence — not alias to solid-on (which would be indistinguishable from the
+// fault and connected indications). Sample one full pattern period at 50 ms steps and require
+// both an ON and an OFF sample.
+static void test_link_status_led_bind_received_blinks_not_solid() {
+    using namespace xlrs::app;
+    LinkStatusLedFlags flags;
+    flags.bindPacketReceived = true;
+    bool sawOn = false;
+    bool sawOff = false;
+    for (uint32_t ms = 50; ms <= 400; ms += 50) {
+        const bool on = linkStatusLedComputeOn(LinkState::Connecting, flags, ms);
+        sawOn |= on;
+        sawOff |= !on;
+    }
+    TEST_ASSERT_TRUE(sawOn);   // pattern actually lights the LED
+    TEST_ASSERT_TRUE(sawOff);  // and actually blinks — not aliased to solid-on (OI-007)
+}
+
+// A hardware/config fault must read as steady solid-on at every sample, so it stays
+// distinguishable from the (blinking) bind-received pattern above.
+static void test_link_status_led_fault_is_solid_on() {
+    using namespace xlrs::app;
+    LinkStatusLedFlags flags;
+    flags.hardwareError = true;
+    for (uint32_t ms = 50; ms <= 400; ms += 50) {
+        TEST_ASSERT_TRUE(linkStatusLedComputeOn(LinkState::Disconnected, flags, ms));
+    }
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -107,5 +147,8 @@ int main() {
     RUN_TEST(test_crsf_packed_channels_to_rc_channels);
     RUN_TEST(test_crsf_frame_address_validation);
     RUN_TEST(test_app_telemetry_messages);
+    RUN_TEST(test_persistence_policy_blocks_active_link_states);
+    RUN_TEST(test_link_status_led_bind_received_blinks_not_solid);
+    RUN_TEST(test_link_status_led_fault_is_solid_on);
     return UNITY_END();
 }

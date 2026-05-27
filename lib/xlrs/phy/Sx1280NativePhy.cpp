@@ -741,10 +741,10 @@ void Sx1280NativePhy::setOutputPowerDbm(int8_t dbm) {
     }
 }
 
-void Sx1280NativePhy::setSyncWord(uint16_t uidDerived) {
+bool Sx1280NativePhy::setSyncWord(uint16_t uidDerived) {
     if (_hardwareError.load(std::memory_order_acquire) ||
         _txInProgress.load(std::memory_order_acquire)) {
-        return;
+        return false;
     }
 
     // Register writes require standby; scheduler may call this while init left us in RX.
@@ -752,7 +752,7 @@ void Sx1280NativePhy::setSyncWord(uint16_t uidDerived) {
     if (prevMode != Mode::Idle) {
         uint8_t stdbyParam = SX1280_STDBY_RC;
         spiCommand(SX1280_OP_SET_STANDBY, &stdbyParam, 1);
-        if (_hardwareError.load(std::memory_order_acquire)) return;
+        if (_hardwareError.load(std::memory_order_acquire)) return false;
     }
 
     if (_cfg.modulation == Modulation::Flrc) {
@@ -798,6 +798,7 @@ void Sx1280NativePhy::setSyncWord(uint16_t uidDerived) {
     if (prevMode == Mode::Rx && !_hardwareError.load(std::memory_order_acquire)) {
         startRx(_cfg.freqMHz);
     }
+    return !_hardwareError.load(std::memory_order_acquire);
 }
 
 void Sx1280NativePhy::reconfigure(const PhyConfig& cfg) {
@@ -863,7 +864,7 @@ void Sx1280NativePhy::startRx(float freqMHz) {}
 void Sx1280NativePhy::startTx(float freqMHz, const uint8_t* data, uint8_t len) {}
 bool Sx1280NativePhy::readRx(RxPacket& out) { return false; }
 void Sx1280NativePhy::setOutputPowerDbm(int8_t dbm) {}
-void Sx1280NativePhy::setSyncWord(uint16_t uidDerived) {}
+bool Sx1280NativePhy::setSyncWord(uint16_t uidDerived) { (void)uidDerived; return true; }
 void Sx1280NativePhy::reconfigure(const PhyConfig& cfg) {}
 uint32_t Sx1280NativePhy::txLatencyUs() const { return 0; }
 bool Sx1280NativePhy::txInProgress() const { return false; }

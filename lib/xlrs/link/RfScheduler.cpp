@@ -535,6 +535,8 @@ void RfScheduler::poll() {
             }
         } else {
             for (uint32_t i = 0; i < diff; ++i) {
+                // Drain before onTick so late DIO still sees the armed slot tick/pos.
+                drainPendingRxDone();
                 uint32_t nextTick = _tick + 1;
                 onTick(nextTick);
                 if (_link) {
@@ -544,9 +546,8 @@ void RfScheduler::poll() {
                     _link->service(nextTick);
 #endif
                 }
-                // Late DIO: count uplink decode before the next tick's service().
-                drainPendingRxDone();
             }
+            drainPendingRxDone();
         }
         _lastProcessedTickEvent = currentTicks;
     }

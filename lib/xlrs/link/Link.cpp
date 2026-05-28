@@ -589,14 +589,20 @@ void Link::refreshRxPosForTick(uint32_t localTick) {
     }
 }
 
-void Link::onRxEnterConnected() {
-    _lq.reset();
-    _stats.lqUp = 0;
+void Link::onRxEnterConnected(bool recoveringFromFailsafe) {
+    // Warm-start LQ on (re)connect so CRSF LINK_STATISTICS does not report 0% right
+    // as RC output resumes — Betaflight treats low LQ as RXLOSS even when frames return.
+    _lq.resetWarm();
+    _stats.lqUp = 100;
 #if defined(XLRS_PICO_SDK)
-    _hwUplinkLqTick = UINT32_MAX;
-    _hwUplinkLqClosed = true;
-    _hwUplinkDecodeTick = UINT32_MAX;
-    _hwUplinkDecodeOk = false;
+    // Fresh acquire only: clearing HW slot trackers on Failsafe→Connected discards
+    // in-flight decodes and re-opens the LQ degradation / CRSF-stuck window.
+    if (!recoveringFromFailsafe) {
+        _hwUplinkLqTick = UINT32_MAX;
+        _hwUplinkLqClosed = true;
+        _hwUplinkDecodeTick = UINT32_MAX;
+        _hwUplinkDecodeOk = false;
+    }
 #endif
     _uplinkGraceSlotsRemaining = FAILSAFE_GRACE_UPLINK_SLOTS;
     _consecutiveMissedUplinks = 0;
@@ -642,8 +648,8 @@ void Link::advanceHwUplinkLqSlot(uint32_t tick) {
         return;
     }
     if (_hwUplinkLqTick != UINT32_MAX && !_hwUplinkLqClosed && tick > _hwUplinkLqTick) {
-        // Defer closing by one tick so poll() can process onRxDone for the pending slot first.
-        if (tick > _hwUplinkLqTick + 1 || _hwUplinkDecodeTick == _hwUplinkLqTick) {
+        // Defer closing so poll() can process late onRxDone (D250 bench needs >1 tick slack).
+        if (tick > _hwUplinkLqTick + 4 || _hwUplinkDecodeTick == _hwUplinkLqTick) {
             const bool received =
                 (_hwUplinkDecodeTick == _hwUplinkLqTick && _hwUplinkDecodeOk);
             finalizeHwUplinkLqSlot(_hwUplinkLqTick, received);
@@ -671,16 +677,6 @@ void Link::noteHwUplinkDecode(uint32_t tick, bool received) {
     _hwUplinkDecodeOk = received;
     if (received) {
         _consecutiveMissedUplinks = 0;
-        if (_state == LinkState::Failsafe && _syncSeen) {
-            _failsafeRecoveryLastUplinkTick = tick;
-            if (_failsafeRecoveryUplinks < FAILSAFE_RECOVERY_UPLINKS) {
-                ++_failsafeRecoveryUplinks;
-            }
-            if (_failsafeRecoveryUplinks >= FAILSAFE_RECOVERY_UPLINKS) {
-                _state = LinkState::Connected;
-                onRxEnterConnected();
-            }
-        }
     }
     finalizeHwUplinkLqSlot(tick, received);
 }
@@ -882,7 +878,6 @@ void Link::service(uint32_t tick, bool recordLq) {
             }
             break;
         case LinkState::Failsafe:
-#if !defined(XLRS_PICO_SDK)
             if (_role == Role::Rx) {
                 if (_locked && _syncSeen &&
                     (_gotValidUplinkThisTick || _gotRcThisTick)) {
@@ -900,11 +895,6 @@ void Link::service(uint32_t tick, bool recordLq) {
             } else if (txLinkValid) {
                 _state = LinkState::Connected;
             }
-#else
-            if (_role == Role::Tx && txLinkValid) {
-                _state = LinkState::Connected;
-            }
-#endif
             break;
         case LinkState::Binding:
             break;
@@ -914,7 +904,7 @@ void Link::service(uint32_t tick, bool recordLq) {
         if (_role == Role::Tx) {
             _telemetryGraceSlotsRemaining = FAILSAFE_GRACE_TELEMETRY_SLOTS;
         } else if (_role == Role::Rx) {
-            onRxEnterConnected();
+            onRxEnterConnected(prevState == LinkState::Failsafe);
         }
     }
 
@@ -927,28 +917,14 @@ void Link::service(uint32_t tick, bool recordLq) {
 #endif
     }
 
-    // Hop-locked Failsafe with no fresh RC cannot recover or emit CRSF; re-acquire.
-#if defined(XLRS_PICO_SDK)
-    if (_role == Role::Rx && _state == LinkState::Failsafe && _locked && !hasFreshRc() &&
-        _failsafeEnteredMs != 0 &&
-        (xlrs::hal::nowMs() - _failsafeEnteredMs) >= 8000u) {
-        resetAcquisition(LinkState::Connecting);
-        _rxTimingResetPending = true;
-    }
-#endif
+    // Stay hop-locked in Failsafe: dropping lock here (old 8s re-acquire) left RX in
+    // Connecting with lock:0 while TX remained Connected — unrecoverable on the bench.
 
     if (_state == LinkState::Connected && prevState == LinkState::Failsafe &&
         _role == Role::Rx) {
 #if defined(XLRS_PICO_SDK)
         _failsafeEnteredMs = 0;
 #endif
-    }
-
-    // Reset PFD + nominal timer on debounced Connected→Failsafe while keeping hop lock
-    // (_locked/_syncSeen). Stale PFD phase from the Connected window blocks recovery.
-    if (_role == Role::Rx && prevState == LinkState::Connected &&
-        _state == LinkState::Failsafe && !hasFreshRc()) {
-        _rxTimingResetPending = true;
     }
 
     // Reset tick flags

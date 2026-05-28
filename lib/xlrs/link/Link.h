@@ -62,6 +62,7 @@ public:
         _filled = Window;
     }
 
+    // ELRS reset100(): optimistic warm-start on connect (see safety-and-failsafe.md).
     // Call once per expected slot; `received` = a valid packet arrived in that slot.
     void update(bool received) {
         if (_hist[_pos] && !received) {
@@ -180,7 +181,7 @@ private:
 #if defined(XLRS_PICO_SDK)
     void     finalizeHwUplinkLqSlot(uint32_t tick, bool received);
 #endif
-    void     onRxEnterConnected();
+    void     onRxEnterConnected(bool recoveringFromFailsafe = false);
 
     Role         _role      = Role::Rx;
     RateConfig   _rate{};

@@ -230,9 +230,31 @@ static void setup_app_core() {
            XLRS_STATUS_LED_ACTIVE_LOW ? "low" : "high");
 }
 
+static void sendCrsfRcFrame(uint32_t now) {
+    crsf_channels_t crsfChannels{};
+    uint16_t crsfRcUs[CRSF_NUM_CHANNELS] = {};
+    for (uint8_t i = 0; i < CRSF_NUM_CHANNELS; ++i) {
+        crsfRcUs[i] = i < RC_CHANNELS ? localChannels[i] : RC_US_MID;
+    }
+    xlrs::rcUsToCrsfChannels(crsfRcUs, crsfChannels);
+    crsf.queuePacket(CRSF_ADDRESS_FLIGHT_CONTROLLER, CRSF_FRAMETYPE_RC_CHANNELS_PACKED,
+                     &crsfChannels, CRSF_FRAME_RC_CHANNELS_PAYLOAD_SIZE);
+    g_crsfRcFramesOut++;
+    g_lastCrsfRcOutMs = now;
+}
+
+static void sendCrsfLinkStats(const xlrs::LinkStats& stats) {
+    uint8_t payload[10] = {};
+    xlrs::buildCrsfLinkStatistics(stats, payload);
+    crsf.queuePacket(CRSF_ADDRESS_FLIGHT_CONTROLLER, CRSF_FRAMETYPE_LINK_STATISTICS,
+                     payload, sizeof(payload));
+    g_crsfLinkStatsOut++;
+}
+
 static void app_core_loop() {
     static uint32_t lastSeq = 0;
     static uint32_t lastCRSF = 0;
+    static bool prevOutputActive = false;
     RfToAppData rfData{};
 
     bool isNew = g_rfToApp.loadIfNew(rfData, lastSeq);
@@ -243,8 +265,9 @@ static void app_core_loop() {
 
     xlrs::LinkState state = rfData.state;
     bool outputActive = rfData.outputActive;
+    const bool crsfResumeEdge = outputActive && !prevOutputActive;
     uint32_t now = xlrs::hal::nowMs();
-    bool shouldOutput = isNew || (now - lastCRSF >= 20);
+    bool shouldOutput = isNew || crsfResumeEdge || (now - lastCRSF >= 20);
 
     if (shouldOutput) {
         lastCRSF = now;
@@ -257,27 +280,27 @@ static void app_core_loop() {
         }
 
         if (outputActive) {
-            crsf_channels_t crsfChannels{};
-            uint16_t crsfRcUs[CRSF_NUM_CHANNELS] = {};
-            for (uint8_t i = 0; i < CRSF_NUM_CHANNELS; ++i) {
-                crsfRcUs[i] = i < RC_CHANNELS ? localChannels[i] : RC_US_MID;
-            }
-            xlrs::rcUsToCrsfChannels(crsfRcUs, crsfChannels);
-
-            crsf.queuePacket(CRSF_ADDRESS_FLIGHT_CONTROLLER, CRSF_FRAMETYPE_RC_CHANNELS_PACKED,
-                             &crsfChannels, CRSF_FRAME_RC_CHANNELS_PAYLOAD_SIZE);
-            g_crsfRcFramesOut++;
-            g_lastCrsfRcOutMs = now;
+            sendCrsfRcFrame(now);
         }
     }
 
+    if (crsfResumeEdge && outputActive) {
+        // Burst RC + stats so the FC clears RXLOSS promptly after NoPulses failsafe.
+        for (uint8_t i = 0; i < 3; ++i) {
+            sendCrsfRcFrame(now);
+        }
+        sendCrsfLinkStats(rfData.stats);
+    }
+
+    prevOutputActive = outputActive;
+
     if (now - lastLinkStats >= LINK_STATS_INTERVAL_MS) {
         lastLinkStats = now;
-        uint8_t stats[10] = {};
-        xlrs::buildCrsfLinkStatistics(rfData.stats, stats);
-        crsf.queuePacket(CRSF_ADDRESS_FLIGHT_CONTROLLER, CRSF_FRAMETYPE_LINK_STATISTICS,
-                         stats, sizeof(stats));
-        g_crsfLinkStatsOut++;
+        // NoPulses: do not emit link stats while CRSF RC is gated off — mixed signals
+        // keep Betaflight in RXLOSS even after the RF link recovers.
+        if (outputActive) {
+            sendCrsfLinkStats(rfData.stats);
+        }
         const uint32_t fcAge = g_lastFcCrsfFrameMs == 0 ? 0 : now - g_lastFcCrsfFrameMs;
         const uint32_t rcOutAge = g_lastCrsfRcOutMs == 0 ? 0 : now - g_lastCrsfRcOutMs;
         printf("[RX STATUS] State: %d LQ: %u%% RSSI: %d dBm | PHY timeouts: %lu CRC: %lu Phase: %s/%s LastOp: 0x%02X LastOk: 0x%02X LastFailOp: 0x%02X | lock:%u sync:%u tick:%lu fhss:%u exp:%u skew:%d pfd:%ldus adj:%ldus n:%lu tmr:%lu/%lu | out:%u crsf_rc:%lu age:%lums stats:%lu fc:%lu fcq:%lu fcdrop:%lu fcage:%lums qdrop:%lu%s\n",

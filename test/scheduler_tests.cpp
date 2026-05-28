@@ -59,7 +59,7 @@ static void test_scheduler_poll_caps_backlog() {
     RfScheduler sched;
     sched.begin(&phy, &link, 2);
 
-    const uint32_t backlog = RfScheduler::MAX_TICK_CATCHUP + 20;
+    const uint32_t backlog = RfScheduler::MAX_TX_TICK_CATCHUP + 20;
     for (uint32_t i = 0; i < backlog; ++i) fireSimTimerTick();
     TEST_ASSERT_EQUAL_UINT32(backlog, sched.tickEvents());
 

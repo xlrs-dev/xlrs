@@ -99,6 +99,17 @@ public:
     static constexpr uint16_t FAILSAFE_GRACE_UPLINK_SLOTS    = 48;
     // Valid uplink frames required before RX leaves Failsafe (prevents 3↔4 bounce).
     static constexpr uint8_t  FAILSAFE_RECOVERY_UPLINKS = 2;
+    // After this long without fresh RC, treat as total TX loss (bypass LQ holdoff for State 4).
+#if defined(XLRS_PICO_SDK)
+    static constexpr uint32_t SUSTAINED_UPLINK_LOSS_MS = 400;
+    // Bench TX: recent valid downlink even if the LQ window aged out (USB stall artifact).
+    static constexpr uint32_t RECENT_DOWNLINK_TICKS = 128;
+#else
+    static constexpr uint32_t SUSTAINED_UPLINK_LOSS_TICKS = 100;
+    static constexpr uint32_t RECENT_DOWNLINK_TICKS = 32;
+#endif
+    // Hop-locked Failsafe with a rebooted TX cannot decode; unlock to acquisition channel.
+    static constexpr uint32_t FAILSAFE_REACQUIRE_TICKS = 750; // ~3 s at D250 (4 ms tick)
 
     void begin(Role role, const uint8_t uid[8], uint8_t rateIndex, int8_t maxPowerDbm = 10, bool useDynamicPower = true);
     void setRegion(FhssRegion region) { _region = region; }
@@ -133,6 +144,7 @@ public:
     bool decodedValidUplinkThisRx() const { return _decodedValidUplinkThisRx; }
     // RX: true when a valid RC/uplink decode landed within ~2 packet periods.
     bool hasFreshRc() const;
+    bool sustainedUplinkLoss() const;
     void service(uint32_t tick, bool recordLq = true);
     void refreshRxPosForTick(uint32_t localTick);
 #if defined(XLRS_PICO_SDK)
@@ -149,7 +161,9 @@ public:
 
     void    setChannels(const uint16_t* ch, uint8_t n);        // TX input (11-bit, 0..2047)
     uint8_t getChannels(uint16_t* ch, uint8_t maxN) const;     // RX output; returns count
-    bool    outputActive() const;  // RX: emit CRSF? false = NoPulses failsafe / not connected
+    bool    outputActive() const;  // RX: emit live CRSF RC from decoded uplink
+    bool    emitFailsafeRc() const; // RX: emit preset sticks after uplink loss (BF failsafe positions)
+    bool    hasRecentDownlink() const; // TX: valid telemetry within RECENT_DOWNLINK_TICKS
 
     LinkState        state() const { return _state; }
     const LinkStats& stats() const { return _stats; }
@@ -182,6 +196,7 @@ private:
     void     finalizeHwUplinkLqSlot(uint32_t tick, bool received);
 #endif
     void     onRxEnterConnected(bool recoveringFromFailsafe = false);
+    void     onTxEnterConnected();
 
     Role         _role      = Role::Rx;
     RateConfig   _rate{};
@@ -232,6 +247,7 @@ private:
     uint16_t     _uplinkGraceSlotsRemaining = 0;
     uint8_t      _failsafeRecoveryUplinks = 0;
     uint32_t     _failsafeRecoveryLastUplinkTick = 0;
+    uint32_t     _failsafeEnteredTick = 0;
 #if defined(XLRS_PICO_SDK)
     uint32_t     _failsafeEnteredMs = 0;
 #endif

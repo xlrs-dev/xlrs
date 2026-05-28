@@ -53,6 +53,7 @@ struct RfToAppData {
     xlrs::LinkStats stats;
     uint16_t channels[RC_CHANNELS];
     bool outputActive;
+    bool emitFailsafeRc;
     bool hardwareError;
     bool bindScanOpen;
     bool bindPacketReceived;
@@ -265,26 +266,28 @@ static void app_core_loop() {
 
     xlrs::LinkState state = rfData.state;
     bool outputActive = rfData.outputActive;
-    const bool crsfResumeEdge = outputActive && !prevOutputActive;
+    const bool emitFailsafeRc = rfData.emitFailsafeRc;
+    const bool sendRc = outputActive || emitFailsafeRc;
+    const bool crsfResumeEdge = sendRc && !prevOutputActive;
     uint32_t now = xlrs::hal::nowMs();
     bool shouldOutput = isNew || crsfResumeEdge || (now - lastCRSF >= 20);
 
     if (shouldOutput) {
         lastCRSF = now;
 
-        if (state == xlrs::LinkState::Connected) {
+        if (outputActive && state == xlrs::LinkState::Connected) {
             for (int i = 0; i < RC_CHANNELS; i++) localChannels[i] = rfData.channels[i];
-        } else if (state == xlrs::LinkState::Failsafe) {
+        } else if (sendRc) {
             for (int i = 0; i < RC_CHANNELS; i++) localChannels[i] = RC_US_MID;
             localChannels[RC_THROTTLE_CH] = RC_THROTTLE_FAILSAFE;
         }
 
-        if (outputActive) {
+        if (sendRc) {
             sendCrsfRcFrame(now);
         }
     }
 
-    if (crsfResumeEdge && outputActive) {
+    if (crsfResumeEdge && sendRc) {
         // Burst RC + stats so the FC clears RXLOSS promptly after NoPulses failsafe.
         for (uint8_t i = 0; i < 3; ++i) {
             sendCrsfRcFrame(now);
@@ -292,18 +295,16 @@ static void app_core_loop() {
         sendCrsfLinkStats(rfData.stats);
     }
 
-    prevOutputActive = outputActive;
+    prevOutputActive = sendRc;
 
     if (now - lastLinkStats >= LINK_STATS_INTERVAL_MS) {
         lastLinkStats = now;
-        // NoPulses: do not emit link stats while CRSF RC is gated off — mixed signals
-        // keep Betaflight in RXLOSS even after the RF link recovers.
-        if (outputActive) {
+        if (sendRc) {
             sendCrsfLinkStats(rfData.stats);
         }
         const uint32_t fcAge = g_lastFcCrsfFrameMs == 0 ? 0 : now - g_lastFcCrsfFrameMs;
         const uint32_t rcOutAge = g_lastCrsfRcOutMs == 0 ? 0 : now - g_lastCrsfRcOutMs;
-        printf("[RX STATUS] State: %d LQ: %u%% RSSI: %d dBm | PHY timeouts: %lu CRC: %lu Phase: %s/%s LastOp: 0x%02X LastOk: 0x%02X LastFailOp: 0x%02X | lock:%u sync:%u tick:%lu fhss:%u exp:%u skew:%d pfd:%ldus adj:%ldus n:%lu tmr:%lu/%lu | out:%u crsf_rc:%lu age:%lums stats:%lu fc:%lu fcq:%lu fcdrop:%lu fcage:%lums qdrop:%lu%s\n",
+        printf("[RX STATUS] State: %d LQ: %u%% RSSI: %d dBm | PHY timeouts: %lu CRC: %lu Phase: %s/%s LastOp: 0x%02X LastOk: 0x%02X LastFailOp: 0x%02X | lock:%u sync:%u tick:%lu fhss:%u exp:%u skew:%d pfd:%ldus adj:%ldus n:%lu tmr:%lu/%lu | out:%u fs:%u crsf_rc:%lu age:%lums stats:%lu fc:%lu fcq:%lu fcdrop:%lu fcage:%lums qdrop:%lu%s\n",
                (int)state, (unsigned)rfData.stats.lqUp, (int)rfData.stats.rssiDbm,
                (unsigned long)g_phy.spiTimeouts(), (unsigned long)g_phy.crcErrors(),
                xlrs::Sx1280NativePhy::diagPhaseName(g_phy.lastDiagPhase()),
@@ -323,6 +324,7 @@ static void app_core_loop() {
                (unsigned long)rfData.linkDiag.timerIntervalUs,
                (unsigned long)rfData.linkDiag.nomIntervalUs,
                outputActive ? 1u : 0u,
+               emitFailsafeRc ? 1u : 0u,
                (unsigned long)g_crsfRcFramesOut,
                (unsigned long)rcOutAge,
                (unsigned long)g_crsfLinkStatsOut,
@@ -473,6 +475,7 @@ static void rf_core_main() {
             rfData.stats = g_link.stats();
             g_link.getChannels(rfData.channels, RC_CHANNELS);
             rfData.outputActive = g_link.outputActive();
+            rfData.emitFailsafeRc = g_link.emitFailsafeRc();
             rfData.hardwareError = !g_phy.healthy();
             rfData.bindScanOpen = bindScanning;
             rfData.bindPacketReceived = bindPacketReceived;

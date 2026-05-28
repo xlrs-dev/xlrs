@@ -30,6 +30,8 @@ bool RfScheduler::begin(IRadioPhy* phy, Link* link, uint8_t rateIndex) {
     _rate = kRates[rateIndex];
 
     _pfd.begin(_rate.intervalUs);
+    _tlmPfd.begin(_rate.intervalUs);
+    _tlmListenTrimUs = 0;
     _currentSlot = Slot::Idle;
     _tick = 0;
     _tickStartUs = 0;
@@ -292,8 +294,37 @@ bool RfScheduler::telemetrySlotStillOpen() const {
         return false;
     }
     const uint32_t nowUs = _timer ? _timer->nowUs() : 0;
-    const int32_t elapsed = (int32_t)(nowUs - _pendingTlmArmedTickStartUs);
-    return elapsed >= 0 && elapsed < (int32_t)(_rate.intervalUs + (_rate.intervalUs / 2));
+    return nowUs < tlmListenEndUs(_pendingTlmArmedTickStartUs);
+}
+
+int32_t RfScheduler::tlmDownlinkEarliestUs(uint32_t tickStartUs) const {
+    // Open the listen window at the slot boundary; RX downlink arrives ~interval/8 later
+    // and may drift across the full tick when peers use independent timers.
+    return (int32_t)tickStartUs;
+}
+
+uint32_t RfScheduler::tlmListenEndUs(uint32_t tickStartUs) const {
+    return tickStartUs + _rate.intervalUs + (_rate.intervalUs / 4);
+}
+
+void RfScheduler::applyTlmListenPhase(uint32_t packetStartUs, uint32_t tickStartUs) {
+    if (_tlmRxPhyOkCount == 1) {
+        _tlmPfd.begin(_rate.intervalUs);
+        _tlmListenTrimUs = 0;
+    }
+    const int32_t expectedStartUs = (int32_t)tickStartUs +
+        (int32_t)(_rate.intervalUs / 8) + (int32_t)TX_GUARD_US + _tlmListenTrimUs;
+    const int32_t offsetUs = (int32_t)packetStartUs - expectedStartUs;
+    const int32_t adjUs = _tlmPfd.update(offsetUs);
+    _lastPfdAdjUs = adjUs;
+    _pfdUpdateCount++;
+    _tlmListenTrimUs += adjUs;
+    const int32_t maxTrim = (int32_t)_rate.intervalUs / 4;
+    if (_tlmListenTrimUs > maxTrim) {
+        _tlmListenTrimUs = maxTrim;
+    } else if (_tlmListenTrimUs < -maxTrim) {
+        _tlmListenTrimUs = -maxTrim;
+    }
 }
 
 void RfScheduler::onRxDone() {
@@ -318,6 +349,7 @@ void RfScheduler::onRxDone() {
             applyLockedRxPhaseResync(packetStartUs);
         }
         if (tlmListen) {
+            applyTlmListenPhase(packetStartUs, _armedTickStartUs);
             if (success) {
                 _tlmRxDecodeOkCount++;
                 _tlmListenUntilUs = 0;
@@ -425,10 +457,9 @@ void RfScheduler::tryArmTelemetryRx() {
     }
 #if defined(XLRS_PICO_SDK)
     const uint32_t nowUs = _timer ? _timer->nowUs() : 0;
-    const uint32_t downlinkEarliestUs =
-        _pendingTlmArmedTickStartUs + (_rate.intervalUs / 8) + TX_GUARD_US;
-    if (nowUs < downlinkEarliestUs) {
-        _tlmRxArmAtUs = downlinkEarliestUs;
+    const int32_t downlinkEarliestUs = tlmDownlinkEarliestUs(_pendingTlmArmedTickStartUs);
+    if ((int32_t)nowUs < downlinkEarliestUs) {
+        _tlmRxArmAtUs = (uint32_t)downlinkEarliestUs;
         return;
     }
 #endif
@@ -440,9 +471,7 @@ void RfScheduler::tryArmTelemetryRx() {
     _phy->startRx(_pendingTlmRxFreq);
     _pendingTlmRx = false;
     if (_timer) {
-        const uint32_t listenUs =
-            (_rate.intervalUs / 2) + _rate.airtime16Us + TX_GUARD_US + 800;
-        _tlmListenUntilUs = _timer->nowUs() + listenUs;
+        _tlmListenUntilUs = tlmListenEndUs(_armedTickStartUs);
     }
     _tlmRxArmedCount++;
 }
@@ -451,7 +480,7 @@ bool RfScheduler::telemetryListenActive() const {
     if (!_timer || _tlmListenUntilUs == 0) {
         return false;
     }
-    return (int32_t)(_timer->nowUs() - _tlmListenUntilUs) < 0;
+    return _timer->nowUs() < _tlmListenUntilUs;
 }
 
 Slot RfScheduler::currentSlot() const {
@@ -520,7 +549,9 @@ void RfScheduler::poll() {
     uint32_t currentTicks = _tickEvents.load(std::memory_order_acquire);
     if (currentTicks > _lastProcessedTickEvent) {
         uint32_t diff = currentTicks - _lastProcessedTickEvent;
-        if (diff > MAX_TICK_CATCHUP) {
+        const uint32_t catchupLimit =
+            (_link && _link->role() == Role::Tx) ? MAX_TX_TICK_CATCHUP : MAX_TICK_CATCHUP;
+        if (diff > catchupLimit) {
             // Core 1 fell badly behind (long stall). Replaying every backlogged slot would
             // burst blocking SPI + TX_GUARD sleeps for stale FHSS positions and keep us behind.
             if (_link && _link->role() == Role::Rx && _link->isLocked()) {
@@ -531,12 +562,23 @@ void RfScheduler::poll() {
                 if (_link) _link->noteSchedulerOverrun((uint16_t)diff);
                 const uint32_t targetTick = _tick + diff;
                 onTick(targetTick);
-                if (_link) _link->service(targetTick);
+                if (_link) {
+#if defined(XLRS_PICO_SDK)
+                    _link->service(targetTick, false);
+#else
+                    _link->service(targetTick);
+#endif
+                }
+                drainPendingRxDone();
             }
         } else {
+            const bool rxRole = _link && _link->role() == Role::Rx;
+            const bool txRole = _link && _link->role() == Role::Tx;
             for (uint32_t i = 0; i < diff; ++i) {
-                // Drain before onTick so late DIO still sees the armed slot tick/pos.
-                drainPendingRxDone();
+                // RX uplink: drain before onTick so late DIO still sees the armed slot.
+                if (rxRole) {
+                    drainPendingRxDone();
+                }
                 uint32_t nextTick = _tick + 1;
                 onTick(nextTick);
                 if (_link) {
@@ -546,6 +588,10 @@ void RfScheduler::poll() {
                     _link->service(nextTick);
 #endif
                 }
+                // TX telemetry: drain after service so listen completions land before close.
+                if (txRole) {
+                    drainPendingRxDone();
+                }
             }
             drainPendingRxDone();
         }
@@ -553,6 +599,10 @@ void RfScheduler::poll() {
     }
 
     tryArmTelemetryRx();
+    if (_pendingTlmRx && _tlmRxArmAtUs != 0 && _timer &&
+        _timer->nowUs() >= _tlmRxArmAtUs) {
+        tryArmTelemetryRx();
+    }
 
     recoverPhyIfNeeded();
 }

@@ -431,6 +431,20 @@ static void test_link_rx_lq_holdoff_failsafe_on_total_loss() {
     TEST_ASSERT_TRUE(env.rx.state() == LinkState::Failsafe);
 }
 
+static void test_link_tx_warm_starts_lqdown_on_connect() {
+    uint8_t uid[LINK_UID_SIZE];
+    linkUidFromPhrase("Kikobot-02", uid);
+    SimEnvironment env;
+    env.setup(uid, 2);
+
+    uint16_t ch[4] = {512, 512, 512, 512};
+    env.tx.setChannels(ch, 4);
+
+    for (uint32_t t = 1; t <= 50; ++t) simTick(env, t);
+    TEST_ASSERT_TRUE(env.tx.state() == LinkState::Connected);
+    TEST_ASSERT_TRUE(env.tx.stats().lqDown >= 90);
+}
+
 static void test_link_tx_lq_holdoff_suppresses_burst_failsafe() {
     uint8_t uid[LINK_UID_SIZE];
     linkUidFromPhrase("Kikobot-02", uid);
@@ -494,6 +508,87 @@ static void test_link_rx_fresh_rc_window() {
 
     for (uint32_t t = 36; t <= 36; ++t) simTick(env, t, false);
     TEST_ASSERT_FALSE(env.rx.hasFreshRc());
+}
+
+static void test_link_output_inactive_when_rc_stale_while_connected() {
+    uint8_t uid[LINK_UID_SIZE];
+    linkUidFromPhrase("Kikobot-02", uid);
+    SimEnvironment env;
+    env.setup(uid, 2);
+
+    uint16_t ch[4] = {200, 800, 1800, 1024};
+    env.tx.setChannels(ch, 4);
+
+    for (uint32_t t = 1; t <= 50; ++t) simTick(env, t);
+    TEST_ASSERT_TRUE(env.rx.state() == LinkState::Connected);
+    TEST_ASSERT_TRUE(env.rx.outputActive());
+
+    // TX off long enough for sustained loss (400 ms / 100 ticks in sim).
+    for (uint32_t t = 51; t <= 151; ++t) simTick(env, t, false);
+    TEST_ASSERT_TRUE(env.rx.sustainedUplinkLoss());
+    TEST_ASSERT_FALSE(env.rx.outputActive());
+    TEST_ASSERT_TRUE(env.rx.emitFailsafeRc());
+}
+
+static void test_link_no_failsafe_rc_on_brief_rc_gap() {
+    uint8_t uid[LINK_UID_SIZE];
+    linkUidFromPhrase("Kikobot-02", uid);
+    SimEnvironment env;
+    env.setup(uid, 2);
+
+    uint16_t ch[4] = {512, 512, 512, 512};
+    env.tx.setChannels(ch, 4);
+
+    for (uint32_t t = 1; t <= 200; ++t) simTick(env, t);
+    TEST_ASSERT_TRUE(env.rx.state() == LinkState::Connected);
+    TEST_ASSERT_TRUE(env.rx.outputActive());
+    TEST_ASSERT_FALSE(env.rx.emitFailsafeRc());
+
+    // One missed tick: stale RC but not sustained loss — no preset spam.
+    for (uint32_t t = 201; t <= 205; ++t) simTick(env, t, false);
+    TEST_ASSERT_TRUE(env.rx.state() == LinkState::Connected);
+    TEST_ASSERT_FALSE(env.rx.emitFailsafeRc());
+}
+
+static void test_link_unlocks_for_reacquire_after_failsafe_timeout() {
+    uint8_t uid[LINK_UID_SIZE];
+    linkUidFromPhrase("Kikobot-02", uid);
+    SimEnvironment env;
+    env.setup(uid, 2);
+
+    uint16_t ch[4] = {512, 512, 512, 512};
+    env.tx.setChannels(ch, 4);
+
+    for (uint32_t t = 1; t <= 200; ++t) simTick(env, t);
+    TEST_ASSERT_TRUE(env.rx.state() == LinkState::Connected);
+    TEST_ASSERT_TRUE(env.rx.isLocked());
+
+    for (uint32_t t = 201; t <= 1100; ++t) simTick(env, t, false);
+    TEST_ASSERT_FALSE(env.rx.isLocked());
+    TEST_ASSERT_TRUE(env.rx.state() == LinkState::Connecting);
+}
+
+static void test_link_reconnects_after_tx_reboot() {
+    uint8_t uid[LINK_UID_SIZE];
+    linkUidFromPhrase("Kikobot-02", uid);
+    SimEnvironment env;
+    env.setup(uid, 2);
+
+    uint16_t ch[4] = {600, 700, 800, 900};
+    env.tx.setChannels(ch, 4);
+
+    for (uint32_t t = 1; t <= 200; ++t) simTick(env, t);
+    TEST_ASSERT_TRUE(env.rx.state() == LinkState::Connected);
+
+    // TX power loss: RX failsafe then unlocks to acquisition channel.
+    for (uint32_t t = 201; t <= 1100; ++t) simTick(env, t, false);
+    TEST_ASSERT_FALSE(env.rx.isLocked());
+    TEST_ASSERT_TRUE(env.rx.state() == LinkState::Connecting);
+
+    // TX powers back on at tick 0 phase — RX on acquisition channel catches Sync.
+    for (uint32_t t = 1101; t <= 1400; ++t) simTick(env, t);
+    TEST_ASSERT_TRUE(env.rx.state() == LinkState::Connected);
+    TEST_ASSERT_TRUE(env.rx.outputActive());
 }
 
 static void test_link_rx_warm_lq_when_crsf_resumes() {
@@ -584,7 +679,12 @@ int main() {
     RUN_TEST(test_link_rx_lq_holdoff_suppresses_burst_failsafe);
     RUN_TEST(test_link_rx_lq_holdoff_failsafe_on_total_loss);
     RUN_TEST(test_link_tx_lq_holdoff_suppresses_burst_failsafe);
+    RUN_TEST(test_link_tx_warm_starts_lqdown_on_connect);
     RUN_TEST(test_link_rx_recovers_from_failsafe_without_bounce);
+    RUN_TEST(test_link_output_inactive_when_rc_stale_while_connected);
+    RUN_TEST(test_link_no_failsafe_rc_on_brief_rc_gap);
+    RUN_TEST(test_link_unlocks_for_reacquire_after_failsafe_timeout);
+    RUN_TEST(test_link_reconnects_after_tx_reboot);
     RUN_TEST(test_link_rx_warm_lq_when_crsf_resumes);
     RUN_TEST(test_link_rx_failsafe_recovery_survives_double_service);
     RUN_TEST(test_link_rx_fresh_rc_window);

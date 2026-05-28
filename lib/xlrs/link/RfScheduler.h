@@ -40,6 +40,9 @@ public:
     // blocking SPI + a TX_GUARD sleep for a now-stale FHSS slot) and fast-forwards to the
     // latest tick instead. See poll().
     static const uint32_t MAX_TICK_CATCHUP = 16;
+    // TX replays more backlog slot-by-slot so telemetry listen windows are not skipped
+    // when core 1 stalls briefly (dual USB STATUS on the bench).
+    static const uint32_t MAX_TX_TICK_CATCHUP = 64;
     static const uint32_t PHY_RECOVERY_BACKOFF_US = 100000;
 
     RfScheduler();
@@ -87,6 +90,9 @@ private:
     void drainPendingRxDone();
     bool telemetrySlotStillOpen() const;
     bool telemetryListenActive() const;
+    int32_t  tlmDownlinkEarliestUs(uint32_t tickStartUs) const;
+    uint32_t tlmListenEndUs(uint32_t tickStartUs) const;
+    void applyTlmListenPhase(uint32_t packetStartUs, uint32_t tickStartUs);
 
     std::atomic<uint32_t> _tickEvents{0};
     std::atomic<uint32_t> _rxDoneEvents{0};
@@ -113,7 +119,9 @@ private:
     uint16_t     _armedPos = 0;
     uint32_t     _armedTickStartUs = 0;
     Pfd          _pfd{};
+    Pfd          _tlmPfd{};
     int32_t      _lastPfdAdjUs = 0;
+    int32_t      _tlmListenTrimUs = 0;
     uint32_t     _pfdUpdateCount = 0;
     uint32_t     _tlmRxArmedCount = 0;
     uint32_t     _tlmRxArmDeferredCount = 0;

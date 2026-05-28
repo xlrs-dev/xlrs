@@ -75,6 +75,7 @@ void Link::resetAcquisition(LinkState state) {
     _syncAnchorTxTick = 0;
     _syncAnchorLocalTick = 0;
     _rxTimingResetPending = false;
+    _failsafeEnteredTick = 0;
 #if defined(XLRS_PICO_SDK)
     _failsafeEnteredMs = 0;
     _hwUplinkLqTick = UINT32_MAX;
@@ -487,22 +488,63 @@ bool Link::processRxPayload(uint32_t tick, uint16_t pos, const uint8_t* data, ui
         if (len >= (uint8_t)(1 + 15 + c->overhead())) {
             uint8_t decBuf[64];
             memcpy(decBuf, data, len);
-            const uint32_t nonceTick = effectiveTxTick(tick);
-            if (c->open(decBuf + 1, 15, Nonce96::build(_sessionSalt, nonceTick, pos))) {
+
+            const auto decodeMsp = [&](uint32_t nonceTick) -> bool {
+                if (_role == Role::Tx && slotKind(nonceTick, pos) != SlotKind::Telemetry) {
+                    return false;
+                }
+                uint8_t openBuf[64];
+                memcpy(openBuf, decBuf, len);
+                if (!c->open(openBuf + 1, 15, Nonce96::build(_sessionSalt, nonceTick, pos))) {
+                    return false;
+                }
                 TelemetryChunk chunk{};
-                chunk.seq = decBuf[1];
-                chunk.length = decBuf[2];
-                memcpy(chunk.data, decBuf + 3, 13);
+                chunk.seq = openBuf[1];
+                chunk.length = openBuf[2];
+                memcpy(chunk.data, openBuf + 3, 13);
                 uint8_t ackSeq = 0;
                 _tlmReceiver.processChunk(chunk, ackSeq);
                 _localAckSeq = ackSeq;
                 if (_role == Role::Rx && slotKind(nonceTick, pos) == SlotKind::Uplink) {
                     _gotValidUplinkThisTick = true;
                     _decodedValidUplinkThisRx = true;
-                } else if (_role == Role::Tx && slotKind(tick, pos) == SlotKind::Telemetry) {
+                } else if (_role == Role::Tx) {
                     _gotValidTelemetryThisTick = true;
                 }
-                _lastRxTick = tick; _everRx = true;
+                _lastRxTick = tick;
+                _everRx = true;
+                return true;
+            };
+
+            if (_role == Role::Tx) {
+                const uint32_t seqPeriod = syncEveryNTicks();
+#if defined(XLRS_PICO_SDK)
+                for (int32_t periodDelta = -2; periodDelta <= 2; ++periodDelta) {
+                    const int64_t tryTick =
+                        (int64_t)tick + (int64_t)periodDelta * (int64_t)seqPeriod;
+                    if (tryTick < 0) continue;
+                    if (decodeMsp((uint32_t)tryTick)) {
+                        return true;
+                    }
+                }
+                for (int32_t delta = -16; delta <= 16; ++delta) {
+                    const int32_t tryTick = (int32_t)tick + delta;
+                    if (tryTick < 0) continue;
+                    if (txPos((uint32_t)tryTick) != pos) continue;
+                    if (decodeMsp((uint32_t)tryTick)) {
+                        return true;
+                    }
+                }
+#else
+                if (decodeMsp(tick)) {
+                    return true;
+                }
+#endif
+                return false;
+            }
+
+            const uint32_t nonceTick = effectiveTxTick(tick);
+            if (decodeMsp(nonceTick)) {
                 return true;
             }
         }
@@ -610,6 +652,19 @@ void Link::onRxEnterConnected(bool recoveringFromFailsafe) {
     _failsafeRecoveryLastUplinkTick = 0;
 }
 
+void Link::onTxEnterConnected() {
+    _lqDown.resetWarm();
+    _stats.lqDown = 100;
+#if defined(XLRS_PICO_SDK)
+    _hwTlmLqTick = UINT32_MAX;
+    _hwTlmLqClosed = true;
+    _hwTlmDecodeTick = UINT32_MAX;
+    _hwTlmDecodeOk = false;
+#endif
+    _telemetryGraceSlotsRemaining = FAILSAFE_GRACE_TELEMETRY_SLOTS;
+    _consecutiveMissedTelemetry = 0;
+}
+
 #if defined(XLRS_PICO_SDK)
 void Link::finalizeHwUplinkLqSlot(uint32_t tick, bool received) {
     if (_hwUplinkLqTick != tick || _hwUplinkLqClosed) {
@@ -691,7 +746,7 @@ void Link::advanceHwTelemetryLqSlot(uint32_t tick) {
     }
     if (_hwTlmLqTick != UINT32_MAX && !_hwTlmLqClosed && tick > _hwTlmLqTick) {
         // Telemetry slots are sparse (1:N); allow extra tick slack for async decode.
-        if (tick > _hwTlmLqTick + 16 || _hwTlmDecodeTick == _hwTlmLqTick) {
+        if (tick > _hwTlmLqTick + 32 || _hwTlmDecodeTick == _hwTlmLqTick) {
             const bool received =
                 (_hwTlmDecodeTick == _hwTlmLqTick && _hwTlmDecodeOk);
             _lqDown.update(received);
@@ -748,6 +803,27 @@ bool Link::hasFreshRc() const {
     return (xlrs::hal::nowMs() - _lastValidRcMs) <= windowMs;
 #else
     return (_tick - _lastValidRcTick) <= 12u;
+#endif
+}
+
+bool Link::hasRecentDownlink() const {
+    if (_role != Role::Tx || !_everRx || _lastRxTick == 0) {
+        return false;
+    }
+    return (_tick >= _lastRxTick) && ((_tick - _lastRxTick) <= RECENT_DOWNLINK_TICKS);
+}
+
+bool Link::sustainedUplinkLoss() const {
+    if (_role != Role::Rx || _lastValidRcTick == 0) {
+        return false;
+    }
+#if defined(XLRS_PICO_SDK)
+    if (_lastValidRcMs == 0) {
+        return false;
+    }
+    return (xlrs::hal::nowMs() - _lastValidRcMs) >= SUSTAINED_UPLINK_LOSS_MS;
+#else
+    return (_tick - _lastValidRcTick) >= SUSTAINED_UPLINK_LOSS_TICKS;
 #endif
 }
 
@@ -851,8 +927,9 @@ void Link::service(uint32_t tick, bool recordLq) {
     if (_role == Role::Rx && _uplinkGraceSlotsRemaining > 0) {
         misses = 0;
     }
-    // Bench TX: downlink LQ reflects recent telemetry; do not failsafe while it is healthy.
-    if (_benchTxMode && _role == Role::Tx && _stats.lqDown > 0) {
+    // Bench TX: suppress consecutive-miss failsafe while downlink is recent or LQ is healthy.
+    if (_benchTxMode && _role == Role::Tx &&
+        (_stats.lqDown >= FAILSAFE_LQ_HOLDOFF || hasRecentDownlink())) {
         misses = 0;
     }
     const LinkState prevState = _state;
@@ -868,8 +945,8 @@ void Link::service(uint32_t tick, bool recordLq) {
         case LinkState::Connected:
             if (misses >= FAILSAFE_MISS) {
                 if (_role == Role::Rx) {
-                    if (_uplinkGraceSlotsRemaining == 0 && _stats.lqUp < FAILSAFE_LQ_HOLDOFF &&
-                        !hasFreshRc()) {
+                    if (_uplinkGraceSlotsRemaining == 0 && !hasFreshRc() &&
+                        (_stats.lqUp < FAILSAFE_LQ_HOLDOFF || sustainedUplinkLoss())) {
                         _state = LinkState::Failsafe;
                     }
                 } else {
@@ -902,7 +979,7 @@ void Link::service(uint32_t tick, bool recordLq) {
 
     if (_state == LinkState::Connected && prevState != LinkState::Connected) {
         if (_role == Role::Tx) {
-            _telemetryGraceSlotsRemaining = FAILSAFE_GRACE_TELEMETRY_SLOTS;
+            onTxEnterConnected();
         } else if (_role == Role::Rx) {
             onRxEnterConnected(prevState == LinkState::Failsafe);
         }
@@ -912,16 +989,26 @@ void Link::service(uint32_t tick, bool recordLq) {
         _role == Role::Rx) {
         _failsafeRecoveryUplinks = 0;
         _failsafeRecoveryLastUplinkTick = 0;
+        _failsafeEnteredTick = tick;
 #if defined(XLRS_PICO_SDK)
         _failsafeEnteredMs = xlrs::hal::nowMs();
 #endif
     }
 
-    // Stay hop-locked in Failsafe: dropping lock here (old 8s re-acquire) left RX in
-    // Connecting with lock:0 while TX remained Connected — unrecoverable on the bench.
+    // TX power-cycle reboots at tick 0 while RX stays on a stale hop-locked phase — unlock
+    // to the acquisition channel so the next Sync beacon can re-establish the link.
+    if (_role == Role::Rx && _state == LinkState::Failsafe && _locked &&
+        _failsafeEnteredTick != 0 && !hasFreshRc() &&
+        (tick - _failsafeEnteredTick) >= FAILSAFE_REACQUIRE_TICKS) {
+        resetAcquisition(LinkState::Connecting);
+        _rxTimingResetPending = true;
+    }
+
+    // After sustained Failsafe without fresh RC, unlock to acquisition channel for re-sync.
 
     if (_state == LinkState::Connected && prevState == LinkState::Failsafe &&
         _role == Role::Rx) {
+        _failsafeEnteredTick = 0;
 #if defined(XLRS_PICO_SDK)
         _failsafeEnteredMs = 0;
 #endif
@@ -981,9 +1068,19 @@ uint8_t Link::getChannels(uint16_t* ch, uint8_t maxN) const {
 
 bool Link::outputActive() const {
     if (_role != Role::Rx) return false;
-    if (_state == LinkState::Connected && _locked && _syncSeen) return true;
+    // Live uplink only — stale decoded sticks must not keep updating Betaflight.
+    if (_state == LinkState::Connected && _locked && _syncSeen && hasFreshRc()) return true;
     if (_state == LinkState::Failsafe && _fsMode == FailsafeMode::Hold) return true;
-    return false;   // NoPulses (default): stop CRSF when not connected
+    return false;
+}
+
+bool Link::emitFailsafeRc() const {
+    if (_role != Role::Rx || !_locked || !_syncSeen) return false;
+    if (_state != LinkState::Connected && _state != LinkState::Failsafe) return false;
+    if (_state == LinkState::Failsafe && _fsMode == FailsafeMode::Hold) return false;
+    // Preset sticks only after sustained TX loss or formal Failsafe — not on every
+    // sub-50 ms decode gap while the link is still healthy.
+    return _state == LinkState::Failsafe || sustainedUplinkLoss();
 }
 
 } // namespace xlrs

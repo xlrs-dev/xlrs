@@ -740,7 +740,7 @@ static void rf_core_main() {
     }
 
     while (true) {
-        for (int pollBurst = 0; pollBurst < 4; ++pollBurst) {
+        for (int pollBurst = 0; pollBurst < 8; ++pollBurst) {
             g_scheduler.poll();
         }
 

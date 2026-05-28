@@ -450,6 +450,75 @@ static void test_link_tx_lq_holdoff_suppresses_burst_failsafe() {
     TEST_ASSERT_TRUE(env.tx.state() == LinkState::Connected);
 }
 
+static void test_link_rx_recovers_from_failsafe_without_bounce() {
+    uint8_t uid[LINK_UID_SIZE];
+    linkUidFromPhrase("Kikobot-02", uid);
+    SimEnvironment env;
+    env.setup(uid, 2);
+
+    uint16_t ch[4] = {512, 512, 512, 512};
+    env.tx.setChannels(ch, 4);
+
+    for (uint32_t t = 1; t <= 200; ++t) simTick(env, t);
+    TEST_ASSERT_TRUE(env.rx.state() == LinkState::Connected);
+
+    for (uint32_t t = 201; t <= 450; ++t) simTick(env, t, false);
+    TEST_ASSERT_TRUE(env.rx.state() == LinkState::Failsafe);
+
+    for (uint32_t t = 451; t <= 650; ++t) simTick(env, t);
+    TEST_ASSERT_TRUE(env.rx.state() == LinkState::Connected);
+    for (uint32_t t = 651; t <= 700; ++t) {
+        simTick(env, t);
+        TEST_ASSERT_TRUE(env.rx.state() == LinkState::Connected);
+    }
+}
+
+static void test_link_rx_fresh_rc_window() {
+    uint8_t uid[LINK_UID_SIZE];
+    linkUidFromPhrase("Kikobot-02", uid);
+    SimEnvironment env;
+    env.setup(uid, 2);
+
+    uint16_t ch[4] = {512, 512, 512, 512};
+    env.tx.setChannels(ch, 4);
+
+    for (uint32_t t = 1; t <= 20; ++t) simTick(env, t);
+    TEST_ASSERT_TRUE(env.rx.state() == LinkState::Connected);
+    TEST_ASSERT_TRUE(env.rx.hasFreshRc());
+
+    for (uint32_t t = 21; t <= 23; ++t) simTick(env, t);
+    TEST_ASSERT_TRUE(env.rx.hasFreshRc());
+
+    for (uint32_t t = 24; t <= 35; ++t) simTick(env, t, false);
+    TEST_ASSERT_TRUE(env.rx.hasFreshRc());
+
+    for (uint32_t t = 36; t <= 36; ++t) simTick(env, t, false);
+    TEST_ASSERT_FALSE(env.rx.hasFreshRc());
+}
+
+static void test_link_rx_failsafe_recovery_survives_double_service() {
+    uint8_t uid[LINK_UID_SIZE];
+    linkUidFromPhrase("Kikobot-02", uid);
+    SimEnvironment env;
+    env.setup(uid, 2);
+
+    uint16_t ch[4] = {512, 512, 512, 512};
+    env.tx.setChannels(ch, 4);
+
+    for (uint32_t t = 1; t <= 200; ++t) simTick(env, t);
+    TEST_ASSERT_TRUE(env.rx.state() == LinkState::Connected);
+
+    for (uint32_t t = 201; t <= 450; ++t) simTick(env, t, false);
+    TEST_ASSERT_TRUE(env.rx.state() == LinkState::Failsafe);
+
+    // Hardware calls service() from onRxDone and again on the tick boundary.
+    for (uint32_t t = 451; t <= 452; ++t) {
+        simTick(env, t);
+        env.rx.service(t, false);
+    }
+    TEST_ASSERT_TRUE(env.rx.state() == LinkState::Connected);
+}
+
 static void test_link_tx_failsafe_counts_telemetry_slots() {
     uint8_t uid[LINK_UID_SIZE];
     linkUidFromPhrase("Kikobot-02", uid);
@@ -492,6 +561,9 @@ int main() {
     RUN_TEST(test_link_rx_lq_holdoff_suppresses_burst_failsafe);
     RUN_TEST(test_link_rx_lq_holdoff_failsafe_on_total_loss);
     RUN_TEST(test_link_tx_lq_holdoff_suppresses_burst_failsafe);
+    RUN_TEST(test_link_rx_recovers_from_failsafe_without_bounce);
+    RUN_TEST(test_link_rx_failsafe_recovery_survives_double_service);
+    RUN_TEST(test_link_rx_fresh_rc_window);
     RUN_TEST(test_link_tx_failsafe_counts_telemetry_slots);
     return UNITY_END();
 }

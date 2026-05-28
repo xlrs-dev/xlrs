@@ -87,6 +87,8 @@ public:
     // Post-connect grace: flaky bench links need time for PFD/phase to converge before failsafe.
     static constexpr uint16_t FAILSAFE_GRACE_TELEMETRY_SLOTS = 96;
     static constexpr uint16_t FAILSAFE_GRACE_UPLINK_SLOTS    = 48;
+    // Valid uplink frames required before RX leaves Failsafe (prevents 3↔4 bounce).
+    static constexpr uint8_t  FAILSAFE_RECOVERY_UPLINKS = 2;
 
     void begin(Role role, const uint8_t uid[8], uint8_t rateIndex, int8_t maxPowerDbm = 10, bool useDynamicPower = true);
     void setRegion(FhssRegion region) { _region = region; }
@@ -117,10 +119,16 @@ public:
     bool getTxPayload(uint32_t tick, uint16_t pos, uint8_t* outBuf, uint8_t& outLen);
     bool processRxPayload(uint32_t tick, uint16_t pos, const uint8_t* data, uint8_t len,
                           int16_t rssi, int8_t snr, uint32_t rxPacketStartUs = 0);
+    // True after processRxPayload() when this RX packet carried a valid uplink/RC frame.
+    bool decodedValidUplinkThisRx() const { return _decodedValidUplinkThisRx; }
+    // RX: true when a valid RC/uplink decode landed within ~2 packet periods.
+    bool hasFreshRc() const;
     void service(uint32_t tick, bool recordLq = true);
     void refreshRxPosForTick(uint32_t localTick);
 #if defined(XLRS_PICO_SDK)
     void advanceHwUplinkLqSlot(uint32_t tick);
+    // TOCK: close tick's uplink LQ slot after pending RX for that tick is drained.
+    void closeHwUplinkLqSlotAtTock(uint32_t tick);
     void noteHwUplinkDecode(uint32_t tick, bool received);
     void advanceHwTelemetryLqSlot(uint32_t tick);
     void noteHwTelemetryDecode(uint32_t tick, bool received);
@@ -160,6 +168,10 @@ private:
     uint32_t txTickForNonce(uint32_t rxPacketStartUs) const;
     void     configureIdentity(const uint8_t uid[LINK_UID_SIZE]);
     void     resetAcquisition(LinkState state);
+#if defined(XLRS_PICO_SDK)
+    void     finalizeHwUplinkLqSlot(uint32_t tick, bool received);
+#endif
+    void     onRxEnterConnected();
 
     Role         _role      = Role::Rx;
     RateConfig   _rate{};
@@ -188,6 +200,10 @@ private:
     LinkState    _state    = LinkState::Disconnected;
     uint16_t     _ch[RC_CHANNELS] = {0};
     uint32_t     _lastRxTick = 0;
+    uint32_t     _lastValidRcTick = 0;
+#if defined(XLRS_PICO_SDK)
+    uint32_t     _lastValidRcMs = 0;
+#endif
     bool         _everRx     = false;
     uint32_t     _txCounter  = 0;
     LqTracker<100> _lq;       // RX uplink LQ (uplink slots only)
@@ -199,10 +215,16 @@ private:
     bool         _gotTlmThisTick = false;
     bool         _gotValidUplinkThisTick = false;
     bool         _gotValidTelemetryThisTick = false;
+    bool         _decodedValidUplinkThisRx = false;  // per-packet; cleared in processRxPayload()
     uint32_t     _consecutiveMissedUplinks = 0;
     uint32_t     _consecutiveMissedTelemetry = 0;
     uint16_t     _telemetryGraceSlotsRemaining = 0;
     uint16_t     _uplinkGraceSlotsRemaining = 0;
+    uint8_t      _failsafeRecoveryUplinks = 0;
+    uint32_t     _failsafeRecoveryLastUplinkTick = 0;
+#if defined(XLRS_PICO_SDK)
+    uint32_t     _failsafeEnteredMs = 0;
+#endif
     StubbornSender   _tlmSender;
     StubbornReceiver _tlmReceiver;
     uint8_t          _receivedAckSeq = 0;

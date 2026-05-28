@@ -25,7 +25,7 @@ sleep 20
 # Drain boot spew so capture starts from a clean serial window.
 python3 - <<'PY'
 import os, time
-for port in ("/dev/cu.usbmodem1201", "/dev/cu.usbmodem1101"):
+for port in ("/dev/cu.usbmodem1201", "/dev/cu.usbmodem11101"):
     try:
         fd = os.open(port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
         end = time.time() + 2.0
@@ -74,7 +74,7 @@ def wait_state3(port, label, timeout_s=90):
     print(f"{label}: {'Connected' if ok else 'timeout waiting for State 3'}")
     return ok
 
-rx_ok = wait_state3("/dev/cu.usbmodem1101", "RX")
+rx_ok = wait_state3("/dev/cu.usbmodem11101", "RX")
 wait_state3("/dev/cu.usbmodem1201", "TX")
 if not rx_ok:
     print("WARNING: continuing capture without confirmed RX connect", file=sys.stderr)
@@ -109,7 +109,7 @@ tx = os.path.join(outdir, "tx.log")
 rx = os.path.join(outdir, "rx.log")
 threads = [
     threading.Thread(target=capture, args=(tx, "/dev/cu.usbmodem1201", 180)),
-    threading.Thread(target=capture, args=(rx, "/dev/cu.usbmodem1101", 180)),
+    threading.Thread(target=capture, args=(rx, "/dev/cu.usbmodem11101", 180)),
 ]
 for t in threads:
     t.start()

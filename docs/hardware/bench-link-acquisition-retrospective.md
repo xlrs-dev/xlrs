@@ -307,7 +307,7 @@ cmake --build build --target xlrs_tx xlrs_rx
 picotool load -x -f --ser E4654C16430F4223 build/xlrs_tx.elf
 picotool load -x -f --ser E4654C16432C3B22 build/xlrs_rx.elf
 
-TX_PORT=/dev/cu.usbmodem1201 RX_PORT=/dev/cu.usbmodem1101 scripts/monitor.sh both
+TX_PORT=/dev/cu.usbmodem1201 RX_PORT=/dev/cu.usbmodem11101 scripts/monitor.sh both
 ```
 
 Allow 5–10 s after boot for acquisition. Expect RX **State: 3**, **out:1** within ~30 s
@@ -398,15 +398,26 @@ Re-lock D250 after any F1000 attempt (script clears `-UXLRS_BENCH_RATE` by defau
 **Lock capture (May 2026):** `tools/bench-capture-lock/` — RX **350→348 State 3**,
 TX **State 3** entire run, both sides **≥70% LQ** on D250 (`tmr:4000/4000`).
 
-### Pass 11 — TX failsafe aligned with async LQdown (May 2026)
+### Pass 12 — Failsafe→Connected bounce (May 2026)
 
-**Problem:** Production TX entered **State 4** while **LQdown** still showed a healthy
-downlink — same async skew as RX Pass 10: `service()` counted missed telemetry slots
-before `onRxDone` attributed decodes.
+**Problem:** After Pass 10/11, RX could briefly reach **State 3** then immediately return
+to **State 4** even when RC decodes resumed. `_consecutiveMissedUplinks` (and TX
+`_consecutiveMissedTelemetry`) stayed at the failsafe threshold through the Failsafe state
+because HW LQ slot close still incremented misses while `state == Failsafe`. On
+Failsafe→Connected, grace slots reset but miss counters did not, so the next
+`service()` tick re-entered Failsafe.
 
-**Fixes:** Mirror RX Pass 10 on the TX telemetry path — count misses when the HW
-`lqDown` slot closes, `FAILSAFE_LQ_HOLDOFF` on `lqDown`, re-run `service(tlmTick)` after
-telemetry decode.
+**Fixes:**
+
+| Fix | File |
+| --- | --- |
+| Count HW uplink/telemetry misses only while `state == Connected` | `Link.cpp` |
+| Reset miss counters on Connected entry (Failsafe/Connecting→Connected) | `Link.cpp` |
+| Test: `test_link_rx_recovers_from_failsafe_without_bounce` | `link_tests.cpp` |
+
+**Hardware note (May 2026):** Marginal RSSI (~−92 to −97 dBm) can still prevent sustained
+**out:1** even with the bounce fix — verify antennas and ~1 m separation before judging
+LQ regressions. Capture dir: `tools/bench-capture-failsafe-bounce/`.
 
 ---
 

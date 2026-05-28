@@ -128,6 +128,9 @@ void RfScheduler::onTick(uint32_t tick) {
         if (_link->takeRxTimingResetPending()) {
             _pfd.begin(_rate.intervalUs);
             _lastPfdAdjUs = 0;
+            if (_timer) {
+                _timer->setIntervalUs(_rate.intervalUs);
+            }
         }
         // Hold nominal cadence only before FHSS lock. While Connecting/Failsafe with lock,
         // PFD and Sync phase-resync own the timer interval — resetting here was undoing
@@ -265,6 +268,10 @@ void RfScheduler::applyLockedRxPhaseResync(uint32_t packetStartUs) {
     if (!_timer || !_link || _link->role() != Role::Rx || !_link->isLocked()) {
         return;
     }
+    // Sync beacons use takeSyncResyncTick() for a hard phase snap; PFD nudges RC/uplink only.
+    if (_link->slotForTick(_armedTick) == Slot::Sync) {
+        return;
+    }
     // TX airtime begins TX_GUARD after the ISR-latched slot boundary; both peers schedule from
     // tickStartUs so PFD expects arrival at that offset, not at the raw boundary.
     const int32_t offsetUs =
@@ -272,8 +279,12 @@ void RfScheduler::applyLockedRxPhaseResync(uint32_t packetStartUs) {
     const int32_t adjUs = _pfd.update(offsetUs);
     _lastPfdAdjUs = adjUs;
     _pfdUpdateCount++;
-    // Track phase only — timer resync is reserved for Sync beacons (hard snap).
-    _timer->setIntervalUs(_rate.intervalUs);
+    // Frequency: slow period trim (matches sim setIntervalUs path; Pfd clamps adj to interval/16).
+    _timer->setIntervalUs((uint32_t)((int32_t)_rate.intervalUs + adjUs));
+    // Phase: proportional nudge of the next tick boundary (ELRS phaseShift analogue).
+    const int32_t phaseAdj = _pfd.phaseError() / 4;
+    const int32_t nextUs = (int32_t)(_armedTickStartUs + _rate.intervalUs) - phaseAdj;
+    _timer->resyncNextTickUs((uint32_t)nextUs);
 #else
     (void)packetStartUs;
 #endif
@@ -305,12 +316,9 @@ void RfScheduler::onRxDone() {
         uint32_t packetStartUs = pkt.timestampUs - airtime;
         const bool success = _link->processRxPayload(_armedTick, _armedPos, pkt.data, pkt.len, pkt.rssiDbm, pkt.snr,
                                                      packetStartUs);
-        if (success) {
-            const bool isSyncSlot =
-                _link->slotForTick(_armedTick) == Slot::Sync;
-            if (_link->role() == Role::Rx && _link->isLocked() && !isSyncSlot) {
-                applyLockedRxPhaseResync(packetStartUs);
-            }
+        if (_link->role() == Role::Rx && _link->isLocked() &&
+            _link->decodedValidUplinkThisRx()) {
+            applyLockedRxPhaseResync(packetStartUs);
         }
         if (tlmListen) {
             if (success) {
@@ -382,7 +390,7 @@ void RfScheduler::onRxDone() {
             // Sim: flags are consumed by SimEnvironment::simTick() after onTick returns.
 #if !defined(XLRS_PICO_SDK)
             if (_link->role() == Role::Rx && _link->isLocked() &&
-                _link->slotForTick(_armedTick) != Slot::Sync) {
+                _link->decodedValidUplinkThisRx()) {
                 int32_t offsetUs = (int32_t)(pkt.timestampUs - airtime) - (int32_t)_armedTickStartUs;
                 int32_t adjUs = _pfd.update(offsetUs);
                 _lastPfdAdjUs = adjUs;
@@ -531,6 +539,13 @@ void RfScheduler::poll() {
         } else {
             for (uint32_t i = 0; i < diff; ++i) {
                 uint32_t nextTick = _tick + 1;
+#if defined(XLRS_PICO_SDK)
+                // TOCK for _tick: drain late DIO and close its LQ slot before TICK opens nextTick.
+                drainPendingRxDone();
+                if (_link && _link->role() == Role::Rx && _link->isLocked()) {
+                    _link->closeHwUplinkLqSlotAtTock(_tick);
+                }
+#endif
                 onTick(nextTick);
                 if (_link) {
 #if defined(XLRS_PICO_SDK)
@@ -539,7 +554,6 @@ void RfScheduler::poll() {
                     _link->service(nextTick);
 #endif
                 }
-                // Late DIO: count uplink decode before the next tick's service().
                 drainPendingRxDone();
             }
         }

@@ -95,6 +95,41 @@ static void test_scheduler_pfd_skipped_until_connected() {
     TEST_ASSERT_TRUE(sawConnected);
 }
 
+static void test_scheduler_pfd_skipped_on_sync_only() {
+    uint8_t uid[LINK_UID_SIZE];
+    linkUidFromPhrase("Kikobot-02", uid);
+
+    SimEnvironment env;
+    env.setup(uid, 2);
+
+    uint16_t ch[4] = {512, 512, 512, 512};
+    env.tx.setChannels(ch, 4);
+
+    for (uint32_t t = 1; t <= 40; ++t) simTick(env, t);
+    TEST_ASSERT_TRUE(env.rx.state() == LinkState::Connected);
+    TEST_ASSERT_TRUE(env.rx.isLocked());
+
+    const uint32_t syncPeriod = env.tx.syncEveryNTicks();
+    const uint32_t syncTick = ((40u / syncPeriod) + 1u) * syncPeriod;
+    uint32_t uplinkTick = 0;
+    for (uint32_t t = syncTick + 1; t <= syncTick + syncPeriod; ++t) {
+        if (env.tx.slotForTick(t) == Slot::Uplink) {
+            uplinkTick = t;
+            break;
+        }
+    }
+    TEST_ASSERT_EQUAL(Slot::Sync, env.tx.slotForTick(syncTick));
+    TEST_ASSERT_NOT_EQUAL(0, uplinkTick);
+
+    const uint32_t pfdBeforeSync = env.rxSched.pfdUpdateCount();
+    simTick(env, syncTick);
+    TEST_ASSERT_EQUAL_UINT32(pfdBeforeSync, env.rxSched.pfdUpdateCount());
+
+    const uint32_t pfdBeforeUplink = env.rxSched.pfdUpdateCount();
+    simTick(env, uplinkTick);
+    TEST_ASSERT_TRUE(env.rxSched.pfdUpdateCount() > pfdBeforeUplink);
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -104,5 +139,6 @@ int main() {
     RUN_TEST(test_pfd_nulls_drift);
     RUN_TEST(test_scheduler_timing_pfd_lock);
     RUN_TEST(test_scheduler_pfd_skipped_until_connected);
+    RUN_TEST(test_scheduler_pfd_skipped_on_sync_only);
     return UNITY_END();
 }

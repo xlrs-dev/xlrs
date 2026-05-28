@@ -53,6 +53,15 @@ public:
         _pos = _count = _filled = 0;
     }
 
+    void resetWarm() {
+        for (uint8_t i = 0; i < Window; ++i) {
+            _hist[i] = true;
+        }
+        _pos = 0;
+        _count = Window;
+        _filled = Window;
+    }
+
     // Call once per expected slot; `received` = a valid packet arrived in that slot.
     void update(bool received) {
         if (_hist[_pos] && !received) {

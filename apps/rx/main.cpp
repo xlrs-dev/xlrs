@@ -83,7 +83,7 @@ xlrs::hal::SerialPort g_crsfUart(uart1, CRSF_TX_PIN, CRSF_RX_PIN);
 CrsfSerial crsf(g_crsfUart, CRSF_BAUDRATE);
 
 static uint32_t lastLinkStats = 0;
-static constexpr uint32_t LINK_STATS_INTERVAL_MS = 500;
+static constexpr uint32_t LINK_STATS_INTERVAL_MS = 1000;
 static uint16_t localChannels[RC_CHANNELS] = {
     RC_US_MID, RC_US_MID, RC_US_MID, RC_THROTTLE_FAILSAFE,
     RC_US_MID, RC_US_MID, RC_US_MID, RC_US_MID};

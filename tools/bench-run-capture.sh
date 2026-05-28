@@ -18,8 +18,9 @@ fi
 bash scripts/test.sh 2>&1 | tail -3
 cmake -S "$REPO" -B "$REPO/build" -G Ninja "${CMAKE_BENCH_ARGS[@]}" 2>&1 | tail -3
 cmake --build build --target xlrs_tx xlrs_rx 2>&1 | tail -3
-picotool load -x -f --ser E4654C16430F4223 "$REPO/build/xlrs_tx.elf"
-picotool load -x -f --ser E4654C16432C3B22 "$REPO/build/xlrs_rx.elf"
+picotool load -x -f --ser E4654C16432C3B22 "$REPO/build/xlrs_tx.elf"
+sleep 25
+picotool load -x -f --ser E4654C16430F4223 "$REPO/build/xlrs_rx.elf"
 sleep 20
 
 # Drain boot spew so capture starts from a clean serial window.

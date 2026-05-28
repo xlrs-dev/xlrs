@@ -641,7 +641,15 @@ void Link::advanceHwUplinkLqSlot(uint32_t tick) {
     if (slotKind(et, _rxPos) != SlotKind::Uplink) {
         return;
     }
-    // TICK: open the slot; TOCK close runs after pending RX is drained (poll()).
+    if (_hwUplinkLqTick != UINT32_MAX && !_hwUplinkLqClosed && tick > _hwUplinkLqTick) {
+        // Defer closing by one tick so poll() can process onRxDone for the pending slot first.
+        if (tick > _hwUplinkLqTick + 1 || _hwUplinkDecodeTick == _hwUplinkLqTick) {
+            const bool received =
+                (_hwUplinkDecodeTick == _hwUplinkLqTick && _hwUplinkDecodeOk);
+            finalizeHwUplinkLqSlot(_hwUplinkLqTick, received);
+        }
+    }
+    // TICK: open the slot; close runs on the next uplink advance after late DIO drain.
     _hwUplinkLqTick = tick;
     _hwUplinkLqClosed = false;
 }

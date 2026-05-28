@@ -279,12 +279,9 @@ void RfScheduler::applyLockedRxPhaseResync(uint32_t packetStartUs) {
     const int32_t adjUs = _pfd.update(offsetUs);
     _lastPfdAdjUs = adjUs;
     _pfdUpdateCount++;
-    // Frequency: slow period trim (matches sim setIntervalUs path; Pfd clamps adj to interval/16).
-    _timer->setIntervalUs((uint32_t)((int32_t)_rate.intervalUs + adjUs));
-    // Phase: proportional nudge of the next tick boundary (ELRS phaseShift analogue).
-    const int32_t phaseAdj = _pfd.phaseError() / 4;
-    const int32_t nextUs = (int32_t)(_armedTickStartUs + _rate.intervalUs) - phaseAdj;
-    _timer->resyncNextTickUs((uint32_t)nextUs);
+    // Nominal cadence on air — pass4 bench held tmr at intervalUs/intervalUs; interval+phase
+    // trim here drifted RX (tmr:4160/4000) and collapsed uplink LQ during long captures.
+    _timer->setIntervalUs(_rate.intervalUs);
 #else
     (void)packetStartUs;
 #endif
@@ -539,13 +536,6 @@ void RfScheduler::poll() {
         } else {
             for (uint32_t i = 0; i < diff; ++i) {
                 uint32_t nextTick = _tick + 1;
-#if defined(XLRS_PICO_SDK)
-                // TOCK for _tick: drain late DIO and close its LQ slot before TICK opens nextTick.
-                drainPendingRxDone();
-                if (_link && _link->role() == Role::Rx && _link->isLocked()) {
-                    _link->closeHwUplinkLqSlotAtTock(_tick);
-                }
-#endif
                 onTick(nextTick);
                 if (_link) {
 #if defined(XLRS_PICO_SDK)
@@ -554,6 +544,7 @@ void RfScheduler::poll() {
                     _link->service(nextTick);
 #endif
                 }
+                // Late DIO: count uplink decode before the next tick's service().
                 drainPendingRxDone();
             }
         }

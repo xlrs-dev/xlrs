@@ -10,7 +10,7 @@ struct LinkRuntimeDiag {
     uint32_t schedulerTick;
     uint16_t fhssIndex;
     uint16_t fhssExpected;
-    int8_t   syncFhssSkew;   // RX: SyncPayload fhssIndex minus txPos(txTick) at last Sync
+    int8_t   syncFhssSkew;   // RX: fhssIndex in last Sync beacon minus txPos(txTick)
     bool     fhssLocked;
     bool     syncSeen;
     int32_t  pfdPhaseUs;

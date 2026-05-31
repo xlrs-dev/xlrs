@@ -2,8 +2,8 @@
 // Host-safe core: runs in the native sim against MockPhy and on hardware against
 // Sx1280NativePhy. The cipher (M8) layers on top.
 //
-// Slotting (both ends agree per tick): pos = (tick/hop) % seqLen (ELRS FHSS sequence index).
-//   fhss.onSyncChannel(pos)        → Sync slot      (TX→RX beacon, on the sync channel)
+// Slotting (both ends agree per tick): pos = (tick/hop) % seqLen.
+//   pos == 0                       → Sync slot      (TX→RX beacon, on the acquisition channel)
 //   else tick % tlmRatioDenom == 0 → Telemetry slot (RX→TX downlink)
 //   else                           → Uplink slot    (TX→RC→RX)
 // Each slot has exactly one sender and one receiver, both computed identically once locked —
@@ -12,7 +12,6 @@
 // receiver is listening before the sender transmits, regardless of slot direction.
 #include "link/Link.h"
 #include "link/Uid.h"
-#include "fhss/fhss_domain.h"
 #include "ota/OtaCodec.h"
 #include "ota/OtaFrameShrink.h"
 #include <cstring>
@@ -40,7 +39,7 @@ static uint8_t uidCrc8(const uint8_t uid[8]) {
 void Link::configureIdentity(const uint8_t uid[LINK_UID_SIZE]) {
     _syncWord = syncWordFromUid(uid);
     _uidCrc = uidCrc8(uid);
-    _fhss.generate(elrsFhssSeedFromUid(uid));
+    _fhss.generate(fhssSeedFromUid(uid), kNumFhssChannels2g4, kNumFhssChannels2g4);
     ++_identityRevision;
 }
 
@@ -215,7 +214,7 @@ void Link::requestRate(uint8_t rateIndex) {
     }
     _nextRateIndex = rateIndex;
     // Schedule by FHSS sequence cycle, not raw local tick. The TX announces a
-    // countdown in Sync, and the RX decrements it on its own synchronized sync-channel
+    // countdown in Sync, and the RX decrements it on its own synchronized pos-0
     // boundaries, so independent boot-time tick offsets do not mistime the switch.
     const uint16_t seqPeriod = hopInterval() * _fhss.count();
     _rateSwitchCycle = (_tick / seqPeriod) + 3;
@@ -224,14 +223,14 @@ void Link::requestRate(uint8_t rateIndex) {
 uint16_t Link::hopInterval() const { return _rate.fhssHopInterval ? _rate.fhssHopInterval : 1; }
 
 Link::SlotKind Link::slotKind(uint32_t tick, uint16_t pos) const {
-    if (_fhss.onSyncChannel(pos)) return SlotKind::Sync;
+    if (pos == 0) return SlotKind::Sync;
     const uint8_t tlm = _rate.tlmRatioDenom;
     if (tlm && (tick % tlm) == 0) return SlotKind::Telemetry;
     return SlotKind::Uplink;
 }
 
 float Link::freqForPos(uint16_t pos) const {
-    return fhssFreqMHzForChannelIndex(_fhss.at(pos % _fhss.count()));
+    return fhssFreqForIndex(_fhss.at((uint8_t)(pos % _fhss.count())), _region);
 }
 
 uint32_t Link::txTickForNonce(uint32_t rxPacketStartUs) const {
@@ -243,7 +242,7 @@ void Link::onTick(uint32_t tick) {
     _tick = tick;
 
     const uint16_t hop = hopInterval();
-    const uint16_t seqLen = _fhss.count();
+    const uint8_t seqLen = _fhss.count();
     const bool atHopBoundary = (tick % hop) == 0;
     const uint32_t et = effectiveTxTick(tick);
 
@@ -252,8 +251,7 @@ void Link::onTick(uint32_t tick) {
     }
 
     const bool atSequenceBoundary = atHopBoundary &&
-        ((_role == Role::Tx) ? _fhss.onSyncChannel(txPos(tick))
-                             : (_locked && _fhss.onSyncChannel(txPos(et))));
+        ((_role == Role::Tx) ? (txPos(tick) == 0) : (_locked && txPos(et) == 0));
 
     if (_role == Role::Tx) {
         const uint16_t seqPeriod = hop * seqLen;
@@ -279,20 +277,20 @@ void Link::onTick(uint32_t tick) {
 }
 
 float Link::freqForTick(uint32_t tick) const {
-    // Bind acquisition uses the ELRS sync channel. An unbound RX has no phase reference, so
+    // Bind acquisition uses a fixed shared rf_channel. An unbound RX has no phase reference, so
     // letting bind TX hop would make discovery depend on lucky scheduler phase alignment.
-    if (_bindTransmitActive || _bindScanActive) return fhssInitialSyncFreqMHz();
+    if (_bindTransmitActive || _bindScanActive) return freqForPos(0);
     if (_role == Role::Tx) {
         return freqForPos(txPos(tick));
     }
-    if (!_locked) return fhssInitialSyncFreqMHz();
+    if (!_locked) return freqForPos(0);
     return freqForPos(txPos(effectiveTxTick(tick)));
 }
 
 Slot Link::slotForTick(uint32_t tick) const {
     const uint32_t et = effectiveTxTick(tick);
     const uint16_t pos = (_role == Role::Tx || _locked) ? txPos(et) : _rxPos;
-    if (_fhss.onSyncChannel(pos)) return Slot::Sync;
+    if (pos == 0) return Slot::Sync;
     if (_rate.tlmRatioDenom && (et % _rate.tlmRatioDenom) == 0) return Slot::Telemetry;
     return Slot::Uplink;
 }
@@ -831,7 +829,7 @@ bool Link::sustainedUplinkLoss() const {
 
 void Link::service(uint32_t tick, bool recordLq) {
     const uint16_t hop    = hopInterval();
-    const uint16_t seqLen = _fhss.count();
+    const uint8_t  seqLen = _fhss.count();
     const uint32_t et    = effectiveTxTick(tick);
 
     if (_role == Role::Tx) {
@@ -998,7 +996,7 @@ void Link::service(uint32_t tick, bool recordLq) {
     }
 
     // TX power-cycle reboots at tick 0 while RX stays on a stale hop-locked phase — unlock
-    // to the sync channel so the next Sync beacon can re-establish the link.
+    // to the acquisition channel so the next Sync beacon can re-establish the link.
     if (_role == Role::Rx && _state == LinkState::Failsafe && _locked &&
         _failsafeEnteredTick != 0 && !hasFreshRc() &&
         (tick - _failsafeEnteredTick) >= FAILSAFE_REACQUIRE_TICKS) {
@@ -1006,7 +1004,7 @@ void Link::service(uint32_t tick, bool recordLq) {
         _rxTimingResetPending = true;
     }
 
-    // After sustained Failsafe without fresh RC, unlock to sync channel for re-sync.
+    // After sustained Failsafe without fresh RC, unlock to acquisition channel for re-sync.
 
     if (_state == LinkState::Connected && prevState == LinkState::Failsafe &&
         _role == Role::Rx) {

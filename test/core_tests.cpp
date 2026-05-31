@@ -40,13 +40,13 @@ static void test_uid_drives_shared_fhss() {
     linkUidFromPhrase("OtherCraft", other);
 
     Fhss tx, rx, o;
-    tx.generate(fhssSeedFromUid(txU));
-    rx.generate(fhssSeedFromUid(rxU));
-    o.generate(fhssSeedFromUid(other));
+    tx.generate(fhssSeedFromUid(txU), 20, 40);
+    rx.generate(fhssSeedFromUid(rxU), 20, 40);
+    o.generate(fhssSeedFromUid(other), 20, 40);
 
-    for (uint16_t i = 0; i < tx.count(); ++i) TEST_ASSERT_EQUAL_UINT8(tx.at(i), rx.at(i));
+    for (int i = 0; i < 40; ++i) TEST_ASSERT_EQUAL_UINT8(tx.at(i), rx.at(i));
     bool differs = false;
-    for (uint16_t i = 0; i < tx.count(); ++i) {
+    for (int i = 0; i < 40; ++i) {
         if (o.at(i) != tx.at(i)) { differs = true; break; }
     }
     TEST_ASSERT_TRUE(differs);
@@ -93,19 +93,37 @@ static void test_channel_pack_roundtrip() {
     TEST_ASSERT_EQUAL_UINT8(11, packedSize(8));
 }
 
-static void test_fhss_deterministic() {
+static void test_fhss_deterministic_and_balanced() {
     Fhss a, b;
-    a.generate(0x1234u);
-    b.generate(0x1234u);
-    for (uint16_t i = 0; i < a.count(); ++i) TEST_ASSERT_EQUAL_UINT8(a.at(i), b.at(i));
+    a.generate(0x1234, 8, 40);
+    b.generate(0x1234, 8, 40);
+    for (int i = 0; i < 40; ++i) TEST_ASSERT_EQUAL_UINT8(a.at(i), b.at(i));
+
+    int counts[8] = {0};
+    for (int i = 0; i < 40; ++i) {
+        TEST_ASSERT_TRUE(a.at(i) < 8);
+        counts[a.at(i)]++;
+    }
+    for (int i = 0; i < 8; ++i) TEST_ASSERT_EQUAL_INT(5, counts[i]);
 
     Fhss c;
-    c.generate(0x9999u);
+    c.generate(0x9999, 8, 40);
     bool differs = false;
-    for (uint16_t i = 0; i < a.count(); ++i) {
+    for (int i = 0; i < 40; ++i) {
         if (c.at(i) != a.at(i)) { differs = true; break; }
     }
     TEST_ASSERT_TRUE(differs);
+}
+
+static void test_fhss_80_channel_balance() {
+    Fhss a;
+    a.generate(0xABCD, 80, 80);
+    int counts[80] = {0};
+    for (int i = 0; i < 80; ++i) {
+        TEST_ASSERT_TRUE(a.at(i) < 80);
+        counts[a.at(i)]++;
+    }
+    for (int i = 0; i < 80; ++i) TEST_ASSERT_EQUAL_INT(1, counts[i]);
 }
 
 static void test_ota_8_byte_packing() {
@@ -172,7 +190,8 @@ void tearDown() {}
 int main() {
     UNITY_BEGIN();
     RUN_TEST(test_channel_pack_roundtrip);
-    RUN_TEST(test_fhss_deterministic);
+    RUN_TEST(test_fhss_deterministic_and_balanced);
+    RUN_TEST(test_fhss_80_channel_balance);
     RUN_TEST(test_ota_8_byte_packing);
     RUN_TEST(test_lq_tracker);
     RUN_TEST(test_spsc_ring);

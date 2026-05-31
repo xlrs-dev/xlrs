@@ -108,7 +108,7 @@ public:
     static constexpr uint32_t SUSTAINED_UPLINK_LOSS_TICKS = 100;
     static constexpr uint32_t RECENT_DOWNLINK_TICKS = 32;
 #endif
-    // Hop-locked Failsafe with a rebooted TX cannot decode; unlock to sync channel.
+    // Hop-locked Failsafe with a rebooted TX cannot decode; unlock to acquisition channel.
     static constexpr uint32_t FAILSAFE_REACQUIRE_TICKS = 750; // ~3 s at D250 (4 ms tick)
 
     void begin(Role role, const uint8_t uid[8], uint8_t rateIndex, int8_t maxPowerDbm = 10, bool useDynamicPower = true);

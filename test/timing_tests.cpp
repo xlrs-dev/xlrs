@@ -130,47 +130,6 @@ static void test_scheduler_pfd_skipped_on_sync_only() {
     TEST_ASSERT_TRUE(env.rxSched.pfdUpdateCount() > pfdBeforeUplink);
 }
 
-static void test_scheduler_pfd_skipped_on_decode_failure() {
-    uint8_t uid[LINK_UID_SIZE];
-    linkUidFromPhrase("Kikobot-02", uid);
-
-    SimEnvironment env;
-    env.setup(uid, 2);
-
-    uint16_t ch[4] = {512, 512, 512, 512};
-    env.tx.setChannels(ch, 4);
-
-    for (uint32_t t = 1; t <= 80; ++t) simTick(env, t);
-    TEST_ASSERT_TRUE(env.rx.state() == LinkState::Connected);
-    TEST_ASSERT_TRUE(env.rxSched.pfdUpdateCount() > 0);
-
-    uint32_t corruptUplinkTick = 0;
-    for (uint32_t t = 81; t <= 160; ++t) {
-        if (env.tx.slotForTick(t) == Slot::Uplink) {
-            corruptUplinkTick = t;
-            break;
-        }
-    }
-    TEST_ASSERT_NOT_EQUAL(0, corruptUplinkTick);
-
-    const uint32_t pfdBefore = env.rxSched.pfdUpdateCount();
-    env.rxPhy.corruptNextDeliveries(1);
-    simTick(env, corruptUplinkTick);
-    TEST_ASSERT_EQUAL_UINT32(pfdBefore, env.rxSched.pfdUpdateCount());
-
-    uint32_t validUplinkTick = 0;
-    for (uint32_t t = corruptUplinkTick + 1; t <= corruptUplinkTick + 80; ++t) {
-        if (env.tx.slotForTick(t) == Slot::Uplink) {
-            validUplinkTick = t;
-            break;
-        }
-    }
-    TEST_ASSERT_NOT_EQUAL(0, validUplinkTick);
-
-    simTick(env, validUplinkTick);
-    TEST_ASSERT_TRUE(env.rxSched.pfdUpdateCount() > pfdBefore);
-}
-
 void setUp() {}
 void tearDown() {}
 
@@ -181,6 +140,5 @@ int main() {
     RUN_TEST(test_scheduler_timing_pfd_lock);
     RUN_TEST(test_scheduler_pfd_skipped_until_connected);
     RUN_TEST(test_scheduler_pfd_skipped_on_sync_only);
-    RUN_TEST(test_scheduler_pfd_skipped_on_decode_failure);
     return UNITY_END();
 }

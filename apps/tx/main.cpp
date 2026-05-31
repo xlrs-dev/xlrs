@@ -11,6 +11,7 @@
 
 #include "UARTProtocol.h"
 #include "app/AppTelemetry.h"
+#include "app/CrsfChannels.h"
 #include "app/CrsfLinkStats.h"
 #include "app/LinkStatusLed.h"
 #include "app/LinkRuntimeDiag.h"
@@ -411,7 +412,9 @@ void onCrsfParameterWrite(uint8_t parameterNumber, const uint8_t* value, uint8_t
 void onCrsfChannelsReceived() {
     AppToRfData payload;
     for (int i = 0; i < 8; i++) {
-        payload.channels[i] = (uint16_t)controllerCrsf.getChannel((unsigned int)i + 1);
+        // Link stores CRSF 11-bit channel units; RX converts back to RC µs on output.
+        payload.channels[i] =
+            xlrs::rcUsToCrsfChannel((uint16_t)controllerCrsf.getChannel((unsigned int)i + 1));
     }
     g_appToRf.store(payload);
     g_crsfDebug.rcFrames++;
@@ -422,7 +425,7 @@ void onChannelsReceived(const ChannelData* data) {
     if (!data) return;
     AppToRfData payload;
     for (int i = 0; i < 8; i++) {
-        payload.channels[i] = data->channels[i];
+        payload.channels[i] = xlrs::rcUsToCrsfChannel(data->channels[i]);
     }
     g_appToRf.store(payload);
 }

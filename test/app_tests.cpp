@@ -36,6 +36,14 @@ static void test_crsf_channel_mapping() {
     TEST_ASSERT_EQUAL_UINT16(CRSF_CHANNEL_VALUE_2000, rcUsToCrsfChannel(2000));
 }
 
+static void test_rc_us_link_channel_round_trip() {
+    const uint16_t input[] = {1000, 1200, 1500, 1800, 2000, 1000, 1500, 2000};
+    for (uint8_t i = 0; i < sizeof(input) / sizeof(input[0]); ++i) {
+        const uint16_t linkVal = rcUsToCrsfChannel(input[i]);
+        TEST_ASSERT_EQUAL_UINT16(input[i], crsfChannelToRcUs(linkVal));
+    }
+}
+
 static void test_crsf_packed_channels_to_rc_channels() {
     uint16_t input[CRSF_NUM_CHANNELS] = {};
     crsf_channels_t crsfChannels{};
@@ -104,6 +112,7 @@ int main() {
     UNITY_BEGIN();
     RUN_TEST(test_crsf_link_statistics);
     RUN_TEST(test_crsf_channel_mapping);
+    RUN_TEST(test_rc_us_link_channel_round_trip);
     RUN_TEST(test_crsf_packed_channels_to_rc_channels);
     RUN_TEST(test_crsf_frame_address_validation);
     RUN_TEST(test_app_telemetry_messages);

@@ -24,7 +24,7 @@ static void test_scheduler_phy_recovery() {
     TEST_ASSERT_EQUAL_UINT16(0, env.rx.stats().phyRecoveryFailures);
 }
 
-static void test_scheduler_poll_drains_ticks() {
+static void test_scheduler_poll_skips_stale_ticks() {
     uint8_t uid[LINK_UID_SIZE];
     linkUidFromPhrase("Kikobot-02", uid);
     MockPhy phy;
@@ -42,12 +42,13 @@ static void test_scheduler_poll_drains_ticks() {
 
     sched.poll();
     TEST_ASSERT_EQUAL_UINT32(5, sched.processedTick());
+    TEST_ASSERT_EQUAL_UINT16(4, link.stats().missedDeadlines);
 
     sched.poll();
     TEST_ASSERT_EQUAL_UINT32(5, sched.processedTick());
 }
 
-static void test_scheduler_poll_caps_backlog() {
+static void test_scheduler_poll_records_large_backlog() {
     uint8_t uid[LINK_UID_SIZE];
     linkUidFromPhrase("Kikobot-02", uid);
     MockPhy phy;
@@ -59,19 +60,19 @@ static void test_scheduler_poll_caps_backlog() {
     RfScheduler sched;
     sched.begin(&phy, &link, 2);
 
-    const uint32_t backlog = RfScheduler::MAX_TX_TICK_CATCHUP + 20;
+    const uint32_t backlog = 84;
     for (uint32_t i = 0; i < backlog; ++i) fireSimTimerTick();
     TEST_ASSERT_EQUAL_UINT32(backlog, sched.tickEvents());
 
     sched.poll();
     TEST_ASSERT_EQUAL_UINT32(backlog, sched.processedTick());
-    TEST_ASSERT_TRUE(link.stats().missedDeadlines >= backlog);
+    TEST_ASSERT_TRUE(link.stats().missedDeadlines >= backlog - 1);
 
     sched.poll();
     TEST_ASSERT_EQUAL_UINT32(backlog, sched.processedTick());
 }
 
-static void test_scheduler_rx_overrun_demotes_to_acquisition() {
+static void test_scheduler_rx_backlog_preserves_locked_phase() {
     uint8_t uid[LINK_UID_SIZE];
     linkUidFromPhrase("Kikobot-02", uid);
     SimEnvironment env;
@@ -82,14 +83,14 @@ static void test_scheduler_rx_overrun_demotes_to_acquisition() {
     TEST_ASSERT_TRUE(env.rx.isLocked());
     TEST_ASSERT_TRUE(env.rx.outputActive());
 
-    const uint32_t backlog = RfScheduler::MAX_TICK_CATCHUP + 20;
+    const uint32_t backlog = 36;
     for (uint32_t i = 0; i < backlog; ++i) fireSimTimerTick();
     env.rxSched.poll();
 
     TEST_ASSERT_EQUAL_UINT32(300u + backlog, env.rxSched.processedTick());
     TEST_ASSERT_TRUE(env.rx.state() == LinkState::Connected);
     TEST_ASSERT_TRUE(env.rx.isLocked());
-    TEST_ASSERT_TRUE(env.rx.stats().missedDeadlines >= backlog);
+    TEST_ASSERT_TRUE(env.rx.stats().missedDeadlines >= backlog - 1);
     TEST_ASSERT_EQUAL_UINT8(env.rx.txPos(env.rx.effectiveTxTick(env.rxSched.processedTick())),
                             env.rx.stats().fhssIndex);
 
@@ -177,9 +178,9 @@ void tearDown() {}
 int main() {
     UNITY_BEGIN();
     RUN_TEST(test_scheduler_phy_recovery);
-    RUN_TEST(test_scheduler_poll_drains_ticks);
-    RUN_TEST(test_scheduler_poll_caps_backlog);
-    RUN_TEST(test_scheduler_rx_overrun_demotes_to_acquisition);
+    RUN_TEST(test_scheduler_poll_skips_stale_ticks);
+    RUN_TEST(test_scheduler_poll_records_large_backlog);
+    RUN_TEST(test_scheduler_rx_backlog_preserves_locked_phase);
     RUN_TEST(test_scheduler_phy_recovery_failure);
     RUN_TEST(test_scheduler_phy_recovery_backoff);
     RUN_TEST(test_scheduler_skips_ticks_while_phy_unhealthy);

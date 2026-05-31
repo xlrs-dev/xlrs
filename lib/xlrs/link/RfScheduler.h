@@ -35,14 +35,9 @@ class RfScheduler {
 public:
     static const uint32_t TX_GUARD_US = 150;
 
-    // If poll() ever finds more than this many timer ticks waiting (core 1 stalled — e.g. a
-    // long flash write), it stops replaying the backlog slot-by-slot (each replay drives
-    // blocking SPI + a TX_GUARD sleep for a now-stale FHSS slot) and fast-forwards to the
-    // latest tick instead. See poll().
-    static const uint32_t MAX_TICK_CATCHUP = 16;
-    // TX replays more backlog slot-by-slot so telemetry listen windows are not skipped
-    // when core 1 stalls briefly (dual USB STATUS on the bench).
-    static const uint32_t MAX_TX_TICK_CATCHUP = 64;
+    // Any poll() backlog means earlier RF slots are already stale. The scheduler advances
+    // through skipped ticks without radio I/O, records missedDeadlines, and services only
+    // the current tick.
     static const uint32_t PHY_RECOVERY_BACKOFF_US = 100000;
 
     RfScheduler();
@@ -88,6 +83,7 @@ private:
     void tryArmTelemetryRx();
     void applyLockedRxPhaseResync(uint32_t packetStartUs);
     void drainPendingRxDone();
+    void skipStaleTicks(uint32_t skippedTicks);
     bool telemetrySlotStillOpen() const;
     bool telemetryListenActive() const;
     int32_t  tlmDownlinkEarliestUs(uint32_t tickStartUs) const;

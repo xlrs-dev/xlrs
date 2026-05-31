@@ -527,6 +527,24 @@ void RfScheduler::drainPendingRxDone() {
     }
 }
 
+void RfScheduler::skipStaleTicks(uint32_t skippedTicks) {
+    if (skippedTicks == 0 || !_link) {
+        return;
+    }
+
+    const uint16_t missed = (skippedTicks > UINT16_MAX) ? UINT16_MAX : (uint16_t)skippedTicks;
+    _link->noteMissedDeadlines(missed);
+    _tick += skippedTicks;
+    _link->onTick(_tick);
+    syncPhyIdentity();
+    _currentSlot = _link->slotForTick(_tick);
+
+    _pendingTlmRx = false;
+    _tlmRxArmAtUs = 0;
+    _tlmListenUntilUs = 0;
+    _tlmDecodeSlotTick = 0;
+}
+
 void RfScheduler::poll() {
     if (!recoverPhyIfNeeded()) {
         return;
@@ -549,57 +567,34 @@ void RfScheduler::poll() {
     uint32_t currentTicks = _tickEvents.load(std::memory_order_acquire);
     if (currentTicks > _lastProcessedTickEvent) {
         uint32_t diff = currentTicks - _lastProcessedTickEvent;
-        const uint32_t catchupLimit =
-            (_link && _link->role() == Role::Tx) ? MAX_TX_TICK_CATCHUP : MAX_TICK_CATCHUP;
-        if (diff > catchupLimit) {
-            // Core 1 fell badly behind (long stall). Replaying every backlogged slot would
-            // burst blocking SPI + TX_GUARD sleeps for stale FHSS positions and keep us behind.
-            if (_link && _link->role() == Role::Rx && _link->isLocked()) {
-                // Stay hop-locked: discard stale RF operations, but advance the scheduler
-                // tick so FHSS/slot phase remains aligned with the timer cadence. Leaving
-                // _tick stale here makes every later RX arm use an old hop position until
-                // failsafe/reacquire.
-                _link->noteMissedDeadlines((uint16_t)diff);
-                const uint32_t targetTick = _tick + diff;
-                _tick = targetTick;
-                _link->onTick(targetTick);
-                syncPhyIdentity();
-                _currentSlot = _link->slotForTick(targetTick);
-            } else {
-                if (_link) _link->noteSchedulerOverrun((uint16_t)diff);
-                const uint32_t targetTick = _tick + diff;
-                onTick(targetTick);
-                if (_link) {
-#if defined(XLRS_PICO_SDK)
-                    _link->service(targetTick, false);
-#else
-                    _link->service(targetTick);
-#endif
-                }
+        const bool rxRole = _link && _link->role() == Role::Rx;
+        const bool txRole = _link && _link->role() == Role::Tx;
+
+        // RF slots are real-time. If the task sees a backlog, stale slots are already
+        // gone on the air; replaying them just arms/transmits old FHSS positions and
+        // makes the scheduler fall further behind. Advance time, count the skipped
+        // slots, and perform RF work only for the current tick.
+        if (diff > 1) {
+            if (rxRole) {
                 drainPendingRxDone();
             }
-        } else {
-            const bool rxRole = _link && _link->role() == Role::Rx;
-            const bool txRole = _link && _link->role() == Role::Tx;
-            for (uint32_t i = 0; i < diff; ++i) {
-                // RX uplink: drain before onTick so late DIO still sees the armed slot.
-                if (rxRole) {
-                    drainPendingRxDone();
-                }
-                uint32_t nextTick = _tick + 1;
-                onTick(nextTick);
-                if (_link) {
+            skipStaleTicks(diff - 1);
+        }
+
+        if (rxRole) {
+            drainPendingRxDone();
+        }
+        uint32_t nextTick = _tick + 1;
+        onTick(nextTick);
+        if (_link) {
 #if defined(XLRS_PICO_SDK)
-                    _link->service(nextTick, false);
+            _link->service(nextTick, false);
 #else
-                    _link->service(nextTick);
+            _link->service(nextTick);
 #endif
-                }
-                // TX telemetry: drain after service so listen completions land before close.
-                if (txRole) {
-                    drainPendingRxDone();
-                }
-            }
+        }
+        // TX telemetry: drain after service so listen completions land before close.
+        if (txRole) {
             drainPendingRxDone();
         }
         _lastProcessedTickEvent = currentTicks;

@@ -1042,17 +1042,6 @@ void Link::noteMissedDeadlines(uint16_t n) {
     _stats.missedDeadlines = (v > UINT16_MAX) ? UINT16_MAX : (uint16_t)v;
 }
 
-void Link::noteSchedulerOverrun(uint16_t n) {
-    noteMissedDeadlines(n);
-    if (_role == Role::Rx) {
-        _state = LinkState::Connecting;
-        _locked = false;
-        _syncSeen = false;
-        _rxPos = 0;
-        _consecutiveMissedUplinks = 0;
-    }
-}
-
 void Link::setChannels(const uint16_t* ch, uint8_t n) {
     if (!ch) return;
     if (n > RC_CHANNELS) n = RC_CHANNELS;

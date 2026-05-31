@@ -30,6 +30,33 @@ static void simTickWithPhaseOffset(SimEnvironment& env, uint32_t txTick, uint32_
     env.rx.service(rxTick);
 }
 
+static void simTickWithLateRxDone(SimEnvironment& env, uint32_t tick, bool txOn = true) {
+    g_txSched = &env.txSched;
+    g_rxSched = &env.rxSched;
+
+    env.txPhy.setOnRxDone(onTxRxDone);
+    env.txPhy.setOnTxDone(onTxTxDone);
+    env.rxPhy.setOnRxDone(nullptr);
+    env.rxPhy.setOnTxDone(onRxTxDone);
+
+    Slot slot = env.tx.slotForTick(tick);
+    if (slot == Slot::Telemetry) {
+        if (txOn) env.txSched.onTick(tick);
+        env.rxSched.onTick(tick);
+    } else {
+        env.rxSched.onTick(tick);
+        if (txOn) env.txSched.onTick(tick);
+    }
+
+    if (txOn) env.tx.service(tick);
+    env.rx.service(tick);
+
+    if (slot == Slot::Sync || slot == Slot::Uplink) {
+        env.rxSched.onRxDone();
+        env.rx.service(tick, false);
+    }
+}
+
 static void test_link_connect_flow_failsafe() {
     uint8_t uid[LINK_UID_SIZE];
     linkUidFromPhrase("Kikobot-02", uid);
@@ -51,6 +78,29 @@ static void test_link_connect_flow_failsafe() {
     TEST_ASSERT_TRUE(env.rx.state() == LinkState::Failsafe);
     TEST_ASSERT_FALSE(env.rx.outputActive());
     TEST_ASSERT_TRUE(env.rx.stats().lqUp < 100);
+}
+
+static void test_link_connects_with_late_hardware_rx_done() {
+    uint8_t uid[LINK_UID_SIZE];
+    linkUidFromPhrase("Kikobot-02", uid);
+    SimEnvironment env;
+    env.setup(uid, 2);
+
+    uint16_t ch[4] = {420, 900, 1500, 1800};
+    env.tx.setChannels(ch, 4);
+
+    for (uint32_t t = 1; t <= 300; ++t) {
+        simTickWithLateRxDone(env, t);
+    }
+
+    TEST_ASSERT_TRUE(env.rx.state() == LinkState::Connected);
+    TEST_ASSERT_TRUE(env.rx.outputActive());
+    TEST_ASSERT_TRUE(env.rx.isLocked());
+    TEST_ASSERT_TRUE(env.rx.syncSeen());
+
+    uint16_t out[4];
+    env.rx.getChannels(out, 4);
+    for (int i = 0; i < 4; ++i) TEST_ASSERT_EQUAL_UINT16(ch[i], out[i]);
 }
 
 static void test_link_mismatched_phrase_no_connect() {
@@ -662,6 +712,7 @@ void tearDown() {}
 int main() {
     UNITY_BEGIN();
     RUN_TEST(test_link_connect_flow_failsafe);
+    RUN_TEST(test_link_connects_with_late_hardware_rx_done);
     RUN_TEST(test_link_mismatched_phrase_no_connect);
     RUN_TEST(test_link_bind_scan_accepts_offered_uid);
     RUN_TEST(test_link_bind_scan_accepts_offered_uid_with_tick_phase_offset);

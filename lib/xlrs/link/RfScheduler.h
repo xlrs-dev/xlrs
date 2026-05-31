@@ -73,6 +73,7 @@ public:
     uint32_t tlmRxPhyOkCount() const { return _tlmRxPhyOkCount; }
     uint32_t tlmRxDecodeOkCount() const { return _tlmRxDecodeOkCount; }
     uint32_t tlmRxDecodeFailCount() const { return _tlmRxDecodeFailCount; }
+    uint32_t skippedTickCount() const { return _skippedTickCount; }
     uint32_t timerIntervalUs() const {
         return _timer ? _timer->intervalUs() : _rate.intervalUs;
     }
@@ -125,6 +126,7 @@ private:
     uint32_t     _tlmRxPhyOkCount = 0;
     uint32_t     _tlmRxDecodeOkCount = 0;
     uint32_t     _tlmRxDecodeFailCount = 0;
+    uint32_t     _skippedTickCount = 0;
     HwTimer*     _timer = nullptr;
     uint32_t     _syncedIdentityRevision = 0;
     bool         _identitySynced = false;

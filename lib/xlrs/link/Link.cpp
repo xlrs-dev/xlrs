@@ -56,6 +56,9 @@ void Link::resetAcquisition(LinkState state) {
     _everRx = false;
     _consecutiveMissedUplinks = 0;
     _consecutiveMissedTelemetry = 0;
+    _uplinkLqSlotsClosed = 0;
+    _uplinkLqSlotsReceived = 0;
+    _uplinkLqSlotsMissed = 0;
     _telemetryGraceSlotsRemaining = 0;
     _uplinkGraceSlotsRemaining = 0;
     _failsafeRecoveryUplinks = 0;
@@ -670,6 +673,16 @@ void Link::finalizeHwUplinkLqSlot(uint32_t tick, bool received) {
     if (_hwUplinkLqTick != tick || _hwUplinkLqClosed) {
         return;
     }
+    if (_uplinkLqSlotsClosed != UINT32_MAX) {
+        _uplinkLqSlotsClosed++;
+    }
+    if (received) {
+        if (_uplinkLqSlotsReceived != UINT32_MAX) {
+            _uplinkLqSlotsReceived++;
+        }
+    } else if (_uplinkLqSlotsMissed != UINT32_MAX) {
+        _uplinkLqSlotsMissed++;
+    }
     if (received) {
         _lq.update(true);
         _stats.lqUp = _lq.lq();
@@ -877,6 +890,16 @@ void Link::service(uint32_t tick, bool recordLq) {
         }
 #else
         if (recordLq && _locked && slotKind(et, _rxPos) == SlotKind::Uplink) {
+            if (_uplinkLqSlotsClosed != UINT32_MAX) {
+                _uplinkLqSlotsClosed++;
+            }
+            if (_gotValidUplinkThisTick) {
+                if (_uplinkLqSlotsReceived != UINT32_MAX) {
+                    _uplinkLqSlotsReceived++;
+                }
+            } else if (_uplinkLqSlotsMissed != UINT32_MAX) {
+                _uplinkLqSlotsMissed++;
+            }
             _lq.update(_gotValidUplinkThisTick);
             _stats.lqUp = _lq.lq();
         }
@@ -918,7 +941,8 @@ void Link::service(uint32_t tick, bool recordLq) {
                       ? _consecutiveMissedUplinks
                       : (_everRx ? _consecutiveMissedTelemetry : (FAILSAFE_MISS + 1));
     // Healthy sliding-window LQ — do not failsafe on consecutive-miss skew alone.
-    if (_role == Role::Rx && _stats.lqUp >= FAILSAFE_LQ_HOLDOFF) {
+    if (_role == Role::Rx && _stats.lqUp >= FAILSAFE_LQ_HOLDOFF &&
+        !sustainedUplinkLoss()) {
         misses = 0;
     }
     if (_role == Role::Tx && _stats.lqDown >= FAILSAFE_LQ_HOLDOFF) {

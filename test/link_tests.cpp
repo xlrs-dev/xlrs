@@ -431,6 +431,24 @@ static void test_link_rx_lq_holdoff_failsafe_on_total_loss() {
     TEST_ASSERT_TRUE(env.rx.state() == LinkState::Failsafe);
 }
 
+static void test_link_rx_sustained_loss_bypasses_lq_holdoff() {
+    uint8_t uid[LINK_UID_SIZE];
+    linkUidFromPhrase("Kikobot-02", uid);
+    SimEnvironment env;
+    env.setup(uid, 4);
+
+    uint16_t ch[4] = {512, 512, 512, 512};
+    env.tx.setChannels(ch, 4);
+
+    for (uint32_t t = 1; t <= 200; ++t) simTick(env, t);
+    TEST_ASSERT_TRUE(env.rx.state() == LinkState::Connected);
+
+    for (uint32_t t = 201; t <= 300; ++t) simTick(env, t, false);
+    TEST_ASSERT_TRUE(env.rx.sustainedUplinkLoss());
+    TEST_ASSERT_TRUE(env.rx.stats().lqUp >= Link::FAILSAFE_LQ_HOLDOFF);
+    TEST_ASSERT_TRUE(env.rx.state() == LinkState::Failsafe);
+}
+
 static void test_link_tx_warm_starts_lqdown_on_connect() {
     uint8_t uid[LINK_UID_SIZE];
     linkUidFromPhrase("Kikobot-02", uid);
@@ -678,6 +696,7 @@ int main() {
     RUN_TEST(test_link_tx_bench_mode_failsafe_when_downlink_lost);
     RUN_TEST(test_link_rx_lq_holdoff_suppresses_burst_failsafe);
     RUN_TEST(test_link_rx_lq_holdoff_failsafe_on_total_loss);
+    RUN_TEST(test_link_rx_sustained_loss_bypasses_lq_holdoff);
     RUN_TEST(test_link_tx_lq_holdoff_suppresses_burst_failsafe);
     RUN_TEST(test_link_tx_warm_starts_lqdown_on_connect);
     RUN_TEST(test_link_rx_recovers_from_failsafe_without_bounce);

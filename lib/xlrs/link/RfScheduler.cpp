@@ -32,6 +32,7 @@ bool RfScheduler::begin(IRadioPhy* phy, Link* link, uint8_t rateIndex) {
     _pfd.begin(_rate.intervalUs);
     _tlmPfd.begin(_rate.intervalUs);
     _tlmListenTrimUs = 0;
+    _skippedTickCount = 0;
     _currentSlot = Slot::Idle;
     _tick = 0;
     _tickStartUs = 0;
@@ -534,6 +535,8 @@ void RfScheduler::skipStaleTicks(uint32_t skippedTicks) {
 
     const uint16_t missed = (skippedTicks > UINT16_MAX) ? UINT16_MAX : (uint16_t)skippedTicks;
     _link->noteMissedDeadlines(missed);
+    const uint32_t newSkipped = _skippedTickCount + skippedTicks;
+    _skippedTickCount = (newSkipped < _skippedTickCount) ? UINT32_MAX : newSkipped;
     _tick += skippedTicks;
     _link->onTick(_tick);
     syncPhyIdentity();

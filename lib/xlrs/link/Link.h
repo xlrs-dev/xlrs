@@ -170,6 +170,17 @@ public:
     bool             syncSeen() const { return _syncSeen; }
     int8_t           syncFhssSkew() const { return _syncFhssSkew; }
     uint32_t         lastRxTick() const { return _lastRxTick; }
+    uint32_t         lastValidRcTick() const { return _lastValidRcTick; }
+    uint32_t         ticksSinceLastRc() const {
+        return (_lastValidRcTick != 0 && _tick >= _lastValidRcTick)
+               ? (_tick - _lastValidRcTick) : 0;
+    }
+    uint32_t         consecutiveMissedUplinks() const { return _consecutiveMissedUplinks; }
+    uint16_t         uplinkGraceSlotsRemaining() const { return _uplinkGraceSlotsRemaining; }
+    uint32_t         uplinkLqSlotsClosed() const { return _uplinkLqSlotsClosed; }
+    uint32_t         uplinkLqSlotsReceived() const { return _uplinkLqSlotsReceived; }
+    uint32_t         uplinkLqSlotsMissed() const { return _uplinkLqSlotsMissed; }
+    uint32_t         failsafeEnteredTick() const { return _failsafeEnteredTick; }
     uint16_t         rxPos() const { return _rxPos; }
     uint16_t         txPos(uint32_t tick) const { return (uint16_t)((tick / hopInterval()) % _fhss.count()); }
     uint32_t         effectiveTxTick(uint32_t localTick) const;
@@ -242,6 +253,9 @@ private:
     bool         _decodedValidUplinkThisRx = false;  // per-packet; cleared in processRxPayload()
     uint32_t     _consecutiveMissedUplinks = 0;
     uint32_t     _consecutiveMissedTelemetry = 0;
+    uint32_t     _uplinkLqSlotsClosed = 0;
+    uint32_t     _uplinkLqSlotsReceived = 0;
+    uint32_t     _uplinkLqSlotsMissed = 0;
     uint16_t     _telemetryGraceSlotsRemaining = 0;
     uint16_t     _uplinkGraceSlotsRemaining = 0;
     uint8_t      _failsafeRecoveryUplinks = 0;

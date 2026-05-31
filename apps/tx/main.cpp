@@ -645,7 +645,7 @@ static void app_core_loop() {
 
             // Core-0 diagnostic: surface PHY fault counters so a wedged radio is visible on the
             // bench console, not just an opaque healthy()=false (docs/troubleshooting/index.md §3).
-            printf("[TX STATUS] State: %d LQdown: %u%% RSSI: %d dBm | PHY timeouts: %lu CRC: %lu Phase: %s/%s LastOp: 0x%02X LastOk: 0x%02X LastFailOp: 0x%02X | tick:%lu fhss:%u exp:%u tmr:%lu/%lu dlrx:%lu tlmArm:%lu tlmDef:%lu tlmDrop:%lu tlmPhy:%lu tlmOk:%lu tlmBad:%lu",
+            printf("[TX STATUS] State: %d LQdown: %u%% RSSI: %d dBm | PHY timeouts: %lu CRC: %lu Phase: %s/%s LastOp: 0x%02X LastOk: 0x%02X LastFailOp: 0x%02X | tick:%lu fhss:%u exp:%u tmr:%lu/%lu skip:%lu dlrx:%lu tlmArm:%lu tlmDef:%lu tlmDrop:%lu tlmPhy:%lu tlmOk:%lu tlmBad:%lu",
                    (int)rfData.state, (unsigned)rfData.stats.lqDown, (int)rfData.stats.rssiDbm,
                    (unsigned long)g_phy.spiTimeouts(), (unsigned long)g_phy.crcErrors(),
                    xlrs::Sx1280NativePhy::diagPhaseName(g_phy.lastDiagPhase()),
@@ -658,6 +658,7 @@ static void app_core_loop() {
                    (unsigned)rfData.linkDiag.fhssExpected,
                    (unsigned long)rfData.linkDiag.timerIntervalUs,
                    (unsigned long)rfData.linkDiag.nomIntervalUs,
+                   (unsigned long)rfData.linkDiag.skippedTicks,
                    (unsigned long)rfData.ticksSinceLastDownlink,
                    (unsigned long)rfData.linkDiag.tlmRxArmed,
                    (unsigned long)rfData.linkDiag.tlmRxArmDeferred,

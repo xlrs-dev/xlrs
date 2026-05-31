@@ -24,6 +24,16 @@ struct LinkRuntimeDiag {
     uint32_t tlmRxPhyOk;
     uint32_t tlmRxDecodeOk;
     uint32_t tlmRxDecodeFail;
+    uint32_t skippedTicks;
+    uint32_t uplinkLqSlots;
+    uint32_t uplinkLqOk;
+    uint32_t uplinkLqMiss;
+    uint32_t consecutiveMissedUplinks;
+    uint16_t uplinkGraceSlots;
+    uint32_t ticksSinceLastRc;
+    bool     freshRc;
+    bool     sustainedUplinkLoss;
+    uint32_t failsafeEnteredTick;
 };
 
 inline void fillLinkRuntimeDiag(LinkRuntimeDiag& d,
@@ -48,6 +58,16 @@ inline void fillLinkRuntimeDiag(LinkRuntimeDiag& d,
     d.tlmRxPhyOk = sched.tlmRxPhyOkCount();
     d.tlmRxDecodeOk = sched.tlmRxDecodeOkCount();
     d.tlmRxDecodeFail = sched.tlmRxDecodeFailCount();
+    d.skippedTicks = sched.skippedTickCount();
+    d.uplinkLqSlots = link.uplinkLqSlotsClosed();
+    d.uplinkLqOk = link.uplinkLqSlotsReceived();
+    d.uplinkLqMiss = link.uplinkLqSlotsMissed();
+    d.consecutiveMissedUplinks = link.consecutiveMissedUplinks();
+    d.uplinkGraceSlots = link.uplinkGraceSlotsRemaining();
+    d.ticksSinceLastRc = link.ticksSinceLastRc();
+    d.freshRc = link.hasFreshRc();
+    d.sustainedUplinkLoss = link.sustainedUplinkLoss();
+    d.failsafeEnteredTick = link.failsafeEnteredTick();
 }
 
 } // namespace xlrs::app

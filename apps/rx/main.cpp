@@ -255,6 +255,11 @@ static void app_core_loop() {
     static uint32_t lastSeq = 0;
     static uint32_t lastCRSF = 0;
     static bool prevOutputActive = false;
+    static xlrs::LinkState prevLoggedState = xlrs::LinkState::Disconnected;
+    static bool prevLoggedOutputActive = false;
+    static bool prevLoggedSustainedLoss = false;
+    static uint8_t prevLoggedLq = 0;
+    static bool haveLoggedDiag = false;
     RfToAppData rfData{};
 
     bool isNew = g_rfToApp.loadIfNew(rfData, lastSeq);
@@ -268,6 +273,36 @@ static void app_core_loop() {
     const bool crsfResumeEdge = outputActive && !prevOutputActive;
     uint32_t now = xlrs::hal::nowMs();
     bool shouldOutput = isNew || crsfResumeEdge || (now - lastCRSF >= 20);
+
+    const bool sustainedLoss = rfData.linkDiag.sustainedUplinkLoss;
+    const bool lqDropEdge = haveLoggedDiag &&
+        rfData.stats.lqUp + 5u <= prevLoggedLq;
+    if (!haveLoggedDiag || state != prevLoggedState ||
+        outputActive != prevLoggedOutputActive ||
+        sustainedLoss != prevLoggedSustainedLoss || lqDropEdge) {
+        printf("[RX EVENT] State:%d->%d out:%u->%u LQ:%u->%u fresh:%u sloss:%u rcage:%lut ulq:%lu/%lu miss:%lu cmiss:%lu grace:%u fsat:%lu skip:%lu\n",
+               haveLoggedDiag ? (int)prevLoggedState : (int)state,
+               (int)state,
+               haveLoggedDiag && prevLoggedOutputActive ? 1u : 0u,
+               outputActive ? 1u : 0u,
+               haveLoggedDiag ? (unsigned)prevLoggedLq : (unsigned)rfData.stats.lqUp,
+               (unsigned)rfData.stats.lqUp,
+               rfData.linkDiag.freshRc ? 1u : 0u,
+               sustainedLoss ? 1u : 0u,
+               (unsigned long)rfData.linkDiag.ticksSinceLastRc,
+               (unsigned long)rfData.linkDiag.uplinkLqOk,
+               (unsigned long)rfData.linkDiag.uplinkLqSlots,
+               (unsigned long)rfData.linkDiag.uplinkLqMiss,
+               (unsigned long)rfData.linkDiag.consecutiveMissedUplinks,
+               (unsigned)rfData.linkDiag.uplinkGraceSlots,
+               (unsigned long)rfData.linkDiag.failsafeEnteredTick,
+               (unsigned long)rfData.linkDiag.skippedTicks);
+        prevLoggedState = state;
+        prevLoggedOutputActive = outputActive;
+        prevLoggedSustainedLoss = sustainedLoss;
+        prevLoggedLq = rfData.stats.lqUp;
+        haveLoggedDiag = true;
+    }
 
     if (shouldOutput) {
         lastCRSF = now;
@@ -305,7 +340,7 @@ static void app_core_loop() {
         }
         const uint32_t fcAge = g_lastFcCrsfFrameMs == 0 ? 0 : now - g_lastFcCrsfFrameMs;
         const uint32_t rcOutAge = g_lastCrsfRcOutMs == 0 ? 0 : now - g_lastCrsfRcOutMs;
-        printf("[RX STATUS] State: %d LQ: %u%% RSSI: %d dBm | PHY timeouts: %lu CRC: %lu Phase: %s/%s LastOp: 0x%02X LastOk: 0x%02X LastFailOp: 0x%02X | lock:%u sync:%u tick:%lu fhss:%u exp:%u skew:%d pfd:%ldus adj:%ldus n:%lu tmr:%lu/%lu | out:%u crsf_rc:%lu age:%lums stats:%lu fc:%lu fcq:%lu fcdrop:%lu fcage:%lums qdrop:%lu%s\n",
+        printf("[RX STATUS] State: %d LQ: %u%% RSSI: %d dBm | PHY timeouts: %lu CRC: %lu Phase: %s/%s LastOp: 0x%02X LastOk: 0x%02X LastFailOp: 0x%02X | lock:%u sync:%u tick:%lu fhss:%u exp:%u skew:%d pfd:%ldus adj:%ldus n:%lu tmr:%lu/%lu skip:%lu | ulq:%lu/%lu miss:%lu cmiss:%lu grace:%u frc:%u sloss:%u rcage:%lut fsat:%lu | out:%u crsf_rc:%lu age:%lums stats:%lu fc:%lu fcq:%lu fcdrop:%lu fcage:%lums qdrop:%lu%s\n",
                (int)state, (unsigned)rfData.stats.lqUp, (int)rfData.stats.rssiDbm,
                (unsigned long)g_phy.spiTimeouts(), (unsigned long)g_phy.crcErrors(),
                xlrs::Sx1280NativePhy::diagPhaseName(g_phy.lastDiagPhase()),
@@ -324,6 +359,16 @@ static void app_core_loop() {
                (unsigned long)rfData.linkDiag.pfdUpdates,
                (unsigned long)rfData.linkDiag.timerIntervalUs,
                (unsigned long)rfData.linkDiag.nomIntervalUs,
+               (unsigned long)rfData.linkDiag.skippedTicks,
+               (unsigned long)rfData.linkDiag.uplinkLqOk,
+               (unsigned long)rfData.linkDiag.uplinkLqSlots,
+               (unsigned long)rfData.linkDiag.uplinkLqMiss,
+               (unsigned long)rfData.linkDiag.consecutiveMissedUplinks,
+               (unsigned)rfData.linkDiag.uplinkGraceSlots,
+               rfData.linkDiag.freshRc ? 1u : 0u,
+               rfData.linkDiag.sustainedUplinkLoss ? 1u : 0u,
+               (unsigned long)rfData.linkDiag.ticksSinceLastRc,
+               (unsigned long)rfData.linkDiag.failsafeEnteredTick,
                outputActive ? 1u : 0u,
                (unsigned long)g_crsfRcFramesOut,
                (unsigned long)rcOutAge,

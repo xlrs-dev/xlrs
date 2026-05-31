@@ -555,9 +555,16 @@ void RfScheduler::poll() {
             // Core 1 fell badly behind (long stall). Replaying every backlogged slot would
             // burst blocking SPI + TX_GUARD sleeps for stale FHSS positions and keep us behind.
             if (_link && _link->role() == Role::Rx && _link->isLocked()) {
-                // Stay hop-locked: discard stale backlog and wait for the next Sync snap
-                // instead of fast-forwarding a local tick that diverges from TX cadence.
+                // Stay hop-locked: discard stale RF operations, but advance the scheduler
+                // tick so FHSS/slot phase remains aligned with the timer cadence. Leaving
+                // _tick stale here makes every later RX arm use an old hop position until
+                // failsafe/reacquire.
                 _link->noteMissedDeadlines((uint16_t)diff);
+                const uint32_t targetTick = _tick + diff;
+                _tick = targetTick;
+                _link->onTick(targetTick);
+                syncPhyIdentity();
+                _currentSlot = _link->slotForTick(targetTick);
             } else {
                 if (_link) _link->noteSchedulerOverrun((uint16_t)diff);
                 const uint32_t targetTick = _tick + diff;

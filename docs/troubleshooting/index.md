@@ -389,6 +389,10 @@ If the system freezes or UART data drops:
 2. Scope a temporary GPIO pulse around the timer ISR; target less than 5 us.
 3. Scope a GPIO pulse around RF task slot processing.
 4. Watch `missedDeadlines` via TX/RX status plumbing where available.
+5. On RX, a nonzero `missedDeadlines` can mean the RF task skipped stale timer backlog and
+   fast-forwarded to the current scheduler tick. If `fhss` and `exp` stay matched afterward,
+   the scheduler recovered; if they diverge or `missedDeadlines` climbs continuously, look
+   for blocking work on core 1.
 
 PFD/timing lock guidance:
 

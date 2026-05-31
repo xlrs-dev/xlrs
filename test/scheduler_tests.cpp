@@ -86,12 +86,21 @@ static void test_scheduler_rx_overrun_demotes_to_acquisition() {
     for (uint32_t i = 0; i < backlog; ++i) fireSimTimerTick();
     env.rxSched.poll();
 
-    TEST_ASSERT_EQUAL_UINT32(300u, env.rxSched.processedTick());
+    TEST_ASSERT_EQUAL_UINT32(300u + backlog, env.rxSched.processedTick());
     TEST_ASSERT_TRUE(env.rx.state() == LinkState::Connected);
     TEST_ASSERT_TRUE(env.rx.isLocked());
-    TEST_ASSERT_TRUE(env.rx.outputActive());
     TEST_ASSERT_TRUE(env.rx.stats().missedDeadlines >= backlog);
-    TEST_ASSERT_EQUAL_UINT8(75, env.rx.stats().fhssIndex);
+    TEST_ASSERT_EQUAL_UINT8(env.rx.txPos(env.rx.effectiveTxTick(env.rxSched.processedTick())),
+                            env.rx.stats().fhssIndex);
+
+    fireSimTimerTick();
+    env.rxSched.poll();
+    TEST_ASSERT_EQUAL_UINT32(301u + backlog, env.rxSched.processedTick());
+    TEST_ASSERT_EQUAL_UINT8(env.rx.txPos(env.rx.effectiveTxTick(env.rxSched.processedTick())),
+                            env.rx.stats().fhssIndex);
+
+    simTick(env, 302u + backlog);
+    TEST_ASSERT_TRUE(env.rx.outputActive());
 }
 
 static void test_scheduler_phy_recovery_failure() {

@@ -230,7 +230,9 @@ static void test_link_rate_switch_and_power() {
     TEST_ASSERT_TRUE(env.txPhy.outputPowerDbm() < 10);
 
     env.tx.requestRate(4);
-    for (uint32_t t = 801; t <= 1600; ++t) simTick(env, t);
+    // ELRS sequence length is 240; seqPeriod = hopInterval(4) * 240 = 960 ticks per cycle.
+    // requestRate at tick 800 schedules switch at cycle 3 → tick 2880.
+    for (uint32_t t = 801; t <= 3200; ++t) simTick(env, t);
     TEST_ASSERT_TRUE(env.rx.state() == LinkState::Connected);
     TEST_ASSERT_EQUAL_UINT8(4, env.rx.stats().rateIndex);
 }

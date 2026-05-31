@@ -29,10 +29,16 @@ inline void bindModeUid(uint8_t out[LINK_UID_SIZE]) {
     linkUidFromPhrase("XLRS-BIND-V1", out);
 }
 
-// FHSS PRNG seed = the lower 32 bits of the Link UID (docs/developer/configuration.md §2.C).
+// ELRS OtaGetUidSeed() parity: bytes 2–5 of the UID, with OTA_VERSION XOR on byte 5.
+// XLRS Link UID is 8 bytes; ELRS UID is 6 — the same index positions apply.
+inline uint32_t elrsFhssSeedFromUid(const uint8_t uid[LINK_UID_SIZE]) {
+    return ((uint32_t)uid[2] << 24) | ((uint32_t)uid[3] << 16) |
+           ((uint32_t)uid[4] << 8) | (uid[5] ^ OTA_VERSION);
+}
+
+// FHSS PRNG seed (ELRS-compatible; docs/developer/configuration.md §2.C).
 inline uint32_t fhssSeedFromUid(const uint8_t uid[LINK_UID_SIZE]) {
-    return ((uint32_t)uid[4] << 24) | ((uint32_t)uid[5] << 16) |
-           ((uint32_t)uid[6] <<  8) |  (uint32_t)uid[7];
+    return elrsFhssSeedFromUid(uid);
 }
 
 // Radio sync word from the Link UID (docs/developer/configuration.md §2.A). Provides PHY-level filtering so

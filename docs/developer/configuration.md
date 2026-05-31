@@ -118,19 +118,21 @@ struct RateConfig {
 ---
 
 ### C. Frequency-Hopping Spread Spectrum (FHSS) Table
-* **Channel Sequence:** Generated using the `Fhss` class seeded with the lower 32 bits of the
-  **Link UID** (`fhssSeedFromUid()` in `Uid.h` → `Fhss::generate()`). Uses a seeded Linear
-  Congruential Generator (LCG) combined with a Fisher-Yates shuffle to build a balanced sequence
-  of channel indices.
-* **Frequency Mapping:** Channel indices map to a regional frequency table —
-  [`fhss/channels_2g4.h`](../../lib/xlrs/fhss/channels_2g4.h) (⚠ placeholder set; the shipping table
-  must be the regulator-approved channels per the RF compliance gate). `fhssFreqForIndex()`.
+* **Channel Sequence:** ExpressLRS-compatible `FHSSrandomiseFHSSsequenceBuild` in
+  [`fhss/Fhss.h`](../../lib/xlrs/fhss/Fhss.h), seeded via `fhssSeedFromUid()` /
+  `elrsFhssSeedFromUid()` in [`Uid.h`](../../lib/xlrs/link/Uid.h) (UID bytes 2–5,
+  `OTA_VERSION` XOR on byte 5 — ELRS `OtaGetUidSeed()` parity). ISM2G4: 80 channels,
+  240-entry sequence (`primaryBandCount`), sync channel index 40; sync channel appears
+  every 80 sequence indices. Block-local shuffle uses ELRS `rngN()` ([`elrs_random.h`](../../lib/xlrs/fhss/elrs_random.h)).
+* **Frequency Mapping:** ELRS ISM2G4 spread formula in
+  [`fhss/fhss_domain.h`](../../lib/xlrs/fhss/fhss_domain.h) (2400.4–2479.4 MHz, 80 channels).
+  `fhssFreqMHzForChannelIndex()` / `fhssInitialSyncFreqMHz()` (~2440.4 MHz).
 * **Cadence:** Frequency advances on hop boundaries: `tick % RateConfig.fhssHopInterval == 0`.
-* **Acquisition (Link.{h,cpp}, M4):** the TX sends an `OtaType::Sync` beacon at sequence
-  position 0 (the acquisition channel); an unlocked RX dwells on that channel until it catches a
-  Sync, adopts the conveyed `fhssIndex`, locks, and follows the sequence. On link loss the RX
-  unlocks and falls back to the acquisition channel to re-sync — worst-case lock time ≤ one
-  sequence cycle. Verified in the native sim (acquire → hop → loss → re-acquire).
+* **Acquisition (Link.{h,cpp}, M4):** unlocked RX dwells on the **sync channel** frequency
+  (`fhssInitialSyncFreqMHz()`); TX hops the full sequence. Sync slots occur when
+  `Fhss::onSyncChannel(txPos(tick))` (channel index 40 in the sequence), not `pos == 0`.
+  Verified in the native sim (acquire → hop → loss → re-acquire). Golden vectors:
+  [`test/fhss_tests.cpp`](../../test/fhss_tests.cpp).
 
 ---
 
@@ -169,7 +171,8 @@ random `session_salt` at Connect (vs. the fixed sim value) are follow-ups.
 ### F. Telemetry Slotting & Link Statistics (M5)
 
 * **Slot schedule (both ends agree per tick):** `pos = (tick / fhssHopInterval) % seqLen`.
-  `pos == 0` → **Sync** (TX→RX beacon on the acquisition channel); else `tick % tlmRatioDenom == 0`
+  `Fhss::onSyncChannel(pos)` → **Sync** (TX→RX beacon on the sync RF channel); else
+  `tick % tlmRatioDenom == 0`
   → **Telemetry** (RX→TX downlink); else → **Uplink** (TX→RC→RX). Each slot has exactly one sender
   and one receiver, computed identically on both ends — **collision-free TDM**, no legacy "holdoff."
 * **Telemetry downlink (`OtaType::TlmDown`, RX→TX):** on telemetry slots the RX transmits its

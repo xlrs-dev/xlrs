@@ -59,6 +59,7 @@ endfunction()
 foreach(suite core timing scheduler link telemetry power crypto app flash)
     add_xlrs_test(${suite})
 endforeach()
+add_xlrs_test(fhss)
 
 add_xlrs_test(crsf
     ${XLRS_LIB_DIR}/crsfSerial/crsfSerial.cpp

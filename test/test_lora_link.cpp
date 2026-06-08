@@ -144,6 +144,42 @@ static void test_channel_sanitizer_accepts_single_fast_channel_move() {
     TEST_ASSERT_TRUE(sanitizeRcChannels(previous, true, channels));
 }
 
+static void test_spike_gate_holds_one_frame_channel_outlier() {
+    uint16_t previous[kRcChannelCount];
+    uint16_t spike[kRcChannelCount];
+    uint16_t normal[kRcChannelCount];
+    for (uint8_t i = 0; i < kRcChannelCount; ++i) {
+        previous[i] = kCrsfRawMid;
+        spike[i] = kCrsfRawMid;
+        normal[i] = kCrsfRawMid;
+    }
+    spike[6] = kCrsfRaw2000;
+
+    RcSpikeGate gate{};
+    TEST_ASSERT_FALSE(acceptRcChannelsWithSpikeGate(previous, true, spike, gate, 160, 80));
+    TEST_ASSERT_TRUE(gate.havePending);
+    TEST_ASSERT_TRUE(acceptRcChannelsWithSpikeGate(previous, true, normal, gate, 160, 80));
+    TEST_ASSERT_FALSE(gate.havePending);
+}
+
+static void test_spike_gate_accepts_confirmed_large_channel_step() {
+    uint16_t previous[kRcChannelCount];
+    uint16_t first[kRcChannelCount];
+    uint16_t second[kRcChannelCount];
+    for (uint8_t i = 0; i < kRcChannelCount; ++i) {
+        previous[i] = kCrsfRawMid;
+        first[i] = kCrsfRawMid;
+        second[i] = kCrsfRawMid;
+    }
+    first[0] = kCrsfRaw2000;
+    second[0] = static_cast<uint16_t>(kCrsfRaw2000 - 20);
+
+    RcSpikeGate gate{};
+    TEST_ASSERT_FALSE(acceptRcChannelsWithSpikeGate(previous, true, first, gate, 160, 80));
+    TEST_ASSERT_TRUE(acceptRcChannelsWithSpikeGate(previous, true, second, gate, 160, 80));
+    TEST_ASSERT_FALSE(gate.havePending);
+}
+
 static void test_primary_slew_limiter_caps_stick_jumps_only() {
     uint16_t previous[kRcChannelCount];
     uint16_t channels[kRcChannelCount];
@@ -218,6 +254,8 @@ int main(int argc, char** argv) {
     RUN_TEST(test_channel_sanitizer_clamps_without_rejecting_normal_frame);
     RUN_TEST(test_channel_sanitizer_rejects_simultaneous_high_endpoint_spike);
     RUN_TEST(test_channel_sanitizer_accepts_single_fast_channel_move);
+    RUN_TEST(test_spike_gate_holds_one_frame_channel_outlier);
+    RUN_TEST(test_spike_gate_accepts_confirmed_large_channel_step);
     RUN_TEST(test_primary_slew_limiter_caps_stick_jumps_only);
     RUN_TEST(test_radio_transmitter_address_frame_is_accepted_as_crsf_raw);
     RUN_TEST(test_config_record_validation);

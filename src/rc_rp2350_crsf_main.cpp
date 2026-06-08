@@ -31,9 +31,13 @@ static uint16_t g_channels[kRcChannelCount];
 static uint16_t g_filteredAdc[4];
 static uint32_t g_framesSent = 0;
 static uint32_t g_channelGuardRejects = 0;
+static uint32_t g_channelSpikeHolds = 0;
 static uint32_t g_lastFrameUs = 0;
 static bool g_filterReady = false;
 static bool g_haveChannels = false;
+static RcSpikeGate g_channelSpikeGate{};
+static constexpr uint16_t kRcSpikeJumpThreshold = 160;
+static constexpr uint16_t kRcSpikeConfirmTolerance = 80;
 
 static uint16_t readAveragedAdc(uint8_t pin) {
     uint32_t sum = 0;
@@ -80,12 +84,17 @@ static void updateChannels() {
     candidate[6] = readThreePosition(kTogglePins[4], kTogglePins[5]);
     candidate[7] = readThreePosition(kTogglePins[6], kTogglePins[7]);
     for (uint8_t i = 8; i < kRcChannelCount; ++i) candidate[i] = kCrsfRawMid;
-    if (sanitizeRcChannels(g_channels, g_haveChannels, candidate)) {
-        memcpy(g_channels, candidate, sizeof(g_channels));
-        g_haveChannels = true;
-    } else {
+    if (!sanitizeRcChannels(g_channels, g_haveChannels, candidate)) {
         ++g_channelGuardRejects;
+        return;
     }
+    if (!acceptRcChannelsWithSpikeGate(g_channels, g_haveChannels, candidate, g_channelSpikeGate,
+                                       kRcSpikeJumpThreshold, kRcSpikeConfirmTolerance)) {
+        ++g_channelSpikeHolds;
+        return;
+    }
+    memcpy(g_channels, candidate, sizeof(g_channels));
+    g_haveChannels = true;
 }
 
 static void sendCrsfChannels() {
@@ -114,10 +123,11 @@ static void serviceCli() {
         if (c == '\n') {
             line[pos] = '\0';
             if (strcmp(line, "status") == 0) {
-                Serial.printf("role=rc-rp2350 baud=%lu frames=%lu guard=%lu ch=%u,%u,%u,%u\n",
+                Serial.printf("role=rc-rp2350 baud=%lu frames=%lu guard=%lu hold=%lu ch=%u,%u,%u,%u\n",
                               static_cast<unsigned long>(kCrsfBaud),
                               static_cast<unsigned long>(g_framesSent),
                               static_cast<unsigned long>(g_channelGuardRejects),
+                              static_cast<unsigned long>(g_channelSpikeHolds),
                               g_channels[0], g_channels[1], g_channels[2], g_channels[3]);
             } else if (strcmp(line, "channels") == 0) {
                 printChannels();

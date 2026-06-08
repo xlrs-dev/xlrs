@@ -64,6 +64,11 @@ struct ConfigRecord {
     uint16_t crc;
 };
 
+struct RcSpikeGate {
+    uint16_t pending[kRcChannelCount];
+    bool havePending;
+};
+
 extern const RateConfig kRates[2];
 
 uint16_t crc16Ccitt(const uint8_t* data, size_t len);
@@ -80,6 +85,9 @@ void unpackRcChannels11Bit(const uint8_t in[22], uint16_t channels[kRcChannelCou
 uint16_t clampCrsfRaw(uint16_t value);
 bool sanitizeRcChannels(const uint16_t previous[kRcChannelCount], bool havePrevious,
                         uint16_t channels[kRcChannelCount]);
+bool acceptRcChannelsWithSpikeGate(const uint16_t previous[kRcChannelCount], bool havePrevious,
+                                   const uint16_t candidate[kRcChannelCount], RcSpikeGate& gate,
+                                   uint16_t jumpThreshold, uint16_t confirmTolerance);
 void slewLimitPrimaryRcChannels(const uint16_t previous[kRcChannelCount], bool havePrevious,
                                 uint16_t channels[kRcChannelCount], uint16_t maxDelta);
 size_t encodeCrsfRcFrame(const uint16_t channels[kRcChannelCount], uint8_t* out, size_t outLen);

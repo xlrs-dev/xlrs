@@ -37,6 +37,8 @@ static bool g_radioReady = false;
 static uint32_t g_lastRxHopAdvanceUs = 0;
 static uint32_t g_validOtaFrames = 0;
 static uint32_t g_rejectedOtaFrames = 0;
+static constexpr uint16_t kRcSpikeJumpThreshold = 160;
+static constexpr uint16_t kRcSpikeConfirmTolerance = 80;
 #if LORA_TX_ROLE
 static uint32_t g_downlinkTelemetryFrames = 0;
 static uint32_t g_uplinkTransmitAttempts = 0;
@@ -44,10 +46,12 @@ static uint32_t g_uplinkTransmitSuccesses = 0;
 static uint32_t g_telemetryListenSlots = 0;
 static uint32_t g_crsfInputFrames = 0;
 static uint32_t g_crsfInputRejects = 0;
+static uint32_t g_crsfInputSpikeHolds = 0;
 static uint32_t g_crsfInputBytes = 0;
 static uint8_t g_crsfByteRing[64];
 static uint8_t g_crsfByteRingPos = 0;
 static uint8_t g_telemetryListenSlotsRemaining = 0;
+static RcSpikeGate g_txInputSpikeGate{};
 #endif
 #if LORA_RX_ROLE
 static bool g_haveLastSequence = false;
@@ -57,9 +61,8 @@ static uint16_t g_lqWindowFrames = 0;
 static uint16_t g_lqWindowDrops = 0;
 static uint32_t g_lqWindowStartMs = 0;
 static uint32_t g_rxChannelGuardRejects = 0;
-static uint32_t g_rxPrimaryJumpHolds = 0;
-static uint16_t g_pendingPrimaryJump[kRcChannelCount];
-static bool g_havePendingPrimaryJump = false;
+static uint32_t g_rxSpikeHolds = 0;
+static RcSpikeGate g_rxOutputSpikeGate{};
 #endif
 
 SX1280 radio = new Module(SX128X_SPI_CS, SX128X_SPI_DIO1, SX128X_SPI_RST, SX128X_SPI_BUSY);
@@ -189,13 +192,14 @@ static void printStatus() {
                   static_cast<unsigned long>(g_rejectedOtaFrames));
 #if LORA_TX_ROLE
     const uint32_t crsfAgeMs = g_lastRcInputMs ? millis() - g_lastRcInputMs : 0xFFFFFFFFu;
-    Serial.printf(" tlm=%lu tx_ok=%lu tx_try=%lu listen=%lu crsf=%lu crsf_rej=%lu crsf_bytes=%lu crsf_age=%lu ch=%u,%u,%u,%u",
+    Serial.printf(" tlm=%lu tx_ok=%lu tx_try=%lu listen=%lu crsf=%lu crsf_rej=%lu crsf_hold=%lu crsf_bytes=%lu crsf_age=%lu ch=%u,%u,%u,%u",
                   static_cast<unsigned long>(g_downlinkTelemetryFrames),
                   static_cast<unsigned long>(g_uplinkTransmitSuccesses),
                   static_cast<unsigned long>(g_uplinkTransmitAttempts),
                   static_cast<unsigned long>(g_telemetryListenSlots),
                   static_cast<unsigned long>(g_crsfInputFrames),
                   static_cast<unsigned long>(g_crsfInputRejects),
+                  static_cast<unsigned long>(g_crsfInputSpikeHolds),
                   static_cast<unsigned long>(g_crsfInputBytes),
                   static_cast<unsigned long>(crsfAgeMs),
                   g_channels[0], g_channels[1], g_channels[2], g_channels[3]);
@@ -203,7 +207,7 @@ static void printStatus() {
     Serial.printf(" drops=%lu guard=%lu hold=%lu",
                   static_cast<unsigned long>(g_uplinkDropCount),
                   static_cast<unsigned long>(g_rxChannelGuardRejects),
-                  static_cast<unsigned long>(g_rxPrimaryJumpHolds));
+                  static_cast<unsigned long>(g_rxSpikeHolds));
 #endif
     Serial.printf(" config=%s\n", g_configFault ? "defaulted" : "ok");
 }
@@ -296,6 +300,11 @@ static void serviceTxCrsfInput() {
                 ++g_crsfInputRejects;
                 continue;
             }
+            if (!acceptRcChannelsWithSpikeGate(g_channels, g_lastRcInputMs != 0, candidate, g_txInputSpikeGate,
+                                               kRcSpikeJumpThreshold, kRcSpikeConfirmTolerance)) {
+                ++g_crsfInputSpikeHolds;
+                continue;
+            }
             memcpy(g_channels, candidate, sizeof(g_channels));
             g_lastRcInputMs = millis();
             ++g_crsfInputFrames;
@@ -358,42 +367,12 @@ static void writeFcChannels() {
     if (len) Serial2.write(frame, len);
 }
 
-static bool hasLargePrimaryJump(const uint16_t previous[kRcChannelCount],
-                                const uint16_t candidate[kRcChannelCount],
-                                uint16_t threshold) {
-    for (uint8_t i = 0; i < 4; ++i) {
-        const uint16_t oldValue = clampCrsfRaw(previous[i]);
-        const uint16_t newValue = clampCrsfRaw(candidate[i]);
-        const uint16_t delta = oldValue > newValue ? oldValue - newValue : newValue - oldValue;
-        if (delta > threshold) return true;
-    }
-    return false;
-}
-
-static bool primaryChannelsMatch(const uint16_t a[kRcChannelCount],
-                                 const uint16_t b[kRcChannelCount],
-                                 uint16_t tolerance) {
-    for (uint8_t i = 0; i < 4; ++i) {
-        const uint16_t av = clampCrsfRaw(a[i]);
-        const uint16_t bv = clampCrsfRaw(b[i]);
-        const uint16_t delta = av > bv ? av - bv : bv - av;
-        if (delta > tolerance) return false;
-    }
-    return true;
-}
-
 static bool acceptRxOutputCandidate(const uint16_t candidate[kRcChannelCount]) {
-    if (!hasLargePrimaryJump(g_channels, candidate, 220)) {
-        g_havePendingPrimaryJump = false;
+    if (acceptRcChannelsWithSpikeGate(g_channels, true, candidate, g_rxOutputSpikeGate,
+                                      kRcSpikeJumpThreshold, kRcSpikeConfirmTolerance)) {
         return true;
     }
-    if (g_havePendingPrimaryJump && primaryChannelsMatch(g_pendingPrimaryJump, candidate, 80)) {
-        g_havePendingPrimaryJump = false;
-        return true;
-    }
-    memcpy(g_pendingPrimaryJump, candidate, sizeof(g_pendingPrimaryJump));
-    g_havePendingPrimaryJump = true;
-    ++g_rxPrimaryJumpHolds;
+    ++g_rxSpikeHolds;
     return false;
 }
 

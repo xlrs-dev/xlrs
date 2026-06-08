@@ -150,6 +150,50 @@ bool sanitizeRcChannels(const uint16_t previous[kRcChannelCount], bool havePrevi
     return largeJumpsToHigh < 4;
 }
 
+static bool hasLargeRcJump(const uint16_t previous[kRcChannelCount],
+                           const uint16_t candidate[kRcChannelCount],
+                           uint16_t threshold) {
+    for (uint8_t i = 0; i < kRcChannelCount; ++i) {
+        const uint16_t oldValue = clampCrsfRaw(previous[i]);
+        const uint16_t newValue = clampCrsfRaw(candidate[i]);
+        const uint16_t delta = oldValue > newValue ? oldValue - newValue : newValue - oldValue;
+        if (delta > threshold) return true;
+    }
+    return false;
+}
+
+static bool rcChannelsMatchWithin(const uint16_t a[kRcChannelCount],
+                                  const uint16_t b[kRcChannelCount],
+                                  uint16_t tolerance) {
+    for (uint8_t i = 0; i < kRcChannelCount; ++i) {
+        const uint16_t av = clampCrsfRaw(a[i]);
+        const uint16_t bv = clampCrsfRaw(b[i]);
+        const uint16_t delta = av > bv ? av - bv : bv - av;
+        if (delta > tolerance) return false;
+    }
+    return true;
+}
+
+bool acceptRcChannelsWithSpikeGate(const uint16_t previous[kRcChannelCount], bool havePrevious,
+                                   const uint16_t candidate[kRcChannelCount], RcSpikeGate& gate,
+                                   uint16_t jumpThreshold, uint16_t confirmTolerance) {
+    if (!havePrevious || !previous) {
+        gate.havePending = false;
+        return true;
+    }
+    if (!hasLargeRcJump(previous, candidate, jumpThreshold)) {
+        gate.havePending = false;
+        return true;
+    }
+    if (gate.havePending && rcChannelsMatchWithin(gate.pending, candidate, confirmTolerance)) {
+        gate.havePending = false;
+        return true;
+    }
+    memcpy(gate.pending, candidate, sizeof(gate.pending));
+    gate.havePending = true;
+    return false;
+}
+
 void slewLimitPrimaryRcChannels(const uint16_t previous[kRcChannelCount], bool havePrevious,
                                 uint16_t channels[kRcChannelCount], uint16_t maxDelta) {
     if (!havePrevious || !previous) return;

@@ -1,14 +1,17 @@
 # Pinout
 
-Pin defaults are CMake cache variables and can be overridden at configure time.
+Pin defaults are PlatformIO build flags in [platformio.ini](../../platformio.ini).
 
-## UART / CRSF
+## CRSF UART
 
 | Signal | Default |
 | --- | --- |
 | UART TX | GP8 |
 | UART RX | GP9 |
-| Baud | 420000 |
+| Baud | 400000 |
+
+TX uses this UART for CRSF handset input and telemetry back to the handset. RX
+uses it for CRSF RC and link-stat output to the flight controller.
 
 ## SX1280
 
@@ -24,24 +27,18 @@ Pin defaults are CMake cache variables and can be overridden at configure time.
 | RXEN | GP14 |
 | TXEN | GP15 |
 
-Status LED (TX and RX) defaults to **GP10** (Pico physical pin 13), **active-low** (GPIO sinks current).
+The status LED defaults to GP25.
 
 ## Override Example
 
-```bash
-cmake -S . -B build -G Ninja \
-  -DXLRS_UART_TX_PIN=8 \
-  -DXLRS_UART_RX_PIN=9 \
-  -DXLRS_CRSF_TX_PIN=8 \
-  -DXLRS_CRSF_RX_PIN=9 \
-  -DXLRS_STATUS_LED_PIN=10 \
-  -DXLRS_SX128X_SPI_SCK=18 \
-  -DXLRS_SX128X_SPI_MOSI=19 \
-  -DXLRS_SX128X_SPI_MISO=16 \
-  -DXLRS_SX128X_SPI_CS=17 \
-  -DXLRS_SX128X_SPI_BUSY=20 \
-  -DXLRS_SX128X_SPI_DIO1=21 \
-  -DXLRS_SX128X_SPI_RST=22 \
-  -DXLRS_SX128X_RXEN=14 \
-  -DXLRS_SX128X_TXEN=15
+Edit or extend the relevant environment in `platformio.ini`:
+
+```ini
+build_flags =
+    ${lora_pico_base.build_flags}
+    -DLORA_TX_ROLE=1
+    -DDEFAULT_BINDING_PHRASE=\"your-phrase\"
+    -DCRSF_UART_TX_PIN=8
+    -DCRSF_UART_RX_PIN=9
+    -DSTATUS_LED_PIN=25
 ```

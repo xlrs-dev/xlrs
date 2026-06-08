@@ -2,7 +2,6 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-build_dir="${BUILD_DIR:-${repo_root}/build}"
 target="${1:-}"
 
 usage() {
@@ -95,7 +94,13 @@ flash_with_uf2_copy() {
 
 flash_one() {
   local name="$1"
-  local uf2="${build_dir}/xlrs_${name}.uf2"
+  local env_name
+  case "${name}" in
+    tx) env_name="tx_lora_pico" ;;
+    rx) env_name="rx_lora_pico" ;;
+    *) printf 'Invalid role: %s\n' "${name}" >&2; exit 2 ;;
+  esac
+  local uf2="${repo_root}/.pio/build/${env_name}/firmware.uf2"
 
   if [[ ! -f "${uf2}" ]]; then
     printf 'Missing %s. Run scripts/build.sh first.\n' "${uf2}" >&2

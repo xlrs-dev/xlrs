@@ -2,13 +2,9 @@
 
 ## Requirements
 
-- CMake
-- Ninja
-- Python 3
-- clang-tidy, available from LLVM (`brew install llvm` on macOS)
-- Arm embedded GCC (`arm-none-eabi-gcc`)
-- Raspberry Pi Pico SDK
-- Optional for flashing: a USB-capable `picotool`
+- PlatformIO CLI (`pio`)
+- Python 3, normally installed with PlatformIO
+- Optional for flashing: USB-capable `picotool`
 
 Check the local machine:
 
@@ -18,68 +14,50 @@ scripts/check-env.sh
 
 ## Build
 
-Use the helper:
-
 ```bash
 scripts/build.sh
 ```
 
-Or configure and build manually:
+Manual commands:
 
 ```bash
-cmake -S . -B build -G Ninja -DPICO_BOARD=pico
-cmake --build build --target xlrs_tx xlrs_rx
+pio run -e tx_lora_pico
+pio run -e rx_lora_pico
 ```
 
-If you do not have a local SDK checkout yet, CMake can fetch it into `build/`:
+UF2 outputs:
 
-```bash
-PICO_SDK_FETCH_FROM_GIT=ON scripts/build.sh
+```text
+.pio/build/tx_lora_pico/firmware.uf2
+.pio/build/rx_lora_pico/firmware.uf2
 ```
-
-Build outputs are written under `build/`, including `xlrs_tx.uf2` and
-`xlrs_rx.uf2`.
 
 ## Test
-
-The pure-logic layers have a host-native test suite that runs off-device, with
-no Pico SDK or hardware required:
 
 ```bash
 scripts/test.sh
 ```
 
-Run clang-tidy against the host-native compile database:
+Equivalent:
 
 ```bash
-scripts/lint.sh
-```
-
-If `clang-tidy` is not on `PATH`, point the helper at it:
-
-```bash
-CLANG_TIDY=/path/to/clang-tidy scripts/lint.sh
+pio test -e native
 ```
 
 ## Flash
 
-Build first:
-
-```bash
-scripts/build.sh
-```
-
-Flash one board at a time. Hold BOOTSEL while plugging in the Pico, then run:
+Hold BOOTSEL while plugging in one Pico, then run:
 
 ```bash
 scripts/flash.sh tx
 scripts/flash.sh rx
 ```
 
-To flash both, the helper pauses between boards:
+The helper flashes:
 
-```bash
-scripts/flash.sh both
+```text
+tx -> .pio/build/tx_lora_pico/firmware.uf2
+rx -> .pio/build/rx_lora_pico/firmware.uf2
 ```
 
 Force a method if needed:
@@ -89,27 +67,16 @@ FLASH_METHOD=uf2 scripts/flash.sh tx
 FLASH_METHOD=picotool scripts/flash.sh rx
 ```
 
-## Monitor
+## Serial CLI
 
-Diagnostics print over USB CDC stdio. The GP8/GP9 UART is reserved for the
-controller side on TX and CRSF on RX.
+USB serial runs at 115200 baud:
 
-Identify the Pico USB serial ports:
-
-```bash
-ls /dev/cu.usbmodem* /dev/tty.usbmodem* 2>/dev/null
-```
-
-Monitor both boards:
-
-```bash
-TX_PORT=/dev/cu.usbmodem101 RX_PORT=/dev/cu.usbmodem102 scripts/monitor.sh both
-```
-
-Build, flash, and monitor in one flow:
-
-```bash
-scripts/flash-monitor.sh tx
-scripts/flash-monitor.sh rx
-scripts/flash-monitor.sh both
+```text
+bind get
+bind set <phrase>
+bind clear
+rate L250
+rate L100
+status
+reboot
 ```

@@ -1,43 +1,19 @@
-# XLRS Documentation
+# Documentation
 
-This documentation is organized for contributors bringing up, debugging, and
-extending the XLRS TX/RX firmware.
+The active firmware is a clean PlatformIO RP2040/Pico + SX1280 LoRa TX/RX pair.
+It is ELRS-like, but not ExpressLRS OTA compatible.
 
 ## Start Here
 
-- [Getting Started](getting-started.md)
 - [Build, Test, Flash](build-test-flash.md)
-- [Troubleshooting](troubleshooting/index.md)
-
-## Hardware
-
+- [Getting Started](getting-started.md)
 - [Pinout](hardware/pinout.md)
-- [SX1280 Wiring](hardware/sx1280-wiring.md)
-- [Bench Bring-Up](hardware/bench-bringup.md)
-- [Bench Link Acquisition Retrospective (May 2026)](hardware/bench-link-acquisition-retrospective.md)
 
-## Developer Guide
+## Current Interfaces
 
-- [Architecture](developer/architecture.md)
-- [Terminology](developer/terminology.md)
-- [Code Map](developer/code-map.md)
-- [Testing](developer/testing.md)
-- [XLRS And ExpressLRS Comparison](developer/elrs-comparison.md)
-- [Timing And Scheduler](developer/timing-and-scheduler.md)
-- [OTA Protocol](developer/ota-protocol.md)
-- [Telemetry And Link Stats](developer/telemetry-and-link-stats.md)
-- [Configuration](developer/configuration.md)
-- [Safety And Failsafe](developer/safety-and-failsafe.md)
+- TX: CRSF handset input on GP8/GP9 UART.
+- RX: CRSF RC and link-stat output on GP8/GP9 UART.
+- USB serial CLI on both roles for binding phrase, rate, status, and reboot.
 
-## Interfaces
-
-- [Interface Overview](interfaces/index.md)
-- [TX Controller UART](interfaces/tx-controller-uart.md)
-- [TX Controller CRSF](interfaces/tx-controller-crsf.md)
-- [RX CRSF](interfaces/rx-crsf.md)
-- [RF Config Storage](interfaces/rf-config-storage.md)
-
-## CRSF
-
-- [CRSF Features](crsf/index.md)
-- [CRSF Binding](crsf/binding.md)
+Older XLRS/Pico SDK design notes may still exist in this tree for reference, but
+they are no longer the active build contract.

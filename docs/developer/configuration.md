@@ -2,8 +2,8 @@
 
 Configuration for the **active PlatformIO firmware** (`src/`). Build-time options
 are flags in [platformio.ini](../../platformio.ini); runtime options are set over
-the USB serial CLI and persisted in flash. (The legacy `lib/xlrs/` core used CMake
-cache variables instead — those do not apply here.)
+the USB serial CLI and persisted in flash. (The legacy XLRS core under `_legacy/`
+used CMake cache variables instead — those do not apply here.)
 
 ## 1. Build-time configuration
 

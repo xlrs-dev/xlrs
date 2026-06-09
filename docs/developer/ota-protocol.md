@@ -52,8 +52,8 @@ valid RC frame resets local sequence tracking, receives on `hopForSequence()`,
 and then starts listening on `nextHopAfterReceivedSequence()` so TX/RX alignment
 recovers from link drops.
 
-The legacy CMake/Pico SDK frame implementation under `lib/xlrs/ota/` remains in
-the tree for reference, but it is not the active PlatformIO OTA contract.
+The legacy CMake/Pico SDK frame implementation under `_legacy/xlrs/ota/` remains
+in the tree for reference, but it is not the active PlatformIO OTA contract.
 
 See [architecture.md](architecture.md), [configuration.md](configuration.md), and
 [terminology.md](terminology.md) for current constraints.

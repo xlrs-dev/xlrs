@@ -46,14 +46,14 @@ RX share one `main.cpp`.
 | `scripts/` | `build.sh`, `test.sh`, `flash.sh`, `lint.sh`, `monitor.sh`, `check-env.sh` |
 | `datasheets/` | Vendor datasheets (`scripts/fetch-datasheets.sh`) |
 
-## Legacy XLRS core (`lib/xlrs/`, `apps/`)
+## Legacy XLRS core (`_legacy/`)
 
-`lib/xlrs/` and `apps/tx`, `apps/rx` hold an earlier clean-slate, layered
-"XLRS core" written against a CMake/Pico-SDK design (see
-[architecture.md](architecture.md) for that design's intent). It is **not** built
-by PlatformIO and does not flash. It is currently kept for reference and is
-exercised only by the CMake lint/test project under `test/`. Do not assume the
-flashing firmware behaves as those modules describe — `src/` is the source of
-truth.
+`_legacy/xlrs/` (formerly `lib/xlrs/`) and `_legacy/apps/` (formerly `apps/`)
+hold an earlier clean-slate, layered "XLRS core" written against a CMake/Pico-SDK
+design (see [architecture.md](architecture.md) for that design's intent). It is
+**not** built by PlatformIO and does not flash — nothing in the active build
+depends on it. It is kept for reference only; see
+[`_legacy/README.md`](../../_legacy/README.md). Do not assume the flashing
+firmware behaves as those modules describe — `src/` is the source of truth.
 
 Naming follows [terminology.md](terminology.md).

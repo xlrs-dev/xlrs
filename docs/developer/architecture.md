@@ -1,9 +1,10 @@
 # Architecture
 
 This describes the **active PlatformIO firmware** under `src/` — the image that
-builds and flashes. For the earlier clean-slate layered design (the `lib/xlrs/`
-core), see [the design-intent appendix](#appendix-legacy-xlrs-core-design); that
-tree is reference-only and is not what runs on hardware.
+builds and flashes. For the earlier clean-slate layered design (the XLRS core now
+under `_legacy/`), see
+[the design-intent appendix](#appendix-legacy-xlrs-core-design); that tree is
+reference-only and is not what runs on hardware.
 
 ## Overview
 
@@ -126,11 +127,11 @@ to reason about timing and acquisition on the bench. See
 
 ## Appendix: legacy XLRS-core design
 
-`lib/xlrs/` and `apps/tx`, `apps/rx` contain an earlier, more ambitious
+`_legacy/xlrs/` and `_legacy/apps/` contain an earlier, more ambitious
 clean-slate design: a strictly layered core (PHY / timing / FHSS / OTA / crypto /
 link / util) with a dual-core split, a pluggable `ICipher` for a future AEAD
 secure link, and Pico-SDK hardware adapters. That design is **not** the firmware
-that flashes today — it is linted/unit-tested through the CMake project under
-`test/` and kept for reference. Its layering, crypto/nonce reasoning, and PFD
-tuning notes remain useful background, but where it disagrees with the `src/`
-firmware above, **`src/` is authoritative**.
+that flashes today — it is kept under [`_legacy/`](../../_legacy/README.md) for
+reference. Its layering, crypto/nonce reasoning, and PFD tuning notes remain
+useful background, but where it disagrees with the `src/` firmware above,
+**`src/` is authoritative**.

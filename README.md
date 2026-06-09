@@ -171,7 +171,6 @@ and [docs/hardware/sx1280-wiring.md](docs/hardware/sx1280-wiring.md).
 ## Repository Layout
 
 ```text
-apps/                 (legacy CMake role mains — not built by PlatformIO)
 include/
   lora_link/          public protocol + scheduler + control-frame headers
   rc_handset/         RC handset module headers
@@ -186,20 +185,20 @@ lib/
   crsfSerial/         CRSF serial parsing
   UARTProtocol/       handset↔TX UART protocol
   crc8/               CRSF CRC8
-  xlrs/               legacy XLRS core (CMake-linted, not flashed — see below)
-test/                 host-native Unity tests (CMake project, used by lint)
+test/                 host-native Unity tests (pio test -e native)
 tools/rc-webui/       browser-based RC config tool
 docs/                 developer + hardware + interface + troubleshooting docs
 scripts/              build/test/flash/lint/monitor helpers
 datasheets/           vendor datasheets (fetch with scripts/fetch-datasheets.sh)
 platformio.ini        build environments and pin/rate flags
+_legacy/              earlier XLRS core — reference only, not built (see below)
 ```
 
-> **Note on `lib/xlrs/` and `apps/`.** These hold an earlier clean-slate "XLRS
-> core" (a CMake/Pico-SDK layered design). They are linted and unit-tested via
-> the CMake project under `test/`, but the firmware that actually builds and
-> flashes is the PlatformIO `src/` tree above. Treat `lib/xlrs/` as reference
-> until it is either folded in or removed.
+> **Note on `_legacy/`.** `_legacy/xlrs/` (formerly `lib/xlrs/`) and
+> `_legacy/apps/` (formerly `apps/`) hold an earlier clean-slate "XLRS core" — a
+> CMake/Pico-SDK layered design. Nothing in the active build depends on it and
+> PlatformIO does not scan it; the firmware that builds and flashes is the
+> PlatformIO `src/` tree above. See [_legacy/README.md](_legacy/README.md).
 
 A fuller map is in [docs/developer/code-map.md](docs/developer/code-map.md).
 

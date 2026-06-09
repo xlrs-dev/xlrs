@@ -50,7 +50,8 @@ CRSF handset ─▶ TX ─▶ SX1280 LoRa + FHSS ─▶ RX ─▶ CRSF flight co
 
 ---
 
-The current build contract is the PlatformIO `src/` firmware. The `lib/xlrs/`
-core and `apps/` mains are an earlier clean-slate design kept for reference
-(linted/tested via the CMake project under `test/`); some developer notes still
-describe that design's intent. Where they disagree with `src/`, `src/` wins.
+The current build contract is the PlatformIO `src/` firmware. An earlier
+clean-slate design (the XLRS core) now lives under
+[`_legacy/`](../_legacy/README.md), reference-only and not built; some developer
+notes still describe that design's intent. Where they disagree with `src/`,
+`src/` wins.

@@ -80,10 +80,10 @@ Runtime configurations are dynamically resolved on boot, computed mathematically
   * **Implemented:** `linkUidFromPhrase()` in [`lib/xlrs/link/Uid.h`](../../lib/xlrs/link/Uid.h)
     (big-endian split of the hash). Verified in the native suite: deterministic, phrase-sensitive,
     and the bind property (same phrase ⇒ identical FHSS sequence; else isolation).
-  * **Role:** Seeds the FHSS pseudorandom hop sequence and forms the radio's hardware Sync Word
-    (`syncWordFromUid()` — the **low** 16 bits, since FNV-1a's high bits don't avalanche for
-    phrases differing only in the trailing byte; `IRadioPhy::setSyncWord`) to prevent
-    cross-operator interference.
+  * **Role:** Seeds the FHSS pseudorandom hop sequence and forms the radio's hardware sync word.
+    In the active PlatformIO SX1280 path, `syncWordFromUid()` returns the actual 8-bit RadioLib
+    sync word after mixing all UID bytes and avoiding zero/public sync values. OTA `uid_check`
+    is a 32-bit FNV-1a check over all 8 UID bytes.
 * **Device Serial (8 bytes / 64-bit)**
   * **Source:** Read directly from the microcontroller's unique board ID (`flash_get_unique_board_id()`).
   * **Role:** Identifies the specific hardware board for logging and remote diagnostic operations. It is *never* used for link-addressing or FHSS seeding to preserve bind-phrase flexibility.

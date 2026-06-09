@@ -1,5 +1,6 @@
 build/
 build-tests/
+.pio/
 CMakeFiles/
 CMakeCache.txt
 compile_commands.json

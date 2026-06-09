@@ -1,18 +1,12 @@
 # Getting Started
 
-XLRS is the firmware for a paired TX/RX radio bridge:
+This firmware is a paired RP2040/Pico + SX1280 LoRa bridge:
 
 ```text
-Controller UART or CRSF -> xlrs_tx -> SX1280 RF link -> xlrs_rx -> CRSF UART -> Flight controller
+CRSF handset -> tx_lora_pico -> SX1280 LoRa/FHSS -> rx_lora_pico -> CRSF flight controller
 ```
 
-The fastest path for a new contributor is:
-
-1. Read [developer/terminology.md](developer/terminology.md).
-2. Run the host-native test suite.
-3. Build both firmware images.
-4. Flash and monitor TX/RX boards.
-5. Use [troubleshooting/index.md](troubleshooting/index.md) for bring-up.
+Build and test from the repository root:
 
 ```bash
 scripts/check-env.sh
@@ -20,5 +14,26 @@ scripts/test.sh
 scripts/build.sh
 ```
 
-If the firmware builds and the native tests pass, continue with
-[Build, Test, Flash](build-test-flash.md).
+Flash TX and RX separately in BOOTSEL mode:
+
+```bash
+scripts/flash.sh tx
+scripts/flash.sh rx
+```
+
+After flashing, open the USB serial console at 115200 baud and check both
+devices:
+
+```text
+status
+bind get
+```
+
+Both devices must report the same binding phrase. Change and persist it with:
+
+```text
+bind set your-phrase
+reboot
+```
+
+See [Build, Test, Flash](build-test-flash.md) for the complete workflow.

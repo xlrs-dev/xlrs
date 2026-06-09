@@ -1,14 +1,20 @@
 # Pinout
 
-Pin defaults are CMake cache variables and can be overridden at configure time.
+Pin defaults are PlatformIO build flags in [platformio.ini](../../platformio.ini).
 
-## UART / CRSF
+## CRSF UART
 
 | Signal | Default |
 | --- | --- |
 | UART TX | GP8 |
 | UART RX | GP9 |
-| Baud | 420000 |
+| Baud | 400000 |
+
+TX uses this UART for CRSF handset input and telemetry back to the handset. RX
+uses it for CRSF RC and link-stat output to the flight controller.
+
+The `rc-rp2350` handset firmware uses the same UART pins for CRSF output to the
+TX module.
 
 ## SX1280
 
@@ -24,24 +30,50 @@ Pin defaults are CMake cache variables and can be overridden at configure time.
 | RXEN | GP14 |
 | TXEN | GP15 |
 
-Status LED (TX and RX) defaults to **GP10** (Pico physical pin 13), **active-low** (GPIO sinks current).
+The status LED defaults to GP25.
+
+## RC RP2350 Handset Inputs
+
+The `rc-rp2350` bring-up firmware currently reads four ADC inputs and four
+3-position switches:
+
+| Function | Default |
+| --- | --- |
+| Aileron ADC | GP26 |
+| Elevator ADC | GP27 |
+| Rudder ADC | GP28 |
+| Throttle ADC | GP29 |
+| Switch A | GP1, GP2 |
+| Switch B | GP3, GP6 |
+| Switch C | GP7, GP10 |
+| Switch D | GP11, GP12 |
+| Power button | GP22 |
+| Power I2C SDA | GP4 |
+| Power I2C SCL | GP5 |
+
+## RC Handset Power
+
+| Signal | Default |
+| --- | --- |
+| Power/QON button | GP22, active low |
+| Power I2C SDA | GP4 |
+| Power I2C SCL | GP5 |
+| BQ2562X I2C address | `0x6A` |
+
+`rc-rp2350` can gate boot on a held power button via `RC_SKIP_POWER_ON_SEQUENCE=0`.
+Long-press power-off uses the same GPIO as the POWMAN wake source and requests
+BQ2562X ship mode when the charger is present.
 
 ## Override Example
 
-```bash
-cmake -S . -B build -G Ninja \
-  -DXLRS_UART_TX_PIN=8 \
-  -DXLRS_UART_RX_PIN=9 \
-  -DXLRS_CRSF_TX_PIN=8 \
-  -DXLRS_CRSF_RX_PIN=9 \
-  -DXLRS_STATUS_LED_PIN=10 \
-  -DXLRS_SX128X_SPI_SCK=18 \
-  -DXLRS_SX128X_SPI_MOSI=19 \
-  -DXLRS_SX128X_SPI_MISO=16 \
-  -DXLRS_SX128X_SPI_CS=17 \
-  -DXLRS_SX128X_SPI_BUSY=20 \
-  -DXLRS_SX128X_SPI_DIO1=21 \
-  -DXLRS_SX128X_SPI_RST=22 \
-  -DXLRS_SX128X_RXEN=14 \
-  -DXLRS_SX128X_TXEN=15
+Edit or extend the relevant environment in `platformio.ini`:
+
+```ini
+build_flags =
+    ${lora_pico_base.build_flags}
+    -DLORA_TX_ROLE=1
+    -DDEFAULT_BINDING_PHRASE=\"your-phrase\"
+    -DCRSF_UART_TX_PIN=8
+    -DCRSF_UART_RX_PIN=9
+    -DSTATUS_LED_PIN=25
 ```

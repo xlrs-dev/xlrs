@@ -2,24 +2,43 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-build_dir="${BUILD_DIR:-${repo_root}/build}"
-pico_board="${PICO_BOARD:-pico}"
-cmake_generator="${CMAKE_GENERATOR:-Ninja}"
+cd "${repo_root}"
 
-if [[ -z "${PICO_SDK_PATH:-}" && -d /Users/sawan/projects/pico/pico-sdk ]]; then
-  export PICO_SDK_PATH=/Users/sawan/projects/pico/pico-sdk
-fi
+usage() {
+  printf 'Usage: %s [tx|rx|rc|both|all]\n' "$0"
+}
 
-if [[ -z "${PICO_TOOLCHAIN_PATH:-}" && -x /Users/sawan/projects/pico/toolchain/xpack-arm-none-eabi/bin/arm-none-eabi-gcc ]]; then
-  export PICO_TOOLCHAIN_PATH=/Users/sawan/projects/pico/toolchain/xpack-arm-none-eabi
-fi
+build_one() {
+  case "$1" in
+    tx) pio run -e tx_lora_pico ;;
+    rx) pio run -e rx_lora_pico ;;
+    rc) pio run -e rc-rp2350 -j1 || pio run -e rc-rp2350 -j1 ;;
+    *)
+      usage >&2
+      exit 2
+      ;;
+  esac
+}
 
-"${repo_root}/scripts/check-env.sh"
-
-cmake_args=(-S "${repo_root}" -B "${build_dir}" -G "${cmake_generator}" -DPICO_BOARD="${pico_board}")
-if [[ "${PICO_SDK_FETCH_FROM_GIT:-}" == "ON" || "${PICO_SDK_FETCH_FROM_GIT:-}" == "1" ]]; then
-  cmake_args+=(-DPICO_SDK_FETCH_FROM_GIT=ON)
-fi
-
-cmake "${cmake_args[@]}"
-cmake --build "${build_dir}" --target xlrs_tx xlrs_rx
+target="${1:-both}"
+case "${target}" in
+  both)
+    build_one tx
+    build_one rx
+    ;;
+  all)
+    build_one tx
+    build_one rx
+    build_one rc
+    ;;
+  tx|rx|rc)
+    build_one "${target}"
+    ;;
+  -h|--help)
+    usage
+    ;;
+  *)
+    usage >&2
+    exit 2
+    ;;
+esac

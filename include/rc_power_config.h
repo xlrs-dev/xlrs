@@ -16,3 +16,31 @@
 #ifndef RC_SKIP_POWER_ON_SEQUENCE
 #define RC_SKIP_POWER_ON_SEQUENCE 0
 #endif
+
+#ifndef RC_POWER_BUTTON_PIN
+#define RC_POWER_BUTTON_PIN 22
+#endif
+
+#ifndef RC_POWER_ON_HOLD_MS
+#define RC_POWER_ON_HOLD_MS 5000u
+#endif
+
+#ifndef RC_POWER_OFF_HOLD_MS
+#define RC_POWER_OFF_HOLD_MS 2500u
+#endif
+
+#ifndef RC_POWER_I2C_SDA_PIN
+#define RC_POWER_I2C_SDA_PIN 4
+#endif
+
+#ifndef RC_POWER_I2C_SCL_PIN
+#define RC_POWER_I2C_SCL_PIN 5
+#endif
+
+#ifndef RC_POWER_I2C_HZ
+#define RC_POWER_I2C_HZ 100000u
+#endif
+
+#ifndef RC_POWER_BATTERY_POLL_MS
+#define RC_POWER_BATTERY_POLL_MS 1000u
+#endif

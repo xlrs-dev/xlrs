@@ -59,6 +59,9 @@ interface DeviceSession {
   config: RcConfig;
   state: LiveState | null;
   binding: BindingInfo | null;
+  streamEnabled: boolean;
+  pollTimer: number;
+  polling: boolean;
   dirty: boolean;
   logLines: string[];
 }
@@ -106,6 +109,7 @@ const ui: UiState = {
 };
 
 const appRoot = document.querySelector<HTMLDivElement>("#app")!;
+let renderTimer = 0;
 
 if (!navigator.serial) {
   ui.statusText = "Use Chrome or Edge over localhost/HTTPS to enable Web Serial.";
@@ -176,6 +180,9 @@ function createSession(key: DeviceKey, label: string): DeviceSession {
     config: cloneConfig(defaultConfig),
     state: null,
     binding: null,
+    streamEnabled: false,
+    pollTimer: 0,
+    polling: false,
     dirty: false,
     logLines: [],
   };
@@ -192,11 +199,13 @@ function createSession(key: DeviceKey, label: string): DeviceSession {
     appendLog(session, `> ${line}`);
   });
   transport.on("line", ({ line }) => {
+    if (line.startsWith("rc.v1 state ")) return;
     appendLog(session, line);
   });
   transport.on("message", ({ message }) => {
     applyMessage(session, message);
-    render();
+    if (message.kind === "state") updateLiveStatePanel(session);
+    else render();
   });
   transport.on("error", ({ error }) => {
     appendLog(session, `! ${errorToString(error)}`);
@@ -206,6 +215,10 @@ function createSession(key: DeviceKey, label: string): DeviceSession {
 }
 
 function render(): void {
+  if (renderTimer !== 0) {
+    window.clearTimeout(renderTimer);
+    renderTimer = 0;
+  }
   appRoot.innerHTML = `
     <main class="app-shell">
       <section class="hero panel">
@@ -241,6 +254,24 @@ function render(): void {
   `;
 }
 
+function scheduleRender(): void {
+  if (renderTimer !== 0) return;
+  renderTimer = window.setTimeout(() => {
+    renderTimer = 0;
+    if (isEditingElement(document.activeElement)) {
+      scheduleRender();
+      return;
+    }
+    render();
+  }, 500);
+}
+
+function isEditingElement(element: Element | null): boolean {
+  return element instanceof HTMLInputElement ||
+    element instanceof HTMLTextAreaElement ||
+    element instanceof HTMLSelectElement;
+}
+
 function connectionPanel(session: DeviceSession): string {
   const connected = isConnected(session);
   const caps = session.caps.size ? Array.from(session.caps).sort().join(", ") : "none";
@@ -259,7 +290,7 @@ function connectionPanel(session: DeviceSession): string {
       <div class="actions">
         <button data-action="connect" data-device="${session.key}" ${disabled(!navigator.serial)}>Connect</button>
         <button class="secondary" data-action="discover" data-device="${session.key}" ${disabled(!connected)}>Discover</button>
-        <button class="secondary" data-action="stream" data-device="${session.key}" ${disabled(!connected)}>Stream state</button>
+        <button class="secondary" data-action="stream" data-device="${session.key}" ${disabled(!connected)}>${session.streamEnabled ? "Stop stream" : "Stream state"}</button>
         <button class="secondary" data-action="disconnect" data-device="${session.key}" ${disabled(!connected)}>Disconnect</button>
       </div>
       ${liveState(session)}
@@ -268,16 +299,43 @@ function connectionPanel(session: DeviceSession): string {
 }
 
 function liveState(session: DeviceSession): string {
-  if (!session.state) return `<p class="muted state-empty">No live state yet.</p>`;
+  if (!session.state) return `<p class="muted state-empty" data-live-state="${session.key}">No live state yet.</p>`;
   return `
-    <div class="live-grid">
-      <div><span>ADC</span><strong>${escapeHtml(session.state.adc.join(", ") || "-")}</strong></div>
-      <div><span>Channels</span><strong>${escapeHtml(session.state.ch.join(", ") || "-")}</strong></div>
-      <div><span>Toggles</span><strong>${escapeHtml(session.state.toggles.join(", ") || "-")}</strong></div>
-      <div><span>Link</span><strong>LQ ${escapeHtml(session.state.lq)} RSSI ${escapeHtml(session.state.rssi)} SNR ${escapeHtml(session.state.snr)}</strong></div>
-      <div><span>Battery</span><strong>TX ${mv(session.state.txBattMv)} RX ${mv(session.state.rxBattMv)}</strong></div>
+    <div class="live-grid" data-live-state="${session.key}">
+      <div><span>ADC</span><strong data-live-field="adc">${escapeHtml(session.state.adc.join(", ") || "-")}</strong></div>
+      <div><span>Channels</span><strong data-live-field="ch">${escapeHtml(session.state.ch.join(", ") || "-")}</strong></div>
+      <div><span>Toggles</span><strong data-live-field="toggles">${escapeHtml(session.state.toggles.join(", ") || "-")}</strong></div>
+      <div><span>Link</span><strong data-live-field="link">${liveLinkText(session.state)}</strong></div>
+      <div><span>Battery</span><strong data-live-field="battery">${liveBatteryText(session.state)}</strong></div>
     </div>
   `;
+}
+
+function updateLiveStatePanel(session: DeviceSession): void {
+  if (!session.state) return;
+  const root = document.querySelector<HTMLElement>(`[data-live-state="${session.key}"]`);
+  if (!root || root.classList.contains("state-empty")) {
+    scheduleRender();
+    return;
+  }
+  setLiveField(root, "adc", session.state.adc.join(", ") || "-");
+  setLiveField(root, "ch", session.state.ch.join(", ") || "-");
+  setLiveField(root, "toggles", session.state.toggles.join(", ") || "-");
+  setLiveField(root, "link", `LQ ${session.state.lq} RSSI ${session.state.rssi} SNR ${session.state.snr}`);
+  setLiveField(root, "battery", `TX ${mv(session.state.txBattMv)} RX ${mv(session.state.rxBattMv)}`);
+}
+
+function setLiveField(root: HTMLElement, field: string, value: string): void {
+  const element = root.querySelector<HTMLElement>(`[data-live-field="${field}"]`);
+  if (element) element.textContent = value;
+}
+
+function liveLinkText(state: LiveState): string {
+  return escapeHtml(`LQ ${state.lq} RSSI ${state.rssi} SNR ${state.snr}`);
+}
+
+function liveBatteryText(state: LiveState): string {
+  return escapeHtml(`TX ${mv(state.txBattMv)} RX ${mv(state.rxBattMv)}`);
 }
 
 function terminalPanel(session: DeviceSession): string {
@@ -540,7 +598,11 @@ async function handleAction(target: HTMLElement): Promise<void> {
     return;
   }
   if (action === "connect" && session) await connect(session);
-  if (action === "disconnect" && session) await session.transport.disconnect();
+  if (action === "disconnect" && session) {
+    stopStatePolling(session);
+    await session.transport.streamState(250, false).catch(() => undefined);
+    await session.transport.disconnect();
+  }
   if (action === "discover" && session) await discover(session);
   if (action === "stream" && session) await streamState(session);
   if (action === "clear-log" && session) {
@@ -568,6 +630,7 @@ async function handleAction(target: HTMLElement): Promise<void> {
 async function connect(session: DeviceSession): Promise<void> {
   if (isConnected(session)) await session.transport.disconnect();
   await session.transport.connect({ useRememberedPort: false });
+  await session.transport.streamState(250, false).catch(() => undefined);
   await discover(session);
 }
 
@@ -579,10 +642,44 @@ async function discover(session: DeviceSession): Promise<void> {
 }
 
 async function streamState(session: DeviceSession): Promise<void> {
-  await session.transport.streamState(100, true);
-  const response = await session.transport.getState();
-  session.state = normalizeState(response.fields);
-  setStatus(`${session.label} live state stream enabled.`, "ok");
+  const enable = !session.streamEnabled;
+  session.streamEnabled = enable;
+  if (enable) {
+    await session.transport.streamState(250, false).catch(() => undefined);
+    startStatePolling(session);
+  } else {
+    stopStatePolling(session);
+    await session.transport.streamState(250, false).catch(() => undefined);
+  }
+  setStatus(`${session.label} live state ${enable ? "polling enabled" : "polling stopped"}.`, "ok");
+  render();
+}
+
+function startStatePolling(session: DeviceSession): void {
+  stopStatePolling(session);
+  const poll = async () => {
+    if (!session.streamEnabled || session.polling || !isConnected(session)) return;
+    session.polling = true;
+    try {
+      const response = await session.transport.getState();
+      session.state = normalizeState(response.fields);
+      updateLiveStatePanel(session);
+    } catch (error) {
+      appendLog(session, `! state poll: ${errorToString(error)}`);
+    } finally {
+      session.polling = false;
+    }
+  };
+  void poll();
+  session.pollTimer = window.setInterval(() => void poll(), 500);
+}
+
+function stopStatePolling(session: DeviceSession): void {
+  if (session.pollTimer !== 0) {
+    window.clearInterval(session.pollTimer);
+    session.pollTimer = 0;
+  }
+  session.polling = false;
 }
 
 async function sendRaw(form: HTMLFormElement, session: DeviceSession): Promise<void> {

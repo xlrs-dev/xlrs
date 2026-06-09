@@ -1,8 +1,20 @@
 # OTA Protocol
 
-The OTA layer is versioned and type-multiplexed. It carries RC, sync, telemetry,
-bind, and MSP-oriented payloads without exposing radio-driver details above the
-PHY boundary.
+The active PlatformIO rewrite uses a compact fixed-size SX1280 LoRa OTA frame
+implemented in `src/protocol.cpp`. It carries packed RC channels and downlink
+telemetry without exposing radio-driver details above the PHY boundary.
+
+The current OTA frame is intentionally plaintext. It is protected by:
+
+- SX1280/RadioLib PHY CRC.
+- A firmware CRC16 over the encoded OTA bytes.
+- A 32-bit `uid_check` hashed from all 8 binding phrase UID bytes.
+
+`uid_check` is an anti-crosstalk identity filter, not authentication. The UID is
+derived from the binding phrase with FNV-1a, which is fast and
+non-cryptographic. There is no active ChaCha20-Poly1305/AEAD layer in the
+PlatformIO rewrite. Reintroducing authentication or encryption should be treated
+as a safety-sensitive OTA format change.
 
 Terminology:
 
@@ -11,46 +23,35 @@ Terminology:
 - `rc_payload` is packed RC channel data.
 - `telemetry_payload` is telemetry data inside an OTA telemetry frame.
 
-```mermaid
-graph TD
-    subgraph StandardFrame["Standard RC Frame (12 Bytes Total)"]
-        StdHeader["OTA Header<br/>(1 Byte / 8 bits)"]:::header
+## Active Frame Layout
 
-        subgraph StdPayload["Packed RC Payload (11 Bytes / 88 bits)"]
-            CH1["CH1 (11 bits)"]:::channel
-            CH2["CH2 (11 bits)"]:::channel
-            CH3["CH3 (11 bits)"]:::channel
-            CH4["CH4 (11 bits)"]:::channel
-            CH5["CH5 (11 bits)"]:::channel
-            CH6["CH6 (11 bits)"]:::channel
-            CH7["CH7 (11 bits)"]:::channel
-            CH8["CH8 (11 bits)"]:::channel
-        end
-    end
-
-    subgraph CompactFrame["Compact Shrink RC Frame (8 Bytes Total)"]
-        CmpHeader["OTA Header<br/>(1 Byte / 8 bits)"]:::header
-
-        subgraph CmpPayload["Packed RC Payload (7 Bytes / 56 bits)"]
-            CCH1["CH1 (10 bits)"]:::channel
-            CCH2["CH2 (10 bits)"]:::channel
-            CCH3["CH3 (10 bits)"]:::channel
-            CCH4["CH4 (10 bits)"]:::channel
-            CCH5["CH5 (10 bits)"]:::channel
-            SeqAck["Seq/Ack (6 bits)"]:::meta
-        end
-    end
-
-    classDef header fill:#d97706,stroke:#9a3412,stroke-width:2px,color:#fff;
-    classDef channel fill:#0284c7,stroke:#075985,stroke-width:2px,color:#fff;
-    classDef meta fill:#4b5563,stroke:#1f2937,stroke-width:2px,color:#fff;
-
-    class StdHeader,CmpHeader header;
-    class CH1,CH2,CH3,CH4,CH5,CH6,CH7,CH8,CCH1,CCH2,CCH3,CCH4,CCH5 channel;
-    class SeqAck meta;
+```text
+byte 0      magic
+byte 1      type: 1=RC, 2=Telemetry
+byte 2..3   sequence, big-endian
+byte 4..7   uid_check, big-endian
+byte 8      payload length
+byte 9..30  payload, padded to 22 bytes
+byte 31..32 CRC16-CCITT over bytes 0..30
 ```
 
-The detailed frame implementation lives under `lib/xlrs/ota/`.
+RC payloads carry 16 CRSF 11-bit channel values packed into 22 bytes.
+Telemetry payloads currently carry link quality, RSSI magnitude, SNR, and rate.
+
+## FHSS / Fixed Channel
+
+The firmware uses UID-derived FHSS by default. Shipped PlatformIO environments
+define `RF_FIXED_CHANNEL=-1`, which enables hopping through `fhssChannelFor()`.
+Set `RF_FIXED_CHANNEL` to a non-negative channel index only for bench/debug fixed
+channel operation.
+
+`g_hop` follows OTA RC frame sequence numbers. On RX re-acquisition, the first
+valid RC frame resets local sequence tracking, receives on `hopForSequence()`,
+and then starts listening on `nextHopAfterReceivedSequence()` so TX/RX alignment
+recovers from link drops.
+
+The legacy CMake/Pico SDK frame implementation under `lib/xlrs/ota/` remains in
+the tree for reference, but it is not the active PlatformIO OTA contract.
 
 See [architecture.md](architecture.md), [configuration.md](configuration.md), and
 [terminology.md](terminology.md) for current constraints.

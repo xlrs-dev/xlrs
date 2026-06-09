@@ -5,13 +5,14 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 target="${1:-}"
 
 usage() {
-  printf 'Usage: %s tx|rx|both\n' "$0"
+  printf 'Usage: %s tx|rx|rc|both|all\n' "$0"
   printf '\n'
-  printf 'Put one Pico in BOOTSEL mode before flashing each target.\n'
+  printf 'Put one board in BOOTSEL mode before flashing each target.\n'
   printf '\n'
   printf 'Optional env:\n'
   printf '  TX_UF2_VOLUME=/Volumes/RPI-RP2       Flash TX by UF2 copy\n'
   printf '  RX_UF2_VOLUME=/Volumes/RPI-RP2       Flash RX by UF2 copy\n'
+  printf '  RC_UF2_VOLUME=/Volumes/RPI-RP2       Flash RC by UF2 copy\n'
   printf '  UF2_VOLUME=/Volumes/RPI-RP2          Flash current target by UF2 copy\n'
   printf '  FLASH_METHOD=picotool|uf2|auto       Default: auto\n'
 }
@@ -98,6 +99,7 @@ flash_one() {
   case "${name}" in
     tx) env_name="tx_lora_pico" ;;
     rx) env_name="rx_lora_pico" ;;
+    rc) env_name="rc-rp2350" ;;
     *) printf 'Invalid role: %s\n' "${name}" >&2; exit 2 ;;
   esac
   local uf2="${repo_root}/.pio/build/${env_name}/firmware.uf2"
@@ -134,7 +136,7 @@ flash_one() {
 }
 
 case "${target}" in
-  tx|rx|both) ;;
+  tx|rx|rc|both|all) ;;
   -h|--help|"")
     usage
     exit 0
@@ -160,8 +162,16 @@ case "${target}" in
   rx)
     flash_one rx
     ;;
+  rc)
+    flash_one rc
+    ;;
   both)
     flash_one tx
     flash_one rx
+    ;;
+  all)
+    flash_one tx
+    flash_one rx
+    flash_one rc
     ;;
 esac

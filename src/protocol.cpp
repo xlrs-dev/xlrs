@@ -5,8 +5,8 @@
 namespace lora_link {
 
 const RateConfig kRates[2] = {
-    {"L250", 4000, 16, 812.5f, 6, 5},
-    {"L100", 10000, 128, 812.5f, 7, 5},
+    {"L250", 4000, 0, 4, 812.5f, 6, 5},
+    {"L100", 10000, 0, 4, 812.5f, 5, 5},
 };
 
 static constexpr uint32_t kConfigMagic = 0x314C524Cu; // LRL1
@@ -14,13 +14,21 @@ static constexpr uint8_t kConfigVersion = 1;
 static constexpr uint8_t kOtaMagic = 0xA7;
 static constexpr uint8_t kOtaHeaderSize = 9;
 static constexpr uint8_t kOtaCrcOffset = kOtaHeaderSize + kOtaPayloadSize;
+static constexpr uint8_t kOtaSyncPayloadSize = 16;
 static constexpr uint8_t kCrsfAddressFlightController = 0xC8;
 static constexpr uint8_t kCrsfAddressRadioTransmitter = 0xEA;
 static constexpr uint8_t kCrsfAddressCrsfTransmitter = 0xEE;
 static constexpr uint8_t kCrsfFrameRcChannelsPacked = 0x16;
 static constexpr uint8_t kCrsfFrameLinkStatistics = 0x14;
+static constexpr uint8_t kCrsfFrameXlrsBindingControl = 0x7D;
+static constexpr uint8_t kBindingControlVersion = 1;
+static constexpr uint8_t kBindingControlMagic[4] = {'X', 'L', 'R', 'S'};
 static constexpr uint16_t kSpikeJumpThreshold = 450;
 static constexpr uint16_t kSpikeHighThreshold = kCrsfRaw2000 - 24;
+static constexpr uint8_t kConfigRecordCrcSize = 4 + 1 + 1 + 33 + 1;
+
+static_assert(offsetof(ConfigRecord, crc) == kConfigRecordCrcSize,
+              "ConfigRecord crc offset must match explicit serialized CRC bytes");
 
 uint16_t crc16Ccitt(const uint8_t* data, size_t len) {
     uint16_t crc = 0xFFFF;
@@ -59,15 +67,45 @@ void deriveUid(const char* phrase, uint8_t uid[kUidSize]) {
 }
 
 uint32_t uidCheck(const uint8_t uid[kUidSize]) {
-    return (static_cast<uint32_t>(uid[0]) << 24) |
-           (static_cast<uint32_t>(uid[2]) << 16) |
-           (static_cast<uint32_t>(uid[5]) << 8) |
-           static_cast<uint32_t>(uid[7]);
+    uint32_t hash = 2166136261u;
+    for (uint8_t i = 0; i < kUidSize; ++i) {
+        hash ^= uid[i];
+        hash *= 16777619u;
+    }
+    return hash;
 }
 
-uint16_t syncWordFromUid(const uint8_t uid[kUidSize]) {
-    uint16_t word = static_cast<uint16_t>((uid[1] << 8) | uid[6]);
-    return word == 0 ? 0x12AD : word;
+uint8_t syncWordFromUid(const uint8_t uid[kUidSize]) {
+    uint8_t word = 0xA7;
+    for (uint8_t i = 0; i < kUidSize; ++i) {
+        word = static_cast<uint8_t>((word << 3) | (word >> 5));
+        word ^= static_cast<uint8_t>(uid[i] + 0x9Du + static_cast<uint8_t>(i * 0x13u));
+    }
+    word ^= static_cast<uint8_t>(uidCheck(uid) >> 24);
+    if (word == 0x00 || word == 0x34) word ^= 0x5A;
+    if (word == 0x00) word = 0x12;
+    return word;
+}
+
+bool validateBindingPhrase(const char* phrase) {
+    if (!phrase) return false;
+    size_t len = 0;
+    while (phrase[len]) {
+        const uint8_t c = static_cast<uint8_t>(phrase[len]);
+        if (c < 0x20 || c == 0x7F) return false;
+        ++len;
+        if (len > kBindingPhraseMaxLength) return false;
+    }
+    return len > 0;
+}
+
+void makeBindingStatus(const char* phrase, bool persisted, bool requiresReboot, BindingStatus& out) {
+    memset(&out, 0, sizeof(out));
+    if (phrase) strncpy(out.phrase, phrase, sizeof(out.phrase) - 1);
+    deriveUid(out.phrase, out.uid);
+    out.uidCheck = uidCheck(out.uid);
+    out.persisted = persisted;
+    out.requiresReboot = requiresReboot;
 }
 
 bool encodeOtaFrame(const OtaFrame& frame, uint8_t out[kOtaFrameSize]) {
@@ -98,12 +136,84 @@ bool decodeOtaFrame(const uint8_t in[kOtaFrameSize], uint32_t expectedUidCheck, 
                             static_cast<uint32_t>(in[7]);
     if (gotUid != expectedUidCheck || in[8] > kOtaPayloadSize) return false;
     out.type = static_cast<OtaType>(in[1]);
-    if (out.type != OtaType::Rc && out.type != OtaType::Telemetry) return false;
+    if (out.type != OtaType::Rc && out.type != OtaType::Telemetry && out.type != OtaType::Sync) return false;
     out.sequence = static_cast<uint16_t>((in[2] << 8) | in[3]);
     out.uidCheck = gotUid;
     out.payloadLen = in[8];
     memcpy(out.payload, &in[9], out.payloadLen);
     return true;
+}
+
+static void writeBe16(uint8_t* out, uint16_t value) {
+    out[0] = static_cast<uint8_t>(value >> 8);
+    out[1] = static_cast<uint8_t>(value);
+}
+
+static void writeBe32(uint8_t* out, uint32_t value) {
+    out[0] = static_cast<uint8_t>(value >> 24);
+    out[1] = static_cast<uint8_t>(value >> 16);
+    out[2] = static_cast<uint8_t>(value >> 8);
+    out[3] = static_cast<uint8_t>(value);
+}
+
+static uint16_t readBe16(const uint8_t* in) {
+    return static_cast<uint16_t>((static_cast<uint16_t>(in[0]) << 8) | in[1]);
+}
+
+static uint32_t readBe32(const uint8_t* in) {
+    return (static_cast<uint32_t>(in[0]) << 24) |
+           (static_cast<uint32_t>(in[1]) << 16) |
+           (static_cast<uint32_t>(in[2]) << 8) |
+           static_cast<uint32_t>(in[3]);
+}
+
+bool encodeOtaSyncPayload(const OtaSyncPayload& payload, uint8_t out[kOtaPayloadSize], uint8_t& payloadLen) {
+    if (!isValidRateIndex(payload.rateIndex) || !isValidRateIndex(payload.nextRateIndex) ||
+        payload.fhssHopInterval == 0) {
+        return false;
+    }
+    memset(out, 0, kOtaPayloadSize);
+    writeBe16(&out[0], payload.nonce);
+    writeBe16(&out[2], payload.fhssIndex);
+    out[4] = payload.rateIndex;
+    out[5] = payload.nextRateIndex;
+    writeBe32(&out[6], payload.switchSequence);
+    out[10] = payload.telemetryRatio;
+    out[11] = payload.fhssHopInterval;
+    writeBe32(&out[12], payload.txTick);
+    payloadLen = kOtaSyncPayloadSize;
+    return true;
+}
+
+bool decodeOtaSyncPayload(const OtaFrame& frame, OtaSyncPayload& out) {
+    if (frame.type != OtaType::Sync || frame.payloadLen != kOtaSyncPayloadSize) return false;
+    out.nonce = readBe16(&frame.payload[0]);
+    out.fhssIndex = readBe16(&frame.payload[2]);
+    out.rateIndex = frame.payload[4];
+    out.nextRateIndex = frame.payload[5];
+    out.switchSequence = readBe32(&frame.payload[6]);
+    out.telemetryRatio = frame.payload[10];
+    out.fhssHopInterval = frame.payload[11];
+    out.txTick = readBe32(&frame.payload[12]);
+    return isValidRateIndex(out.rateIndex) && isValidRateIndex(out.nextRateIndex) &&
+           out.fhssHopInterval != 0;
+}
+
+uint8_t rateIndexForConfig(const RateConfig& rate) {
+    for (uint8_t i = 0; i < 2; ++i) {
+        if (rate.intervalUs == kRates[i].intervalUs &&
+            rate.telemetryRatio == kRates[i].telemetryRatio &&
+            rate.fhssHopInterval == kRates[i].fhssHopInterval &&
+            rate.spreadingFactor == kRates[i].spreadingFactor &&
+            rate.codingRate == kRates[i].codingRate) {
+            return i;
+        }
+    }
+    return 0xFF;
+}
+
+bool isValidRateIndex(uint8_t rateIndex) {
+    return rateIndex < 2;
 }
 
 void packRcChannels11Bit(const uint16_t channels[kRcChannelCount], uint8_t out[22]) {
@@ -139,15 +249,18 @@ uint16_t clampCrsfRaw(uint16_t value) {
 bool sanitizeRcChannels(const uint16_t previous[kRcChannelCount], bool havePrevious,
                         uint16_t channels[kRcChannelCount]) {
     uint8_t largeJumpsToHigh = 0;
+    uint16_t sanitized[kRcChannelCount];
     for (uint8_t i = 0; i < kRcChannelCount; ++i) {
-        channels[i] = clampCrsfRaw(channels[i]);
+        sanitized[i] = clampCrsfRaw(channels[i]);
         if (havePrevious && previous) {
             const uint16_t oldValue = clampCrsfRaw(previous[i]);
-            const uint16_t delta = oldValue > channels[i] ? oldValue - channels[i] : channels[i] - oldValue;
-            if (delta >= kSpikeJumpThreshold && channels[i] >= kSpikeHighThreshold) ++largeJumpsToHigh;
+            const uint16_t delta = oldValue > sanitized[i] ? oldValue - sanitized[i] : sanitized[i] - oldValue;
+            if (delta >= kSpikeJumpThreshold && sanitized[i] >= kSpikeHighThreshold) ++largeJumpsToHigh;
         }
     }
-    return largeJumpsToHigh < 4;
+    if (largeJumpsToHigh >= 4) return false;
+    memcpy(channels, sanitized, sizeof(sanitized));
+    return true;
 }
 
 static bool hasLargeRcJump(const uint16_t previous[kRcChannelCount],
@@ -174,6 +287,35 @@ static bool rcChannelsMatchWithin(const uint16_t a[kRcChannelCount],
     return true;
 }
 
+static bool rcChannelsContinuePendingMove(const uint16_t previous[kRcChannelCount],
+                                          const uint16_t pending[kRcChannelCount],
+                                          const uint16_t candidate[kRcChannelCount],
+                                          uint16_t jumpThreshold,
+                                          uint16_t tolerance) {
+    bool sawLargePendingMove = false;
+    for (uint8_t i = 0; i < kRcChannelCount; ++i) {
+        const uint16_t oldValue = clampCrsfRaw(previous[i]);
+        const uint16_t pendingValue = clampCrsfRaw(pending[i]);
+        const uint16_t candidateValue = clampCrsfRaw(candidate[i]);
+        const uint16_t pendingDelta = oldValue > pendingValue ? oldValue - pendingValue
+                                                              : pendingValue - oldValue;
+        const uint16_t pendingToCandidate = pendingValue > candidateValue ? pendingValue - candidateValue
+                                                                          : candidateValue - pendingValue;
+        if (pendingDelta <= jumpThreshold) {
+            if (pendingToCandidate > tolerance) return false;
+            continue;
+        }
+
+        sawLargePendingMove = true;
+        if (pendingValue > oldValue) {
+            if (candidateValue + tolerance < pendingValue) return false;
+        } else if (pendingValue + tolerance < oldValue) {
+            if (candidateValue > pendingValue + tolerance) return false;
+        }
+    }
+    return sawLargePendingMove;
+}
+
 bool acceptRcChannelsWithSpikeGate(const uint16_t previous[kRcChannelCount], bool havePrevious,
                                    const uint16_t candidate[kRcChannelCount], RcSpikeGate& gate,
                                    uint16_t jumpThreshold, uint16_t confirmTolerance) {
@@ -189,23 +331,36 @@ bool acceptRcChannelsWithSpikeGate(const uint16_t previous[kRcChannelCount], boo
         gate.havePending = false;
         return true;
     }
+    if (gate.havePending &&
+        rcChannelsContinuePendingMove(previous, gate.pending, candidate, jumpThreshold, confirmTolerance)) {
+        gate.havePending = false;
+        return true;
+    }
     memcpy(gate.pending, candidate, sizeof(gate.pending));
     gate.havePending = true;
     return false;
 }
 
-void slewLimitPrimaryRcChannels(const uint16_t previous[kRcChannelCount], bool havePrevious,
-                                uint16_t channels[kRcChannelCount], uint16_t maxDelta) {
-    if (!havePrevious || !previous) return;
-    for (uint8_t i = 0; i < 4; ++i) {
-        const uint16_t oldValue = clampCrsfRaw(previous[i]);
-        channels[i] = clampCrsfRaw(channels[i]);
-        if (channels[i] > oldValue && channels[i] - oldValue > maxDelta) {
-            channels[i] = static_cast<uint16_t>(oldValue + maxDelta);
-        } else if (oldValue > channels[i] && oldValue - channels[i] > maxDelta) {
-            channels[i] = static_cast<uint16_t>(oldValue - maxDelta);
-        }
-    }
+bool isLinkFresh(uint32_t nowMs, uint32_t lastFrameMs, uint32_t timeoutMs) {
+    return lastFrameMs != 0 && static_cast<uint32_t>(nowMs - lastFrameMs) < timeoutMs;
+}
+
+bool shouldRequestTelemetry(uint16_t sequence, uint8_t telemetryRatio) {
+    return telemetryRatio != 0 && (sequence % telemetryRatio) == 0;
+}
+
+uint32_t telemetryListenWindowMs(const RateConfig& rate, uint8_t listenSlots) {
+    return (static_cast<uint32_t>(listenSlots) * rate.intervalUs + 999u) / 1000u;
+}
+
+uint16_t hopForSequence(uint16_t sequence, uint8_t telemetryRatio, uint8_t listenSlots) {
+    if (telemetryRatio == 0 || listenSlots == 0 || sequence == 0) return sequence;
+    const uint16_t previousTelemetryRequests = static_cast<uint16_t>(((sequence - 1u) / telemetryRatio) + 1u);
+    return static_cast<uint16_t>(sequence + previousTelemetryRequests * listenSlots);
+}
+
+uint16_t nextHopAfterReceivedSequence(uint16_t sequence, uint8_t telemetryRatio, uint8_t listenSlots) {
+    return hopForSequence(static_cast<uint16_t>(sequence + 1), telemetryRatio, listenSlots);
 }
 
 size_t encodeCrsfRcFrame(const uint16_t channels[kRcChannelCount], uint8_t* out, size_t outLen) {
@@ -260,13 +415,163 @@ size_t encodeCrsfLinkStats(int16_t rssiDbm, int8_t snr, uint8_t linkQuality, uin
     out[5] = linkQuality;
     out[6] = static_cast<uint8_t>(snr);
     out[7] = 0;
-    out[8] = 0;
-    out[9] = activeRate;
+    out[8] = activeRate; // CRSF rf_mode: expose active LoRa rate index to handset/FC UI.
+    out[9] = 0;          // uplink_tx_power is unknown here.
     out[10] = 0;
     out[11] = 0;
     out[12] = 0;
     out[13] = crsfCrc8(&out[2], 11);
     return 14;
+}
+
+static bool crsfAddressCanCarryBindingControl(uint8_t address) {
+    return address == kCrsfAddressRadioTransmitter || address == kCrsfAddressCrsfTransmitter;
+}
+
+static size_t boundedPhraseLen(const char* phrase) {
+    size_t phraseLen = 0;
+    while (phrase && phraseLen < kBindingPhraseMaxLength && phrase[phraseLen]) ++phraseLen;
+    return phraseLen;
+}
+
+static bool bindingControlMagicMatches(const uint8_t* payload, size_t payloadLen) {
+    return payloadLen >= sizeof(kBindingControlMagic) &&
+           memcmp(payload, kBindingControlMagic, sizeof(kBindingControlMagic)) == 0;
+}
+
+bool parseCrsfBindingRequestFrame(uint8_t byte, BindingControlRequest& out) {
+    static uint8_t buf[64];
+    static uint8_t pos = 0;
+    if (pos == 0 && !crsfAddressCanCarryBindingControl(byte)) {
+        return false;
+    }
+    buf[pos++] = byte;
+    if (pos == 2 && (buf[1] < 2 || buf[1] > 62)) {
+        pos = 0;
+        return false;
+    }
+    if (pos >= 2 && pos == static_cast<uint8_t>(buf[1] + 2)) {
+        const uint8_t len = buf[1];
+        const bool crcOk = crsfCrc8(&buf[2], len - 1) == buf[pos - 1];
+        const uint8_t payloadLen = static_cast<uint8_t>(len - 2);
+        const uint8_t* payload = &buf[3];
+        bool parsed = false;
+        if (crcOk && buf[2] == kCrsfFrameXlrsBindingControl &&
+            payloadLen >= 7 && bindingControlMagicMatches(payload, payloadLen) &&
+            payload[4] == kBindingControlVersion) {
+            const uint8_t phraseLen = payload[6];
+            if (phraseLen <= kBindingPhraseMaxLength &&
+                static_cast<uint8_t>(7 + phraseLen) <= payloadLen) {
+                memset(&out, 0, sizeof(out));
+                out.op = static_cast<BindingControlOp>(payload[5]);
+                memcpy(out.phrase, &payload[7], phraseLen);
+                out.phrase[phraseLen] = '\0';
+                parsed = true;
+            }
+        }
+        pos = 0;
+        return parsed;
+    }
+    if (pos >= sizeof(buf)) pos = 0;
+    return false;
+}
+
+size_t encodeCrsfBindingRequestFrame(const BindingControlRequest& request, uint8_t* out, size_t outLen) {
+    const size_t phraseLen = boundedPhraseLen(request.phrase);
+    const size_t payloadLen = 4 + 1 + 1 + 1 + phraseLen;
+    const size_t frameLen = payloadLen + 4; // address + length + type + payload + crc
+    if (!out || outLen < frameLen || payloadLen > 60) return 0;
+
+    out[0] = kCrsfAddressCrsfTransmitter;
+    out[1] = static_cast<uint8_t>(payloadLen + 2);
+    out[2] = kCrsfFrameXlrsBindingControl;
+    size_t pos = 3;
+    memcpy(&out[pos], kBindingControlMagic, sizeof(kBindingControlMagic));
+    pos += sizeof(kBindingControlMagic);
+    out[pos++] = kBindingControlVersion;
+    out[pos++] = static_cast<uint8_t>(request.op);
+    out[pos++] = static_cast<uint8_t>(phraseLen);
+    memcpy(&out[pos], request.phrase, phraseLen);
+    pos += phraseLen;
+    out[pos++] = crsfCrc8(&out[2], out[1] - 1);
+    return pos;
+}
+
+size_t encodeCrsfBindingResponseFrame(const BindingStatus& status, BindingResult result,
+                                      BindingControlOp op, uint8_t* out, size_t outLen) {
+    const size_t phraseLen = boundedPhraseLen(status.phrase);
+    const size_t payloadLen = 4 + 1 + 1 + 1 + 1 + 1 + 4 + kUidSize + 1 + phraseLen;
+    const size_t frameLen = payloadLen + 4; // address + length + type + payload + crc
+    if (!out || outLen < frameLen || payloadLen > 60) return 0;
+
+    out[0] = kCrsfAddressRadioTransmitter;
+    out[1] = static_cast<uint8_t>(payloadLen + 2);
+    out[2] = kCrsfFrameXlrsBindingControl;
+    size_t pos = 3;
+    memcpy(&out[pos], kBindingControlMagic, sizeof(kBindingControlMagic));
+    pos += sizeof(kBindingControlMagic);
+    out[pos++] = kBindingControlVersion;
+    out[pos++] = static_cast<uint8_t>(op);
+    out[pos++] = static_cast<uint8_t>(result);
+    out[pos++] = status.persisted ? 1 : 0;
+    out[pos++] = status.requiresReboot ? 1 : 0;
+    out[pos++] = static_cast<uint8_t>(status.uidCheck >> 24);
+    out[pos++] = static_cast<uint8_t>(status.uidCheck >> 16);
+    out[pos++] = static_cast<uint8_t>(status.uidCheck >> 8);
+    out[pos++] = static_cast<uint8_t>(status.uidCheck);
+    memcpy(&out[pos], status.uid, kUidSize);
+    pos += kUidSize;
+    out[pos++] = static_cast<uint8_t>(phraseLen);
+    memcpy(&out[pos], status.phrase, phraseLen);
+    pos += phraseLen;
+    out[pos++] = crsfCrc8(&out[2], out[1] - 1);
+    return pos;
+}
+
+bool parseCrsfBindingResponseFrame(uint8_t byte, BindingStatus& status, BindingResult& result,
+                                   BindingControlOp& op) {
+    static uint8_t buf[64];
+    static uint8_t pos = 0;
+    if (pos == 0 && !crsfAddressCanCarryBindingControl(byte)) {
+        return false;
+    }
+    buf[pos++] = byte;
+    if (pos == 2 && (buf[1] < 2 || buf[1] > 62)) {
+        pos = 0;
+        return false;
+    }
+    if (pos >= 2 && pos == static_cast<uint8_t>(buf[1] + 2)) {
+        const uint8_t len = buf[1];
+        const bool crcOk = crsfCrc8(&buf[2], len - 1) == buf[pos - 1];
+        const uint8_t payloadLen = static_cast<uint8_t>(len - 2);
+        const uint8_t* payload = &buf[3];
+        bool parsed = false;
+        if (crcOk && buf[2] == kCrsfFrameXlrsBindingControl &&
+            payloadLen >= 22 && bindingControlMagicMatches(payload, payloadLen) &&
+            payload[4] == kBindingControlVersion) {
+            const uint8_t phraseLen = payload[21];
+            if (phraseLen <= kBindingPhraseMaxLength &&
+                static_cast<uint8_t>(22 + phraseLen) <= payloadLen) {
+                memset(&status, 0, sizeof(status));
+                op = static_cast<BindingControlOp>(payload[5]);
+                result = static_cast<BindingResult>(payload[6]);
+                status.persisted = payload[7] != 0;
+                status.requiresReboot = payload[8] != 0;
+                status.uidCheck = (static_cast<uint32_t>(payload[9]) << 24) |
+                                  (static_cast<uint32_t>(payload[10]) << 16) |
+                                  (static_cast<uint32_t>(payload[11]) << 8) |
+                                  static_cast<uint32_t>(payload[12]);
+                memcpy(status.uid, &payload[13], kUidSize);
+                memcpy(status.phrase, &payload[22], phraseLen);
+                status.phrase[phraseLen] = '\0';
+                parsed = true;
+            }
+        }
+        pos = 0;
+        return parsed;
+    }
+    if (pos >= sizeof(buf)) pos = 0;
+    return false;
 }
 
 void configDefaults(DeviceConfig& cfg, const char* defaultPhrase) {
@@ -276,19 +581,37 @@ void configDefaults(DeviceConfig& cfg, const char* defaultPhrase) {
     cfg.rate = RateId::L100;
 }
 
+static void writeLe32(uint8_t* out, uint32_t value) {
+    out[0] = static_cast<uint8_t>(value);
+    out[1] = static_cast<uint8_t>(value >> 8);
+    out[2] = static_cast<uint8_t>(value >> 16);
+    out[3] = static_cast<uint8_t>(value >> 24);
+}
+
+static uint16_t configRecordCrc(const ConfigRecord& record) {
+    uint8_t bytes[kConfigRecordCrcSize] = {};
+    writeLe32(bytes, record.magic);
+    bytes[4] = record.version;
+    bytes[5] = record.rate;
+    memcpy(&bytes[6], record.bindingPhrase, sizeof(record.bindingPhrase));
+    bytes[39] = record.reserved;
+    return crc16Ccitt(bytes, sizeof(bytes));
+}
+
 ConfigRecord makeConfigRecord(const DeviceConfig& cfg) {
     ConfigRecord record{};
     record.magic = kConfigMagic;
     record.version = kConfigVersion;
     record.rate = static_cast<uint8_t>(cfg.rate);
     strncpy(record.bindingPhrase, cfg.bindingPhrase, sizeof(record.bindingPhrase) - 1);
-    record.crc = crc16Ccitt(reinterpret_cast<const uint8_t*>(&record), offsetof(ConfigRecord, crc));
+    record.reserved = 0;
+    record.crc = configRecordCrc(record);
     return record;
 }
 
 bool readConfigRecord(const ConfigRecord& record, DeviceConfig& cfg) {
     if (record.magic != kConfigMagic || record.version != kConfigVersion || record.rate > 1) return false;
-    const uint16_t crc = crc16Ccitt(reinterpret_cast<const uint8_t*>(&record), offsetof(ConfigRecord, crc));
+    const uint16_t crc = configRecordCrc(record);
     if (crc != record.crc || record.bindingPhrase[0] == '\0') return false;
     memset(&cfg, 0, sizeof(cfg));
     strncpy(cfg.bindingPhrase, record.bindingPhrase, sizeof(cfg.bindingPhrase) - 1);
@@ -297,14 +620,21 @@ bool readConfigRecord(const ConfigRecord& record, DeviceConfig& cfg) {
 }
 
 uint8_t fhssChannelFor(const uint8_t uid[kUidSize], uint16_t hop) {
-    uint16_t x = static_cast<uint16_t>((uid[0] << 8) | uid[3]);
-    x ^= static_cast<uint16_t>(hop * 0x45D9u);
-    x ^= static_cast<uint16_t>(x >> 7);
-    return static_cast<uint8_t>(x % 40);
+    static constexpr uint8_t kCoprimeStrides[] = {
+        1, 3, 7, 9, 11, 13, 17, 19, 21, 23, 27, 29, 31, 33, 37, 39,
+    };
+    uint8_t offset = 0;
+    uint8_t selector = 0;
+    for (uint8_t i = 0; i < kUidSize; ++i) {
+        offset = static_cast<uint8_t>((offset + uid[i]) % kFhssChannelCount);
+        selector ^= static_cast<uint8_t>((uid[i] << (i & 3u)) | (uid[i] >> (8u - (i & 3u))));
+    }
+    const uint8_t stride = kCoprimeStrides[selector & 0x0Fu];
+    return static_cast<uint8_t>((offset + (hop % kFhssChannelCount) * stride) % kFhssChannelCount);
 }
 
 float fhssFrequencyMHz(uint8_t channel) {
-    return 2404.0f + static_cast<float>(channel % 40) * 2.0f;
+    return 2404.0f + static_cast<float>(channel % kFhssChannelCount) * 2.0f;
 }
 
 } // namespace lora_link

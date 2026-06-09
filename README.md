@@ -4,7 +4,7 @@ PlatformIO firmware for a paired RP2040/Pico + SX1280 radio link. It is
 ELRS-like in shape, but it is not ExpressLRS OTA compatible.
 
 ```text
-CRSF handset -> TX Pico -> SX1280 LoRa/FHSS -> RX Pico -> CRSF flight controller
+RC handset or CRSF handset -> TX Pico -> SX1280 LoRa/FHSS -> RX Pico -> CRSF flight controller
 ```
 
 ## Quick Start
@@ -21,6 +21,7 @@ Manual PlatformIO commands:
 pio test -e native
 pio run -e tx_lora_pico
 pio run -e rx_lora_pico
+pio run -e rc-rp2350
 ```
 
 Flash one Pico at a time in BOOTSEL mode:
@@ -28,6 +29,7 @@ Flash one Pico at a time in BOOTSEL mode:
 ```bash
 scripts/flash.sh tx
 scripts/flash.sh rx
+scripts/flash.sh rc
 ```
 
 ## Runtime CLI
@@ -47,15 +49,37 @@ reboot
 Both devices must use the same binding phrase. The phrase derives the UID used
 for the LoRa sync word, FHSS sequence, and OTA packet validation.
 
+The `rc-rp2350` handset bring-up firmware has its own USB console:
+
+```text
+status
+channels
+power
+reboot
+```
+
+It also accepts the implemented `rc.v1` WebUI subset for discovery, state, and
+TX binding proxy:
+
+```text
+rc.v1 hello
+rc.v1 tx_hello
+rc.v1 state
+rc.v1 binding_set target=tx phrase=<phrase>
+```
+
 ## PlatformIO Environments
 
 | Environment | Role |
 | --- | --- |
 | `tx_lora_pico` | CRSF handset input, LoRa uplink, CRSF telemetry back to handset |
 | `rx_lora_pico` | LoRa receiver, CRSF RC/link-stat output to flight controller |
+| `rc-rp2350` | RP2350 handset bring-up firmware, CRSF output to TX module |
 | `native` | Host tests for protocol/config helpers |
 
 The default phrase and pins are build flags in [platformio.ini](platformio.ini).
+RC handset architecture and WebUI protocol notes live in
+[docs/rc-rp2350](docs/rc-rp2350/index.md).
 
 ## Default Pins
 
@@ -77,6 +101,11 @@ The default phrase and pins are build flags in [platformio.ini](platformio.ini).
 ## Notes
 
 - RF is SX1280 LoRa only, with `L250` and `L100` rates.
+- FHSS is enabled by default with `RF_FIXED_CHANNEL=-1`. Set that build flag to
+  a non-negative channel index only for bench/debug fixed-channel operation.
+- OTA frames are plaintext. CRC16 plus the binding-derived `uid_check` reject
+  corruption and wrong-link traffic, but they are not authentication or
+  encryption.
 - RX stops CRSF RC output when uplink is stale so the flight controller can see
   RXLOSS.
 - The active firmware is under [src/main.cpp](src/main.cpp) and shared helpers

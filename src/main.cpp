@@ -4,9 +4,11 @@
 #include <EEPROM.h>
 #include <RadioLib.h>
 #include <SPI.h>
+#include <pico/time.h>
 #include <string.h>
 
 #include "lora_link/protocol.h"
+#include "lora_link/rf/scheduler.h"
 
 using namespace lora_link;
 
@@ -25,6 +27,7 @@ static uint16_t g_sequence = 0;
 static uint16_t g_hop = 0;
 static uint32_t g_lastRcInputMs = 0;
 static uint32_t g_lastUplinkMs = 0;
+static uint32_t g_lastSyncMs = 0;
 static uint32_t g_lastLinkStatsMs = 0;
 static bool g_configFault = false;
 static bool g_rxWaiting = false;
@@ -34,26 +37,58 @@ static int16_t g_lastRssi = 0;
 static int8_t g_lastSnr = 0;
 static uint8_t g_linkQuality = 0;
 static bool g_radioReady = false;
+static bool g_bindingRequiresReboot = false;
 static uint32_t g_lastRxHopAdvanceUs = 0;
 static uint32_t g_validOtaFrames = 0;
 static uint32_t g_rejectedOtaFrames = 0;
 static constexpr uint16_t kRcSpikeJumpThreshold = 160;
 static constexpr uint16_t kRcSpikeConfirmTolerance = 80;
+#if LORA_RX_ROLE
+struct RfTimerIsrEvent {
+    uint32_t timestampUs;
+    uint8_t half;
+};
+static alarm_id_t g_rfAlarm = 0;
+static bool g_rfTimerRunning = false;
+static volatile uint8_t g_rfTimerWrite = 0;
+static volatile uint8_t g_rfTimerRead = 0;
+static volatile RfTimerIsrEvent g_rfTimerRing[8];
+static volatile bool g_nextRfTimerEventIsTock = false;
+static volatile int32_t g_rfTimerFrequencyOffsetUs = 0;
+#else
+static repeating_timer_t g_rfTimer;
+static bool g_rfTimerRunning = false;
+static volatile uint32_t g_rfTimerEvents = 0;
+static volatile uint32_t g_rfTimerLastTickUs = 0;
+#endif
+static uint32_t g_rfTimerEventsHandled = 0;
+static uint32_t g_rfMissedTimerEvents = 0;
+static uint8_t g_otaTxBytes[kOtaFrameSize];
+enum class RadioOp : uint8_t {
+    Idle = 0,
+    Rx = 1,
+    Tx = 2,
+};
+static RadioOp g_radioOp = RadioOp::Idle;
 #if LORA_TX_ROLE
+static rf::TxScheduler g_rfScheduler;
 static uint32_t g_downlinkTelemetryFrames = 0;
 static uint32_t g_uplinkTransmitAttempts = 0;
 static uint32_t g_uplinkTransmitSuccesses = 0;
 static uint32_t g_telemetryListenSlots = 0;
+static uint32_t g_txRcFailsafeFrames = 0;
 static uint32_t g_crsfInputFrames = 0;
 static uint32_t g_crsfInputRejects = 0;
 static uint32_t g_crsfInputSpikeHolds = 0;
 static uint32_t g_crsfInputBytes = 0;
+static uint32_t g_crsfBindingControlFrames = 0;
 static uint8_t g_crsfByteRing[64];
 static uint8_t g_crsfByteRingPos = 0;
 static uint8_t g_telemetryListenSlotsRemaining = 0;
 static RcSpikeGate g_txInputSpikeGate{};
 #endif
 #if LORA_RX_ROLE
+static rf::RxScheduler g_rfScheduler;
 static bool g_haveLastSequence = false;
 static uint16_t g_lastSequence = 0;
 static uint32_t g_uplinkDropCount = 0;
@@ -62,6 +97,9 @@ static uint16_t g_lqWindowDrops = 0;
 static uint32_t g_lqWindowStartMs = 0;
 static uint32_t g_rxChannelGuardRejects = 0;
 static uint32_t g_rxSpikeHolds = 0;
+static uint32_t g_lastFcChannelWriteUs = 0;
+static uint32_t g_fcChannelFrames = 0;
+static uint32_t g_fcChannelMaxGapUs = 0;
 static RcSpikeGate g_rxOutputSpikeGate{};
 #endif
 
@@ -76,19 +114,126 @@ static float rfFrequencyForHop(uint16_t hop) {
     return fhssFrequencyMHz(fhssChannelFor(g_uid, hop));
 }
 
+static float syncChannelFrequencyMHz() {
+    return rfFrequencyForHop(rf::kSyncChannelFhssIndex);
+}
+
 static void onDio1() {
     g_dio1 = true;
 }
+
+#if LORA_TX_ROLE
+static bool onRfTimerTick(repeating_timer_t*) {
+    g_rfTimerLastTickUs = micros();
+    ++g_rfTimerEvents;
+    return true;
+}
+
+static void startRfTimer() {
+    if (g_rfTimerRunning) cancel_repeating_timer(&g_rfTimer);
+    g_rfTimerEvents = 0;
+    g_rfTimerEventsHandled = 0;
+    g_rfMissedTimerEvents = 0;
+    g_rfTimerRunning = add_repeating_timer_us(-static_cast<int64_t>(activeRate().intervalUs), onRfTimerTick, nullptr, &g_rfTimer);
+}
+
+static void resyncRfTimerFromNow() {
+    // WP3 will replace this coarse timer restart with ELRS-style PFD/tick-tock correction.
+    startRfTimer();
+}
+
+static uint32_t drainRfTimerEvents() {
+    const uint32_t events = g_rfTimerEvents;
+    const uint32_t pending = events - g_rfTimerEventsHandled;
+    if (pending > 1) g_rfMissedTimerEvents += pending - 1;
+    g_rfTimerEventsHandled = events;
+    return pending;
+}
+#else
+static int64_t adjustedRxHalfIntervalUs(int32_t phaseShiftUs = 0) {
+    int32_t delayUs = static_cast<int32_t>(activeRate().intervalUs / 2u) +
+                      g_rfTimerFrequencyOffsetUs + phaseShiftUs;
+    if (delayUs < 100) delayUs = 100;
+    if (delayUs > static_cast<int32_t>(activeRate().intervalUs)) {
+        delayUs = static_cast<int32_t>(activeRate().intervalUs);
+    }
+    return delayUs;
+}
+
+static int64_t onRfTimerAlarm(alarm_id_t, void*) {
+    const uint8_t write = g_rfTimerWrite;
+    const uint8_t nextWrite = static_cast<uint8_t>((write + 1u) & 0x07u);
+    if (nextWrite == g_rfTimerRead) {
+        ++g_rfMissedTimerEvents;
+    } else {
+        g_rfTimerRing[write].timestampUs = micros();
+        g_rfTimerRing[write].half = g_nextRfTimerEventIsTock
+                                        ? static_cast<uint8_t>(rf::RxTimerHalfEvent::Tock)
+                                        : static_cast<uint8_t>(rf::RxTimerHalfEvent::Tick);
+        g_rfTimerWrite = nextWrite;
+    }
+    g_nextRfTimerEventIsTock = !g_nextRfTimerEventIsTock;
+    return -adjustedRxHalfIntervalUs();
+}
+
+static void startRfTimer() {
+    if (g_rfTimerRunning) cancel_alarm(g_rfAlarm);
+    g_rfTimerWrite = 0;
+    g_rfTimerRead = 0;
+    g_rfTimerEventsHandled = 0;
+    g_rfMissedTimerEvents = 0;
+    g_rfTimerFrequencyOffsetUs = 0;
+    g_nextRfTimerEventIsTock = false;
+    g_rfTimerRunning = true;
+    g_rfAlarm = add_alarm_in_us(adjustedRxHalfIntervalUs(), onRfTimerAlarm, nullptr, true);
+    if (g_rfAlarm <= 0) g_rfTimerRunning = false;
+}
+
+static void alignRfTimerTock(uint32_t tockUs) {
+    if (g_rfTimerRunning) cancel_alarm(g_rfAlarm);
+    g_rfTimerWrite = 0;
+    g_rfTimerRead = 0;
+    const uint32_t nowUs = micros();
+    int32_t delayUs = static_cast<int32_t>(tockUs - nowUs);
+    if (delayUs < 100) delayUs = 100;
+    if (delayUs > static_cast<int32_t>(activeRate().intervalUs)) {
+        delayUs = static_cast<int32_t>(activeRate().intervalUs);
+    }
+    g_nextRfTimerEventIsTock = true;
+    g_rfTimerRunning = true;
+    g_rfAlarm = add_alarm_in_us(delayUs, onRfTimerAlarm, nullptr, true);
+    if (g_rfAlarm <= 0) g_rfTimerRunning = false;
+}
+
+static void applyRfTimerCorrection(const rf::RxTimerEventResult& result) {
+    g_rfTimerFrequencyOffsetUs = result.frequencyOffsetUs;
+    if (!result.hasPhaseShift || !g_rfTimerRunning) return;
+    cancel_alarm(g_rfAlarm);
+    g_rfAlarm = add_alarm_in_us(adjustedRxHalfIntervalUs(result.phaseShiftUs),
+                                onRfTimerAlarm, nullptr, true);
+    if (g_rfAlarm <= 0) g_rfTimerRunning = false;
+}
+
+static bool popRfTimerEvent(RfTimerIsrEvent& out) {
+    const uint8_t read = g_rfTimerRead;
+    if (read == g_rfTimerWrite) return false;
+    out.timestampUs = g_rfTimerRing[read].timestampUs;
+    out.half = g_rfTimerRing[read].half;
+    g_rfTimerRead = static_cast<uint8_t>((read + 1u) & 0x07u);
+    ++g_rfTimerEventsHandled;
+    return true;
+}
+#endif
 
 static void setDefaultChannels() {
     for (uint8_t i = 0; i < kRcChannelCount; ++i) g_channels[i] = 992;
     g_channels[2] = 172; // throttle low in CRSF 11-bit units
 }
 
-static void saveConfig() {
+static bool saveConfig() {
     ConfigRecord record = makeConfigRecord(g_config);
     EEPROM.put(0, record);
-    EEPROM.commit();
+    return EEPROM.commit();
 }
 
 static void loadConfig() {
@@ -102,6 +247,16 @@ static void loadConfig() {
     }
     deriveUid(g_config.bindingPhrase, g_uid);
     g_uidCheck = uidCheck(g_uid);
+    g_bindingRequiresReboot = false;
+}
+
+static void copyBindingPhrase(const char* phrase) {
+    memset(g_config.bindingPhrase, 0, sizeof(g_config.bindingPhrase));
+    if (phrase) strncpy(g_config.bindingPhrase, phrase, sizeof(g_config.bindingPhrase) - 1);
+}
+
+static void restoreDefaultBindingPhrase() {
+    copyBindingPhrase(DEFAULT_BINDING_PHRASE);
 }
 
 static bool configureRadio(float freqMHz) {
@@ -125,6 +280,7 @@ static bool configureRadio(float freqMHz) {
     radio.setCRC(2);
     radio.startReceive();
     g_rxWaiting = true;
+    g_radioOp = RadioOp::Rx;
     g_lastRxHopAdvanceUs = micros();
     return true;
 }
@@ -136,34 +292,44 @@ static void startReceiveOnHop() {
     radio.setFrequency(rfFrequencyForHop(g_hop));
     radio.startReceive();
     g_rxWaiting = true;
+    g_radioOp = RadioOp::Rx;
     g_dio1 = false;
     g_lastRxHopAdvanceUs = micros();
 }
 
-static bool transmitFrame(const OtaFrame& frame) {
+static bool startTransmitFrame(const OtaFrame& frame, float frequencyMHz) {
     if (!g_radioReady) return false;
-    uint8_t bytes[kOtaFrameSize];
-    if (!encodeOtaFrame(frame, bytes)) return false;
+    if (!encodeOtaFrame(frame, g_otaTxBytes)) return false;
     g_rxWaiting = false;
     digitalWrite(SX128X_RXEN, LOW);
     digitalWrite(SX128X_TXEN, HIGH);
-    radio.setFrequency(rfFrequencyForHop(g_hop));
-    const int16_t state = radio.transmit(bytes, sizeof(bytes));
-    digitalWrite(SX128X_TXEN, LOW);
-    digitalWrite(SX128X_RXEN, HIGH);
-    radio.startReceive();
-    g_rxWaiting = true;
+    radio.setFrequency(frequencyMHz);
     g_dio1 = false;
+    const int16_t state = radio.startTransmit(g_otaTxBytes, sizeof(g_otaTxBytes));
+    g_radioOp = state == RADIOLIB_ERR_NONE ? RadioOp::Tx : RadioOp::Idle;
     return state == RADIOLIB_ERR_NONE;
 }
 
-static bool readOtaFrame(OtaFrame& out) {
+static void finishTransmitAndReceive(float receiveFrequencyMHz) {
+    radio.finishTransmit();
+    digitalWrite(SX128X_TXEN, LOW);
+    digitalWrite(SX128X_RXEN, HIGH);
+    radio.setFrequency(receiveFrequencyMHz);
+    radio.startReceive();
+    g_rxWaiting = true;
+    g_dio1 = false;
+    g_radioOp = RadioOp::Rx;
+}
+
+static bool readOtaFrame(OtaFrame& out, uint32_t* beginProcessingUs = nullptr) {
     if (!g_radioReady) return false;
     if (!g_dio1) return false;
+    const uint32_t beginUs = micros();
+    if (beginProcessingUs) *beginProcessingUs = beginUs;
     g_dio1 = false;
     uint8_t bytes[kOtaFrameSize] = {};
     const int16_t state = radio.readData(bytes, sizeof(bytes));
-    radio.startReceive();
+    g_radioOp = RadioOp::Idle;
     if (state != RADIOLIB_ERR_NONE) {
         ++g_rejectedOtaFrames;
         return false;
@@ -179,6 +345,7 @@ static bool readOtaFrame(OtaFrame& out) {
 }
 
 static void printStatus() {
+    const rf::SchedulerStats rfStats = g_rfScheduler.stats();
     Serial.printf("role=%s phrase=%s rate=%s uid=%02X%02X%02X%02X%02X%02X%02X%02X lq=%u rssi=%d snr=%d good=%lu bad=%lu",
 #if LORA_TX_ROLE
                   "tx",
@@ -192,45 +359,341 @@ static void printStatus() {
                   static_cast<unsigned long>(g_rejectedOtaFrames));
 #if LORA_TX_ROLE
     const uint32_t crsfAgeMs = g_lastRcInputMs ? millis() - g_lastRcInputMs : 0xFFFFFFFFu;
-    Serial.printf(" tlm=%lu tx_ok=%lu tx_try=%lu listen=%lu crsf=%lu crsf_rej=%lu crsf_hold=%lu crsf_bytes=%lu crsf_age=%lu ch=%u,%u,%u,%u",
+    Serial.printf(" ticks=%lu missed_ticks=%lu nonce=%u fhss=%u tx_done=%lu tlm=%lu tx_ok=%lu tx_try=%lu listen=%lu rc_failsafe=%lu crsf=%lu crsf_bind=%lu crsf_rej=%lu crsf_hold=%lu crsf_bytes=%lu crsf_age=%lu ch=%u,%u,%u,%u",
+                  static_cast<unsigned long>(rfStats.timerTicks),
+                  static_cast<unsigned long>(g_rfMissedTimerEvents + rfStats.missedTimerTicks),
+                  rfStats.nonce,
+                  rfStats.fhssIndex,
+                  static_cast<unsigned long>(rfStats.txDone),
                   static_cast<unsigned long>(g_downlinkTelemetryFrames),
                   static_cast<unsigned long>(g_uplinkTransmitSuccesses),
                   static_cast<unsigned long>(g_uplinkTransmitAttempts),
                   static_cast<unsigned long>(g_telemetryListenSlots),
+                  static_cast<unsigned long>(g_txRcFailsafeFrames),
                   static_cast<unsigned long>(g_crsfInputFrames),
+                  static_cast<unsigned long>(g_crsfBindingControlFrames),
                   static_cast<unsigned long>(g_crsfInputRejects),
                   static_cast<unsigned long>(g_crsfInputSpikeHolds),
                   static_cast<unsigned long>(g_crsfInputBytes),
                   static_cast<unsigned long>(crsfAgeMs),
                   g_channels[0], g_channels[1], g_channels[2], g_channels[3]);
 #else
-    Serial.printf(" drops=%lu guard=%lu hold=%lu",
+    Serial.printf(" ticks=%lu missed_ticks=%lu nonce=%u fhss=%u rx_done=%lu rf_miss=%lu phase_us=%ld tim=%u off=%ld dx=%ld trim=%ld sync_ok=%lu rc_no_sync=%lu pfd_ext=%lu pfd_int=%lu pfd_res=%lu pshift=%lu last_shift=%ld lost=%lu tent_lost=%lu conn=%lu lock=%lu prom=%lu prom_fr=%lu prom_off=%lu prom_dx=%lu max_rc=%u drops=%lu guard=%lu hold=%lu fc=%lu fc_gap_us=%lu",
+                  static_cast<unsigned long>(rfStats.timerTicks),
+                  static_cast<unsigned long>(g_rfMissedTimerEvents + rfStats.missedTimerTicks),
+                  rfStats.nonce,
+                  rfStats.fhssIndex,
+                  static_cast<unsigned long>(rfStats.rxDone),
+                  static_cast<unsigned long>(rfStats.missedRcFrames),
+                  static_cast<long>(rfStats.phaseErrorUs),
+                  static_cast<unsigned>(rfStats.rxTimerState),
+                  static_cast<long>(rfStats.offsetUs),
+                  static_cast<long>(rfStats.offsetDxUs),
+                  static_cast<long>(rfStats.frequencyOffsetUs),
+                  static_cast<unsigned long>(rfStats.syncAccepted),
+                  static_cast<unsigned long>(rfStats.rcRejectedNoSync),
+                  static_cast<unsigned long>(rfStats.pfdExternalEvents),
+                  static_cast<unsigned long>(rfStats.pfdInternalEvents),
+                  static_cast<unsigned long>(rfStats.pfdResults),
+                  static_cast<unsigned long>(rfStats.phaseShiftRequests),
+                  static_cast<long>(rfStats.lastPhaseShiftUs),
+                  static_cast<unsigned long>(rfStats.lostConnections),
+                  static_cast<unsigned long>(rfStats.tentativeLostConnections),
+                  static_cast<unsigned long>(rfStats.connectedPromotions),
+                  static_cast<unsigned long>(rfStats.lockedPromotions),
+                  static_cast<unsigned long>(rfStats.promotionChecks),
+                  static_cast<unsigned long>(rfStats.promotionFrameBlocks),
+                  static_cast<unsigned long>(rfStats.promotionOffsetBlocks),
+                  static_cast<unsigned long>(rfStats.promotionDxBlocks),
+                  rfStats.maxConsecutiveRcFrames,
                   static_cast<unsigned long>(g_uplinkDropCount),
                   static_cast<unsigned long>(g_rxChannelGuardRejects),
-                  static_cast<unsigned long>(g_rxSpikeHolds));
+                  static_cast<unsigned long>(g_rxSpikeHolds),
+                  static_cast<unsigned long>(g_fcChannelFrames),
+                  static_cast<unsigned long>(g_fcChannelMaxGapUs));
 #endif
     Serial.printf(" config=%s\n", g_configFault ? "defaulted" : "ok");
 }
 
+static const char* bindingOpName(BindingControlOp op) {
+    switch (op) {
+        case BindingControlOp::Get:
+            return "binding_get";
+        case BindingControlOp::Set:
+            return "binding_set";
+        case BindingControlOp::Clear:
+            return "binding_clear";
+        case BindingControlOp::Verify:
+            return "binding_verify";
+        default:
+            return "unknown";
+    }
+}
+
+static const char* bindingResultName(BindingResult result) {
+    switch (result) {
+        case BindingResult::Ok:
+            return "ok";
+        case BindingResult::InvalidCommand:
+            return "invalid_command";
+        case BindingResult::InvalidPhrase:
+            return "invalid_phrase";
+        case BindingResult::PersistFailed:
+            return "persist_failed";
+        default:
+            return "unknown";
+    }
+}
+
+static void printUidHex(const uint8_t uid[kUidSize]) {
+    for (uint8_t i = 0; i < kUidSize; ++i) Serial.printf("%02X", uid[i]);
+}
+
+static int hexValue(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+static bool percentDecodeToken(const char* value, size_t len, char* out, size_t outLen) {
+    if (!out || outLen == 0) return false;
+    size_t written = 0;
+    for (size_t i = 0; i < len; ++i) {
+        char c = value[i];
+        if (c == '%') {
+            if (i + 2 >= len) return false;
+            const int hi = hexValue(value[i + 1]);
+            const int lo = hexValue(value[i + 2]);
+            if (hi < 0 || lo < 0) return false;
+            c = static_cast<char>((hi << 4) | lo);
+            i += 2;
+        }
+        if (written + 1 >= outLen) return false;
+        out[written++] = c;
+    }
+    out[written] = '\0';
+    return true;
+}
+
+static bool extractRcV1Arg(const char* line, const char* key, char* out, size_t outLen) {
+    const size_t keyLen = strlen(key);
+    const char* p = line;
+    while (*p) {
+        while (*p == ' ') ++p;
+        const char* token = p;
+        while (*p && *p != ' ') ++p;
+        const size_t tokenLen = static_cast<size_t>(p - token);
+        if (tokenLen > keyLen && strncmp(token, key, keyLen) == 0 && token[keyLen] == '=') {
+            return percentDecodeToken(token + keyLen + 1, tokenLen - keyLen - 1, out, outLen);
+        }
+    }
+    return false;
+}
+
+static const char* rcV1ArgsForCommand(const char* line, const char* command) {
+    static constexpr const char* kPrefix = "rc.v1 ";
+    const size_t prefixLen = strlen(kPrefix);
+    const size_t commandLen = strlen(command);
+    if (strncmp(line, kPrefix, prefixLen) != 0) return nullptr;
+    const char* cursor = line + prefixLen;
+    if (strncmp(cursor, command, commandLen) != 0) return nullptr;
+    cursor += commandLen;
+    if (*cursor != '\0' && *cursor != ' ') return nullptr;
+    while (*cursor == ' ') ++cursor;
+    return cursor;
+}
+
+static void printRcV1Encoded(const char* value) {
+    static constexpr char kHex[] = "0123456789ABCDEF";
+    if (!value) return;
+    for (size_t i = 0; value[i]; ++i) {
+        const uint8_t c = static_cast<uint8_t>(value[i]);
+        const bool unreserved = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                                (c >= '0' && c <= '9') || c == '-' || c == '_' ||
+                                c == '.' || c == '~';
+        if (unreserved) {
+            Serial.print(static_cast<char>(c));
+        } else {
+            Serial.print('%');
+            Serial.print(kHex[(c >> 4) & 0x0F]);
+            Serial.print(kHex[c & 0x0F]);
+        }
+    }
+}
+
+static const char* roleName() {
+#if LORA_TX_ROLE
+    return "tx";
+#else
+    return "rx";
+#endif
+}
+
+static void printRcV1Err(const char* seq, const char* code, const char* message) {
+    Serial.print("rc.v1 err");
+    if (seq && seq[0]) {
+        Serial.print(" seq=");
+        Serial.print(seq);
+    }
+    Serial.print(" code=");
+    printRcV1Encoded(code);
+    Serial.print(" message=");
+    printRcV1Encoded(message);
+    Serial.println();
+}
+
+static void printBindingStatusRcV1(const char* seq, const char* target, const BindingStatus& status,
+                                   BindingResult result, BindingControlOp op) {
+    Serial.print("rc.v1 ok");
+    if (seq && seq[0]) {
+        Serial.print(" seq=");
+        Serial.print(seq);
+    }
+    Serial.print(" target=");
+    Serial.print(target);
+    Serial.print(" op=");
+    Serial.print(bindingOpName(op));
+    Serial.print(" result=");
+    Serial.print(bindingResultName(result));
+    Serial.print(" phrase=");
+    printRcV1Encoded(status.phrase);
+    Serial.print(" uid=");
+    printUidHex(status.uid);
+    Serial.printf(" uid_check=%08lX persisted=%u requires_reboot=%u\n",
+                  static_cast<unsigned long>(status.uidCheck),
+                  status.persisted ? 1u : 0u,
+                  status.requiresReboot ? 1u : 0u);
+}
+
+static BindingResult applyBindingControlRequest(const BindingControlRequest& request, BindingStatus& status) {
+    switch (request.op) {
+        case BindingControlOp::Get:
+            makeBindingStatus(g_config.bindingPhrase, true, g_bindingRequiresReboot, status);
+            return BindingResult::Ok;
+        case BindingControlOp::Set:
+            if (!validateBindingPhrase(request.phrase)) {
+                makeBindingStatus(request.phrase, false, false, status);
+                return BindingResult::InvalidPhrase;
+            }
+            copyBindingPhrase(request.phrase);
+            {
+                const bool saved = saveConfig();
+                if (saved) g_bindingRequiresReboot = true;
+                makeBindingStatus(g_config.bindingPhrase, saved, saved, status);
+                return saved ? BindingResult::Ok : BindingResult::PersistFailed;
+            }
+        case BindingControlOp::Clear:
+            restoreDefaultBindingPhrase();
+            {
+                const bool saved = saveConfig();
+                if (saved) g_bindingRequiresReboot = true;
+                makeBindingStatus(g_config.bindingPhrase, saved, saved, status);
+                return saved ? BindingResult::Ok : BindingResult::PersistFailed;
+            }
+        case BindingControlOp::Verify:
+            if (!validateBindingPhrase(request.phrase)) {
+                makeBindingStatus(request.phrase, false, false, status);
+                return BindingResult::InvalidPhrase;
+            }
+            makeBindingStatus(request.phrase, false, false, status);
+            return BindingResult::Ok;
+        default:
+            makeBindingStatus(g_config.bindingPhrase, true, g_bindingRequiresReboot, status);
+            return BindingResult::InvalidCommand;
+    }
+}
+
+static bool startsWith(const char* value, const char* prefix) {
+    return strncmp(value, prefix, strlen(prefix)) == 0;
+}
+
+static bool handleRcV1CliLine(const char* line) {
+    if (strncmp(line, "rc.v1", 5) != 0) return false;
+
+    BindingControlRequest request{};
+    char seq[12] = {};
+    extractRcV1Arg(line, "seq", seq, sizeof(seq));
+    char target[8] = {};
+    extractRcV1Arg(line, "target", target, sizeof(target));
+    if (target[0] == '\0') strncpy(target, roleName(), sizeof(target) - 1);
+
+    if (rcV1ArgsForCommand(line, "hello")) {
+        Serial.print("rc.v1 ok");
+        if (seq[0]) {
+            Serial.print(" seq=");
+            Serial.print(seq);
+        }
+        Serial.print(" role=");
+        Serial.print(roleName());
+        Serial.println(" fw=0.1 caps=binding");
+        return true;
+    }
+
+    if (strcmp(target, roleName()) != 0) {
+        printRcV1Err(seq, "unsupported_target", "target not hosted on this USB device");
+        return true;
+    }
+
+    if (rcV1ArgsForCommand(line, "binding_get")) {
+        request.op = BindingControlOp::Get;
+    } else if (rcV1ArgsForCommand(line, "binding_set")) {
+        request.op = BindingControlOp::Set;
+        if (!extractRcV1Arg(line, "phrase", request.phrase, sizeof(request.phrase)) &&
+            !extractRcV1Arg(line, "value", request.phrase, sizeof(request.phrase))) {
+            printRcV1Err(seq, "missing_required_argument", "binding_set requires phrase");
+            return true;
+        }
+    } else if (rcV1ArgsForCommand(line, "binding_clear")) {
+        request.op = BindingControlOp::Clear;
+    } else if (rcV1ArgsForCommand(line, "binding_verify")) {
+        request.op = BindingControlOp::Verify;
+        if (!extractRcV1Arg(line, "phrase", request.phrase, sizeof(request.phrase)) &&
+            !extractRcV1Arg(line, "value", request.phrase, sizeof(request.phrase))) {
+            printRcV1Err(seq, "missing_required_argument", "binding_verify requires phrase");
+            return true;
+        }
+    } else {
+        return false;
+    }
+
+    BindingStatus status{};
+    const BindingResult result = applyBindingControlRequest(request, status);
+    if (result == BindingResult::Ok) {
+        printBindingStatusRcV1(seq, target, status, result, request.op);
+    } else {
+        printRcV1Err(seq, bindingResultName(result), "binding command failed");
+    }
+    return true;
+}
+
 static void handleCliLine(char* line) {
     while (*line == ' ') ++line;
-    if (strcmp(line, "bind get") == 0) {
+    if (handleRcV1CliLine(line)) {
+        return;
+    } else if (strcmp(line, "bind get") == 0) {
         Serial.println(g_config.bindingPhrase);
     } else if (strncmp(line, "bind set ", 9) == 0) {
         const char* phrase = line + 9;
-        const size_t len = strlen(phrase);
-        if (len < 1 || len > 32) {
-            Serial.println("ERR phrase must be 1..32 bytes");
+        if (!validateBindingPhrase(phrase)) {
+            Serial.println("ERR phrase must be 1..32 printable bytes");
             return;
         }
-        memset(g_config.bindingPhrase, 0, sizeof(g_config.bindingPhrase));
-        strncpy(g_config.bindingPhrase, phrase, sizeof(g_config.bindingPhrase) - 1);
-        saveConfig();
-        Serial.println("OK reboot required");
+        copyBindingPhrase(phrase);
+        if (saveConfig()) {
+            g_bindingRequiresReboot = true;
+            Serial.println("OK reboot required");
+        } else {
+            Serial.println("ERR persist failed");
+        }
     } else if (strcmp(line, "bind clear") == 0) {
-        configDefaults(g_config, DEFAULT_BINDING_PHRASE);
-        saveConfig();
-        Serial.println("OK reboot required");
+        restoreDefaultBindingPhrase();
+        if (saveConfig()) {
+            g_bindingRequiresReboot = true;
+            Serial.println("OK reboot required");
+        } else {
+            Serial.println("ERR persist failed");
+        }
     } else if (strncmp(line, "rate ", 5) == 0) {
         if (strcmp(line + 5, "L250") == 0) g_config.rate = RateId::L250;
         else if (strcmp(line + 5, "L100") == 0) g_config.rate = RateId::L100;
@@ -238,8 +701,8 @@ static void handleCliLine(char* line) {
             Serial.println("ERR rate must be L250 or L100");
             return;
         }
-        saveConfig();
-        Serial.println("OK reboot required");
+        if (saveConfig()) Serial.println("OK reboot required");
+        else Serial.println("ERR persist failed");
     } else if (strcmp(line, "status") == 0) {
         printStatus();
     } else if (strcmp(line, "channels") == 0) {
@@ -261,12 +724,12 @@ static void handleCliLine(char* line) {
     } else if (strcmp(line, "reboot") == 0) {
         rp2040.reboot();
     } else if (*line) {
-        Serial.println("commands: bind get | bind set <phrase> | bind clear | rate L250|L100 | status | channels | reboot");
+        Serial.println("commands: rc.v1 binding_get|binding_set <phrase>|binding_clear|binding_verify <phrase> | bind get | bind set <phrase> | bind clear | rate L250|L100 | status | channels | reboot");
     }
 }
 
 static void serviceCli() {
-    static char line[80];
+    static char line[128];
     static uint8_t pos = 0;
     while (Serial.available()) {
         const char c = static_cast<char>(Serial.read());
@@ -294,8 +757,20 @@ static void serviceTxCrsfInput() {
         ++g_crsfInputBytes;
         g_crsfByteRing[g_crsfByteRingPos] = byte;
         g_crsfByteRingPos = static_cast<uint8_t>((g_crsfByteRingPos + 1) & 0x3F);
+        BindingControlRequest bindingRequest{};
+        const bool gotBindingControl = parseCrsfBindingRequestFrame(byte, bindingRequest);
         uint16_t candidate[kRcChannelCount];
-        if (parseCrsfRcFrame(byte, candidate)) {
+        const bool gotRcFrame = parseCrsfRcFrame(byte, candidate);
+        if (gotBindingControl) {
+            BindingStatus status{};
+            const BindingResult result = applyBindingControlRequest(bindingRequest, status);
+            uint8_t response[64];
+            const size_t len = encodeCrsfBindingResponseFrame(status, result, bindingRequest.op,
+                                                              response, sizeof(response));
+            if (len) Serial2.write(response, len);
+            ++g_crsfBindingControlFrames;
+        }
+        if (gotRcFrame) {
             if (!sanitizeRcChannels(g_channels, g_lastRcInputMs != 0, candidate)) {
                 ++g_crsfInputRejects;
                 continue;
@@ -321,42 +796,63 @@ static void sendTelemetryToHandset() {
 
 static void txLoop() {
     serviceTxCrsfInput();
-    OtaFrame rx{};
-    if (readOtaFrame(rx) && rx.type == OtaType::Telemetry) {
-        g_linkQuality = rx.payload[0];
-        if (rx.payloadLen > 1) g_lastRssi = -static_cast<int16_t>(rx.payload[1]);
-        if (rx.payloadLen > 2) g_lastSnr = static_cast<int8_t>(rx.payload[2]);
-        ++g_downlinkTelemetryFrames;
-        sendTelemetryToHandset();
-    }
 
-    static uint32_t lastPacketUs = 0;
-    const uint32_t nowUs = micros();
-    if (static_cast<uint32_t>(nowUs - lastPacketUs) < activeRate().intervalUs) return;
-    lastPacketUs = nowUs;
-
-    if (g_telemetryListenSlotsRemaining > 0) {
-        --g_telemetryListenSlotsRemaining;
-        ++g_telemetryListenSlots;
-        return;
-    }
-
-    if (millis() - g_lastRcInputMs > 250) setDefaultChannels();
-    OtaFrame frame{};
-    frame.type = OtaType::Rc;
-    const uint16_t txSequence = g_sequence++;
-    frame.sequence = txSequence;
-    frame.uidCheck = g_uidCheck;
-    frame.payloadLen = kOtaPayloadSize;
-    packRcChannels11Bit(g_channels, frame.payload);
-    ++g_uplinkTransmitAttempts;
-    if (transmitFrame(frame)) {
-        ++g_uplinkTransmitSuccesses;
-        if (activeRate().telemetryRatio && (txSequence % activeRate().telemetryRatio) == 0) {
-            g_telemetryListenSlotsRemaining = 8;
+    if (g_dio1) {
+        if (g_radioOp == RadioOp::Tx) {
+            g_rfScheduler.onTxDone();
+            g_sequence = g_rfScheduler.sequence();
+            g_hop = g_rfScheduler.fhss().index();
+            finishTransmitAndReceive(g_rfScheduler.fhss().frequencyMHz());
+            ++g_uplinkTransmitSuccesses;
+        } else if (g_radioOp == RadioOp::Rx) {
+            OtaFrame rx{};
+            if (readOtaFrame(rx) && rx.type == OtaType::Telemetry) {
+                g_linkQuality = rx.payload[0];
+                if (rx.payloadLen > 1) g_lastRssi = -static_cast<int16_t>(rx.payload[1]);
+                if (rx.payloadLen > 2) g_lastSnr = static_cast<int8_t>(rx.payload[2]);
+                ++g_downlinkTelemetryFrames;
+                sendTelemetryToHandset();
+            }
+            startReceiveOnHop();
+        } else {
+            g_dio1 = false;
         }
     }
-    ++g_hop;
+
+    const uint32_t pendingTicks = drainRfTimerEvents();
+    for (uint32_t i = 0; i < pendingTicks; ++i) {
+        if (g_radioOp == RadioOp::Tx) return;
+        if (!g_rfScheduler.onTimerTick()) {
+            ++g_telemetryListenSlots;
+            g_sequence = g_rfScheduler.sequence();
+            g_hop = g_rfScheduler.fhss().index();
+            startReceiveOnHop();
+            continue;
+        }
+
+        if (!isLinkFresh(millis(), g_lastRcInputMs)) {
+            setDefaultChannels();
+            ++g_txRcFailsafeFrames;
+        }
+        OtaFrame frame{};
+        const uint16_t txSequence = g_rfScheduler.sequence();
+        frame.type = g_rfScheduler.shouldSendSyncFrame() ? OtaType::Sync : OtaType::Rc;
+        frame.sequence = txSequence;
+        frame.uidCheck = g_uidCheck;
+        float txFrequencyMHz = g_rfScheduler.fhss().frequencyMHz();
+        if (frame.type == OtaType::Sync) {
+            const OtaSyncPayload sync = g_rfScheduler.syncPayload();
+            if (!encodeOtaSyncPayload(sync, frame.payload, frame.payloadLen)) continue;
+            txFrequencyMHz = syncChannelFrequencyMHz();
+        } else {
+            frame.payloadLen = kOtaPayloadSize;
+            packRcChannels11Bit(g_channels, frame.payload);
+        }
+        g_sequence = txSequence;
+        g_hop = g_rfScheduler.fhss().index();
+        ++g_uplinkTransmitAttempts;
+        startTransmitFrame(frame, txFrequencyMHz);
+    }
 }
 #endif
 
@@ -364,10 +860,23 @@ static void txLoop() {
 static void writeFcChannels() {
     uint8_t frame[32];
     const size_t len = encodeCrsfRcFrame(g_channels, frame, sizeof(frame));
-    if (len) Serial2.write(frame, len);
+    if (len) {
+        const uint32_t nowUs = micros();
+        if (g_lastFcChannelWriteUs != 0) {
+            const uint32_t gapUs = nowUs - g_lastFcChannelWriteUs;
+            if (gapUs > g_fcChannelMaxGapUs) g_fcChannelMaxGapUs = gapUs;
+        }
+        Serial2.write(frame, len);
+        g_lastFcChannelWriteUs = nowUs;
+        ++g_fcChannelFrames;
+    }
 }
 
-static bool acceptRxOutputCandidate(const uint16_t candidate[kRcChannelCount]) {
+static bool acceptRxOutputCandidate(const uint16_t candidate[kRcChannelCount], bool reacquiredLink) {
+    if (reacquiredLink) {
+        g_rxOutputSpikeGate.havePending = false;
+        return true;
+    }
     if (acceptRcChannelsWithSpikeGate(g_channels, true, candidate, g_rxOutputSpikeGate,
                                       kRcSpikeJumpThreshold, kRcSpikeConfirmTolerance)) {
         return true;
@@ -378,7 +887,7 @@ static bool acceptRxOutputCandidate(const uint16_t candidate[kRcChannelCount]) {
 
 static void writeFcLinkStats() {
     uint8_t frame[16];
-    const uint8_t lq = (millis() - g_lastUplinkMs < 250) ? g_linkQuality : 0;
+    const uint8_t lq = isLinkFresh(millis(), g_lastUplinkMs) ? g_linkQuality : 0;
     const size_t len = encodeCrsfLinkStats(g_lastRssi, g_lastSnr, lq,
                                            static_cast<uint8_t>(g_config.rate), frame, sizeof(frame));
     if (len) Serial2.write(frame, len);
@@ -416,52 +925,97 @@ static void updateRxLinkQuality(bool acceptedFrame) {
     }
 }
 
+static void resetRxSequenceTracking() {
+    g_haveLastSequence = false;
+    g_lqWindowFrames = 0;
+    g_lqWindowDrops = 0;
+    g_lqWindowStartMs = millis();
+    g_rxOutputSpikeGate.havePending = false;
+}
+
 static void rxLoop() {
-    OtaFrame frame{};
-    if (readOtaFrame(frame) && frame.type == OtaType::Rc && frame.payloadLen == kOtaPayloadSize) {
-        const uint16_t rxSequence = frame.sequence;
-        uint16_t candidate[kRcChannelCount];
-        g_hop = rxSequence;
-        unpackRcChannels11Bit(frame.payload, candidate);
-        g_lastUplinkMs = millis();
-        updateRxSequenceStats(rxSequence);
-        updateRxLinkQuality(true);
-        if (sanitizeRcChannels(g_channels, true, candidate)) {
-            if (acceptRxOutputCandidate(candidate)) {
-                memcpy(g_channels, candidate, sizeof(g_channels));
-                writeFcChannels();
+    bool acceptedFrameForLq = false;
+    if (g_dio1) {
+        if (g_radioOp == RadioOp::Tx) {
+            g_rfScheduler.onTelemetryDone();
+            finishTransmitAndReceive(g_rfScheduler.fhss().frequencyMHz());
+        } else if (g_radioOp == RadioOp::Rx) {
+            OtaFrame frame{};
+            uint32_t beginProcessingUs = 0;
+            if (readOtaFrame(frame, &beginProcessingUs) && frame.type == OtaType::Sync) {
+                OtaSyncPayload sync{};
+                const uint32_t nowMs = millis();
+                if (decodeOtaSyncPayload(frame, sync) && sync.nonce == frame.sequence &&
+                    g_rfScheduler.onValidSyncFrame(sync, beginProcessingUs)) {
+                    g_lastSyncMs = nowMs;
+                    g_hop = g_rfScheduler.fhss().index();
+                    startReceiveOnHop();
+                    alignRfTimerTock(g_rfScheduler.packetTockReferenceUs(beginProcessingUs));
+                } else {
+                    startReceiveOnHop();
+                }
+            } else if (frame.type == OtaType::Rc && frame.payloadLen == kOtaPayloadSize) {
+                const uint16_t rxSequence = frame.sequence;
+                uint16_t candidate[kRcChannelCount];
+                const uint32_t nowMs = millis();
+                const bool reacquired = !isLinkFresh(nowMs, g_lastUplinkMs);
+                if (reacquired) resetRxSequenceTracking();
+                if (!g_rfScheduler.onValidRcFrame(rxSequence, beginProcessingUs, nowMs)) {
+                    startReceiveOnHop();
+                    return;
+                }
+                g_hop = g_rfScheduler.fhss().index();
+                unpackRcChannels11Bit(frame.payload, candidate);
+                g_lastUplinkMs = nowMs;
+                updateRxSequenceStats(rxSequence);
+                acceptedFrameForLq = true;
+                if (sanitizeRcChannels(g_channels, true, candidate)) {
+                    if (acceptRxOutputCandidate(candidate, reacquired)) {
+                        memcpy(g_channels, candidate, sizeof(g_channels));
+                        writeFcChannels();
+                    }
+                } else {
+                    ++g_rxChannelGuardRejects;
+                }
+                if (shouldRequestTelemetry(static_cast<uint16_t>(frame.sequence + 1), activeRate().telemetryRatio)) {
+                    OtaFrame tlm{};
+                    tlm.type = OtaType::Telemetry;
+                    tlm.sequence = g_sequence++;
+                    tlm.uidCheck = g_uidCheck;
+                    tlm.payloadLen = 4;
+                    tlm.payload[0] = g_linkQuality;
+                    tlm.payload[1] = static_cast<uint8_t>(g_lastRssi < 0 ? -g_lastRssi : g_lastRssi);
+                    tlm.payload[2] = static_cast<uint8_t>(g_lastSnr);
+                    tlm.payload[3] = static_cast<uint8_t>(g_config.rate);
+                    startTransmitFrame(tlm, g_rfScheduler.fhss().frequencyMHz());
+                } else {
+                    startReceiveOnHop();
+                }
+            } else {
+                startReceiveOnHop();
             }
         } else {
-            ++g_rxChannelGuardRejects;
+            g_dio1 = false;
         }
-        if ((frame.sequence % activeRate().telemetryRatio) == 0) {
-            OtaFrame tlm{};
-            tlm.type = OtaType::Telemetry;
-            tlm.sequence = g_sequence++;
-            tlm.uidCheck = g_uidCheck;
-            tlm.payloadLen = 4;
-            tlm.payload[0] = g_linkQuality;
-            tlm.payload[1] = static_cast<uint8_t>(g_lastRssi < 0 ? -g_lastRssi : g_lastRssi);
-            tlm.payload[2] = static_cast<uint8_t>(g_lastSnr);
-            tlm.payload[3] = static_cast<uint8_t>(g_config.rate);
-            transmitFrame(tlm);
-        }
-        g_hop = static_cast<uint16_t>(rxSequence + 1);
-        startReceiveOnHop();
     }
 
-    updateRxLinkQuality(false);
-    const bool acquiring = (millis() - g_lastUplinkMs) > 250;
-    const uint32_t scanIntervalUs = (kFixedRfChannel >= 0)
-                                        ? 100000u
-                                        : activeRate().intervalUs * (acquiring ? 4u : 1u);
-    const bool shouldScan = (kFixedRfChannel < 0) || acquiring;
-    if (shouldScan && g_radioReady && static_cast<uint32_t>(micros() - g_lastRxHopAdvanceUs) >= scanIntervalUs) {
-        ++g_hop;
-        startReceiveOnHop();
+    updateRxLinkQuality(acceptedFrameForLq);
+    const uint32_t nowMs = millis();
+    const bool uplinkFresh = isLinkFresh(nowMs, g_lastUplinkMs);
+    const bool linkFresh = uplinkFresh || isLinkFresh(nowMs, g_lastSyncMs);
+    RfTimerIsrEvent timerEvent{};
+    while (g_radioOp != RadioOp::Tx && popRfTimerEvent(timerEvent)) {
+        const rf::RxTimerEventResult timerResult = g_rfScheduler.onTimerEvent(
+            static_cast<rf::RxTimerHalfEvent>(timerEvent.half), timerEvent.timestampUs, linkFresh, nowMs);
+        g_hop = g_rfScheduler.fhss().index();
+        applyRfTimerCorrection(timerResult);
+        if (timerEvent.half == static_cast<uint8_t>(rf::RxTimerHalfEvent::Tock) && uplinkFresh) {
+            writeFcChannels();
+        }
+        if (timerResult.event == rf::RxTimerTickEvent::ReceiveFrequencyChanged) startReceiveOnHop();
     }
 
-    if (millis() - g_lastUplinkMs > 250) g_linkQuality = 0;
+    if (!isLinkFresh(millis(), g_lastUplinkMs)) g_linkQuality = 0;
     if (millis() - g_lastLinkStatsMs >= 1000) {
         g_lastLinkStatsMs = millis();
         writeFcLinkStats();
@@ -498,8 +1052,10 @@ void setup() {
     Serial.println();
     Serial.println("Clean LoRa Link");
     printStatus();
+    g_rfScheduler.begin(g_uid, activeRate());
     g_radioReady = configureRadio(rfFrequencyForHop(0));
     if (!g_radioReady) Serial.println("radio fault: CLI remains available");
+    else startRfTimer();
 }
 
 void loop() {
@@ -509,7 +1065,7 @@ void loop() {
 #else
     rxLoop();
 #endif
-    digitalWrite(STATUS_LED_PIN, millis() - g_lastUplinkMs < 250 ? HIGH : LOW);
+    digitalWrite(STATUS_LED_PIN, isLinkFresh(millis(), g_lastUplinkMs) ? HIGH : LOW);
     yield();
 }
 

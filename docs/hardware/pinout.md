@@ -13,6 +13,9 @@ Pin defaults are PlatformIO build flags in [platformio.ini](../../platformio.ini
 TX uses this UART for CRSF handset input and telemetry back to the handset. RX
 uses it for CRSF RC and link-stat output to the flight controller.
 
+The `rc-rp2350` handset firmware uses the same UART pins for CRSF output to the
+TX module.
+
 ## SX1280
 
 | Signal | Default |
@@ -28,6 +31,38 @@ uses it for CRSF RC and link-stat output to the flight controller.
 | TXEN | GP15 |
 
 The status LED defaults to GP25.
+
+## RC RP2350 Handset Inputs
+
+The `rc-rp2350` bring-up firmware currently reads four ADC inputs and four
+3-position switches:
+
+| Function | Default |
+| --- | --- |
+| Aileron ADC | GP26 |
+| Elevator ADC | GP27 |
+| Rudder ADC | GP28 |
+| Throttle ADC | GP29 |
+| Switch A | GP1, GP2 |
+| Switch B | GP3, GP6 |
+| Switch C | GP7, GP10 |
+| Switch D | GP11, GP12 |
+| Power button | GP22 |
+| Power I2C SDA | GP4 |
+| Power I2C SCL | GP5 |
+
+## RC Handset Power
+
+| Signal | Default |
+| --- | --- |
+| Power/QON button | GP22, active low |
+| Power I2C SDA | GP4 |
+| Power I2C SCL | GP5 |
+| BQ2562X I2C address | `0x6A` |
+
+`rc-rp2350` can gate boot on a held power button via `RC_SKIP_POWER_ON_SEQUENCE=0`.
+Long-press power-off uses the same GPIO as the POWMAN wake source and requests
+BQ2562X ship mode when the charger is present.
 
 ## Override Example
 

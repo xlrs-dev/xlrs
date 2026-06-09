@@ -1,24 +1,56 @@
 # Documentation
 
-The active firmware is a clean PlatformIO RP2040/Pico + SX1280 LoRa TX/RX pair.
-It is ELRS-like, but not ExpressLRS OTA compatible.
+XLRS is timing-sensitive firmware for a paired RP2040/Pico + SX1280 2.4 GHz LoRa
+TX/RX, plus an RP2350 RC handset. It is ExpressLRS-*like* (CRSF in/out, FHSS,
+link stats) but **not** ExpressLRS OTA compatible. The firmware that builds and
+flashes is the PlatformIO `src/` tree.
 
-## Start Here
+```text
+CRSF handset ─▶ TX ─▶ SX1280 LoRa + FHSS ─▶ RX ─▶ CRSF flight controller
+```
 
-- [Build, Test, Flash](build-test-flash.md)
+## Start here
+
 - [Getting Started](getting-started.md)
-- [Pinout](hardware/pinout.md)
-- [RC RP2350 Handset Port](rc-rp2350/index.md)
+- [Build, Test, Flash](build-test-flash.md)
+- [Pinout](hardware/pinout.md) · [SX1280 wiring](hardware/sx1280-wiring.md)
 
-## Current Interfaces
+## Developer
 
-- TX: CRSF handset input on GP8/GP9 UART.
-- RX: CRSF RC and link-stat output on GP8/GP9 UART.
-- RC RP2350: handset input sampler and CRSF output to the TX module.
-- USB serial CLI on both roles for binding phrase, rate, status, and reboot.
-- `rc.v1` USB binding commands on TX/RX direct USB, plus RC USB TX-binding proxy
-  and state discovery for the WebUI.
-- RC USB serial CLI for bring-up (`status`, `channels`, `power`, `reboot`).
+- [Code map](developer/code-map.md) — where everything lives in `src/`/`lib/`.
+- [Architecture](developer/architecture.md) — roles, timing, slots, framing.
+- [OTA protocol](developer/ota-protocol.md) — frame layout and `uid_check`.
+- [Timing & scheduler](developer/timing-and-scheduler.md) — tick cadence and PFD.
+- [Telemetry & link stats](developer/telemetry-and-link-stats.md)
+- [Safety & failsafe](developer/safety-and-failsafe.md)
+- [Configuration](developer/configuration.md) — build flags and runtime CLI.
+- [Terminology](developer/terminology.md) — naming source of truth.
+- [Testing](developer/testing.md)
 
-Older XLRS/Pico SDK design notes may still exist in this tree for reference, but
-they are no longer the active build contract.
+## Interfaces
+
+- [RX CRSF output](interfaces/rx-crsf.md)
+- [TX controller CRSF](interfaces/tx-controller-crsf.md) ·
+  [TX controller UART](interfaces/tx-controller-uart.md)
+- [CRSF binding](crsf/binding.md)
+- [RF config storage](interfaces/rf-config-storage.md)
+
+## RC handset (RP2350)
+
+- [Overview](rc-rp2350/index.md) · [Architecture](rc-rp2350/architecture.md)
+- [USB `rc.v1` protocol](rc-rp2350/usb-protocol-rc-v1.md) ·
+  [WebUI workflows](rc-rp2350/webui-workflows.md)
+
+## Hardware & troubleshooting
+
+- [Bench bring-up](hardware/bench-bringup.md)
+- [Symptom matrix](troubleshooting/symptom-matrix.md) ·
+  [Serial logs](troubleshooting/serial-logs.md) ·
+  [SX1280 PHY init](troubleshooting/sx1280-phy-init.md)
+
+---
+
+The current build contract is the PlatformIO `src/` firmware. The `lib/xlrs/`
+core and `apps/` mains are an earlier clean-slate design kept for reference
+(linted/tested via the CMake project under `test/`); some developer notes still
+describe that design's intent. Where they disagree with `src/`, `src/` wins.

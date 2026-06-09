@@ -1,65 +1,134 @@
-# Clean LoRa Link
+# XLRS — 2.4 GHz LoRa Control Link
 
-PlatformIO firmware for a paired RP2040/Pico + SX1280 radio link. It is
-ELRS-like in shape, but it is not ExpressLRS OTA compatible.
+XLRS is timing-sensitive radio-link firmware for a paired **TX/RX** running on
+Raspberry Pi Pico (RP2040) boards with **Semtech SX1280** 2.4 GHz radios. It is
+ExpressLRS-*like* in shape — CRSF in, CRSF out, FHSS, link statistics — but it
+is **not** ExpressLRS OTA compatible. The over-the-air format, binding, and
+hopping are XLRS-native.
 
 ```text
-RC handset or CRSF handset -> TX Pico -> SX1280 LoRa/FHSS -> RX Pico -> CRSF flight controller
+RC handset / CRSF handset ──▶ TX Pico ──▶ SX1280 LoRa + FHSS ──▶ RX Pico ──▶ CRSF flight controller
+                                              (2.4 GHz)
+              downlink telemetry  ◀──────────────────────────────  link stats / RSSI / LQ
 ```
+
+The repository also includes an **RC handset** firmware target (RP2350) that
+reads sticks/switches and drives a TX module over CRSF.
+
+---
 
 ## Quick Start
 
-```bash
-scripts/check-env.sh
-scripts/test.sh
-scripts/build.sh
-```
-
-Manual PlatformIO commands:
+Everything is driven by [PlatformIO](https://platformio.org/) and a small set of
+wrapper scripts. From the repository root:
 
 ```bash
-pio test -e native
-pio run -e tx_lora_pico
-pio run -e rx_lora_pico
-pio run -e rc-rp2350
+scripts/check-env.sh   # verify the toolchain (pio, python3, ...)
+scripts/test.sh        # host-native Unity tests (pio test -e native)
+scripts/build.sh       # build the TX/RX firmware pair
 ```
 
 Flash one Pico at a time in BOOTSEL mode:
 
 ```bash
-scripts/flash.sh tx
-scripts/flash.sh rx
-scripts/flash.sh rc
+scripts/flash.sh tx    # → .pio/build/tx_lora_pico/firmware.uf2
+scripts/flash.sh rx    # → .pio/build/rx_lora_pico/firmware.uf2
+scripts/flash.sh rc    # → .pio/build/rc-rp2350/firmware.uf2  (handset)
 ```
 
-## Runtime CLI
+Equivalent manual PlatformIO commands:
 
-USB serial runs at 115200 baud on both TX and RX.
+```bash
+pio test -e native
+pio run  -e tx_lora_pico
+pio run  -e rx_lora_pico
+pio run  -e rc-rp2350
+```
+
+See [docs/build-test-flash.md](docs/build-test-flash.md) for the full workflow,
+including `FLASH_METHOD=uf2|picotool` and serial monitoring.
+
+---
+
+## PlatformIO Environments
+
+| Environment | Board | Role |
+| --- | --- | --- |
+| `tx_lora_pico` | RP2040 | CRSF handset input, LoRa uplink, telemetry back to handset |
+| `rx_lora_pico` | RP2040 | LoRa receiver, CRSF RC + link-stats output to a flight controller |
+| `rc-rp2350` | RP2350 | RC handset firmware: stick/switch sampling, OLED, CRSF out to a TX module |
+| `tx_usb_diag` | RP2040 | `tx_lora_pico` with USB diagnostic logging (`LORA_USB_DIAG`) |
+| `tx_crsf_diag` | RP2040 | `tx_lora_pico` with CRSF diagnostic logging (`LORA_CRSF_DIAG`) |
+| `native` | host | Off-device Unity tests for protocol/scheduler/config helpers |
+
+`tx_lora_pico` and `rx_lora_pico` are the default build targets. The default
+binding phrase, pins, and rates are build flags in
+[platformio.ini](platformio.ini).
+
+---
+
+## How the Link Works
+
+- **Roles are fixed at build time.** One firmware image is the time-master TX,
+  the other is the RX, selected by `-DLORA_TX_ROLE=1` / `-DLORA_RX_ROLE=1`.
+- **Binding is phrase-based.** Both ends must share the same binding phrase. The
+  phrase derives an 8-byte **Link UID**, which seeds the SX1280 sync word, the
+  FHSS hop sequence, and a `uid_check` value carried in every OTA frame. There is
+  no over-the-air pairing handshake — matching phrases bind the pair.
+- **FHSS is on by default** across 40 channels (2404–2482 MHz, 2 MHz spacing).
+  The TX is the time master; the RX disciplines its own tick clock to the TX with
+  a phase/frequency detector (PFD) so both ends hop together.
+- **Two rates** are available: `L250` (≈250 Hz, SF6) and `L100` (≈100 Hz, SF5
+  with periodic downlink telemetry slots). Both use 812.5 kHz bandwidth.
+- **OTA frames are plaintext.** A 33-byte frame carries a 22-byte payload plus a
+  CRC16-CCITT and the binding-derived `uid_check`. These reject corruption and
+  wrong-link traffic, but they are **not** authentication or encryption.
+- **Failsafe is loss-driven.** When the uplink goes stale (no valid frame within
+  the failsafe window, default 250 ms) the RX **stops emitting CRSF RC frames**
+  so the flight controller sees RXLOSS and runs its own failsafe policy.
+
+Protocol constants live in
+[include/lora_link/protocol.h](include/lora_link/protocol.h) and the per-tick
+scheduler/state machine in
+[include/lora_link/rf/scheduler.h](include/lora_link/rf/scheduler.h).
+
+---
+
+## Runtime CLI (TX / RX)
+
+USB serial runs at **115200 baud** on both TX and RX. Commands:
 
 ```text
-bind get
-bind set <1..32 byte phrase>
-bind clear
-rate L250
-rate L100
-status
-reboot
+bind get                 show the current binding phrase, UID, and uid_check
+bind set <1..32 chars>   set and persist a new binding phrase (requires reboot)
+bind clear               clear the persisted phrase back to the build default
+rate L250                switch to the 250 Hz rate
+rate L100                switch to the 100 Hz rate (with downlink telemetry)
+status                   print role, link health, and scheduler diagnostics
+channels                 print the current RC channel values
+reboot                   reboot the device
 ```
 
-Both devices must use the same binding phrase. The phrase derives the UID used
-for the LoRa sync word, FHSS sequence, and OTA packet validation.
+TX and RX also accept the `rc.v1` binding commands over direct USB
+(`binding_get`/`binding_set`/`binding_clear`/`binding_verify` with
+`target=tx|rx`), used by the WebUI binding proxy.
 
-The `rc-rp2350` handset bring-up firmware has its own USB console:
+---
+
+## RC Handset (`rc-rp2350`)
+
+The RP2350 handset firmware samples sticks and switches, drives an OLED, manages
+battery/charging, and emits CRSF to the TX module. It has its own USB console:
 
 ```text
-status
-channels
-power
-reboot
+status      handset state summary
+channels    live channel values
+power       battery / charger status
+reboot      reboot the handset
 ```
 
-It also accepts the implemented `rc.v1` WebUI subset for discovery, state, and
-TX binding proxy:
+It also implements the `rc.v1` WebUI subset for discovery, live state, and a
+TX-binding proxy:
 
 ```text
 rc.v1 hello
@@ -68,20 +137,15 @@ rc.v1 state
 rc.v1 binding_set target=tx phrase=<phrase>
 ```
 
-## PlatformIO Environments
+Handset architecture and the WebUI protocol are documented under
+[docs/rc-rp2350/](docs/rc-rp2350/index.md). The browser config tool lives in
+[tools/rc-webui/](tools/rc-webui).
 
-| Environment | Role |
-| --- | --- |
-| `tx_lora_pico` | CRSF handset input, LoRa uplink, CRSF telemetry back to handset |
-| `rx_lora_pico` | LoRa receiver, CRSF RC/link-stat output to flight controller |
-| `rc-rp2350` | RP2350 handset bring-up firmware, CRSF output to TX module |
-| `native` | Host tests for protocol/config helpers |
-
-The default phrase and pins are build flags in [platformio.ini](platformio.ini).
-RC handset architecture and WebUI protocol notes live in
-[docs/rc-rp2350](docs/rc-rp2350/index.md).
+---
 
 ## Default Pins
+
+Radio and CRSF pins are build flags in [platformio.ini](platformio.ini).
 
 | Signal | Pico pin |
 | --- | --- |
@@ -97,16 +161,87 @@ RC handset architecture and WebUI protocol notes live in
 | SX1280 RST | GP22 |
 | SX1280 RXEN | GP14 |
 | SX1280 TXEN | GP15 |
+| Status LED | GP25 |
 
-## Notes
+Full pinout and SX1280 wiring: [docs/hardware/pinout.md](docs/hardware/pinout.md)
+and [docs/hardware/sx1280-wiring.md](docs/hardware/sx1280-wiring.md).
 
-- RF is SX1280 LoRa only, with `L250` and `L100` rates.
-- FHSS is enabled by default with `RF_FIXED_CHANNEL=-1`. Set that build flag to
-  a non-negative channel index only for bench/debug fixed-channel operation.
-- OTA frames are plaintext. CRC16 plus the binding-derived `uid_check` reject
-  corruption and wrong-link traffic, but they are not authentication or
-  encryption.
-- RX stops CRSF RC output when uplink is stale so the flight controller can see
-  RXLOSS.
-- The active firmware is under [src/main.cpp](src/main.cpp) and shared helpers
-  are under [include/lora_link/protocol.h](include/lora_link/protocol.h).
+---
+
+## Repository Layout
+
+```text
+apps/                 (legacy CMake role mains — not built by PlatformIO)
+include/
+  lora_link/          public protocol + scheduler + control-frame headers
+  rc_handset/         RC handset module headers
+src/
+  main.cpp            TX/RX role firmware (role selected by build flag)
+  protocol.cpp        OTA frames, CRC, UID/FHSS, CRSF, RC packing, config
+  lora_link/rf/       per-tick RF scheduler + RX timing/PFD
+  control_frame.cpp   control-frame helpers
+  rc_handset/         RC handset firmware (input, display, power, USB rc.v1)
+lib/
+  CrsfProtocol/       CRSF transmit helpers (SimpleTxCrsf)
+  crsfSerial/         CRSF serial parsing
+  UARTProtocol/       handset↔TX UART protocol
+  crc8/               CRSF CRC8
+  xlrs/               legacy XLRS core (CMake-linted, not flashed — see below)
+test/                 host-native Unity tests (CMake project, used by lint)
+tools/rc-webui/       browser-based RC config tool
+docs/                 developer + hardware + interface + troubleshooting docs
+scripts/              build/test/flash/lint/monitor helpers
+datasheets/           vendor datasheets (fetch with scripts/fetch-datasheets.sh)
+platformio.ini        build environments and pin/rate flags
+```
+
+> **Note on `lib/xlrs/` and `apps/`.** These hold an earlier clean-slate "XLRS
+> core" (a CMake/Pico-SDK layered design). They are linted and unit-tested via
+> the CMake project under `test/`, but the firmware that actually builds and
+> flashes is the PlatformIO `src/` tree above. Treat `lib/xlrs/` as reference
+> until it is either folded in or removed.
+
+A fuller map is in [docs/developer/code-map.md](docs/developer/code-map.md).
+
+---
+
+## Documentation
+
+Start at the [documentation index](docs/index.md).
+
+- [Getting Started](docs/getting-started.md)
+- [Build, Test, Flash](docs/build-test-flash.md)
+- Developer: [code map](docs/developer/code-map.md) ·
+  [architecture](docs/developer/architecture.md) ·
+  [OTA protocol](docs/developer/ota-protocol.md) ·
+  [timing & scheduler](docs/developer/timing-and-scheduler.md) ·
+  [terminology](docs/developer/terminology.md)
+- Hardware: [pinout](docs/hardware/pinout.md) ·
+  [SX1280 wiring](docs/hardware/sx1280-wiring.md) ·
+  [bench bring-up](docs/hardware/bench-bringup.md)
+- Interfaces: [RX CRSF](docs/interfaces/rx-crsf.md) ·
+  [TX controller CRSF](docs/interfaces/tx-controller-crsf.md)
+- RC handset: [overview](docs/rc-rp2350/index.md)
+- Troubleshooting: [symptom matrix](docs/troubleshooting/symptom-matrix.md) ·
+  [serial logs](docs/troubleshooting/serial-logs.md)
+
+Contributor workflow and the docs-update contract are in
+[CONTRIBUTING.md](CONTRIBUTING.md). Agent/automation instructions are in
+[AGENTS.md](AGENTS.md).
+
+---
+
+## Safety Notes
+
+This firmware drives RC links. Treat these areas as safety-sensitive and validate
+changes on the bench:
+
+- Failsafe behavior and CRSF output gating.
+- RF scheduler timing, slot selection, FHSS advance, and PFD updates.
+- Binding identity, Link UID derivation, sync words, and `uid_check`.
+- RF region/frequency tables and TX power.
+- OTA frame formats and the flash-backed config schema.
+
+FHSS is enabled by default (`RF_FIXED_CHANNEL=-1`). Set `RF_FIXED_CHANNEL` to a
+non-negative channel index only for bench/debug fixed-channel operation, and
+review regional RF regulations before transmitting above bench power levels.

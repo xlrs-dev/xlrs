@@ -1,198 +1,123 @@
-# XLRS Link Core Configuration
+# Configuration
 
-This document provides a comprehensive guide to the compile-time (build) and runtime configurations of the clean-slate XLRS 2.4 GHz link core.
+Configuration for the **active PlatformIO firmware** (`src/`). Build-time options
+are flags in [platformio.ini](../../platformio.ini); runtime options are set over
+the USB serial CLI and persisted in flash. (The legacy `lib/xlrs/` core used CMake
+cache variables instead — those do not apply here.)
 
----
+## 1. Build-time configuration
 
-## 1. Build-Time (Compile-Time) Configuration
+All flags below are defined per-environment in `platformio.ini`. Override them by
+editing that file or layering your own environment.
 
-Build-time parameters are hardcoded into the binary during compilation. They dictate hardware targets, pin connections, SPI/UART assignments, and default software features.
+### Role selection
 
-### A. CMake Targets
-Firmware builds are configured as Pico SDK CMake targets:
+Exactly one role must be set; it picks the code path in `src/main.cpp`.
 
-* **`xlrs_tx`**
-  * Production TX module firmware using the `lib/xlrs/` core with `Sx1280NativePhy`.
-* **`xlrs_rx`**
-  * Production RX module firmware using the `lib/xlrs/` core with `Sx1280NativePhy`.
+- `LORA_TX_ROLE=1` — TX (time master): CRSF in, RC uplink, telemetry listen.
+- `LORA_RX_ROLE=1` — RX: RC receive, CRSF + link-stats out, failsafe gating.
 
----
+### Radio / link
 
-### B. Hardware & Pinout Cache Variables
-Pins are configured as CMake cache variables and emitted as target compile definitions. Override them at configure time with `-D...=...`.
+- `DEFAULT_BINDING_PHRASE` (default `"Kikobot-02"`) — fallback binding phrase
+  when none is persisted. Derives the Link UID, sync word, FHSS sequence, and
+  `uid_check`.
+- `RF_FIXED_CHANNEL` (default `-1`) — `-1` enables FHSS across all 40 channels.
+  Set a non-negative channel index only for bench/debug fixed-channel operation.
 
-#### 1. Radio Module SPI Configuration (SX1280)
-* **`XLRS_SX128X_SPI_SCK`** (default `18`) — SPI clock pin.
-* **`XLRS_SX128X_SPI_MOSI`** (default `19`) — SPI Master-Out Slave-In pin.
-* **`XLRS_SX128X_SPI_MISO`** (default `16`) — SPI Master-In Slave-Out pin.
-* **`XLRS_SX128X_SPI_CS`** (default `17`) — SPI Chip Select pin.
-* **`XLRS_SX128X_SPI_BUSY`** (default `20`) — SX1280 busy indicator pin.
-* **`XLRS_SX128X_SPI_DIO1`** (default `21`) — DIO1 pin for TX-done/RX-done interrupts.
-* **`XLRS_SX128X_SPI_RST`** (default `22`) — Reset pin.
-* **`XLRS_SX128X_RXEN`** (default `14`) / **`XLRS_SX128X_TXEN`** (default `15`) — Front-end LNA/PA switching pins.
-* **`XLRS_SX128X_REGULATOR_MODE`** (default `0`) — SX1280 regulator mode, where `0` is LDO and `1` is DC-DC. Use DC-DC only on boards with the required SX1280 inductor populated.
+### SX1280 pins
 
-#### 2. TX UART Interface Configuration
-* **`XLRS_UART_TX_PIN`** (default `8`) / **`XLRS_UART_RX_PIN`** (default `9`) — TX module channel/control UART.
+| Flag | Default | Signal |
+| --- | --- | --- |
+| `SX128X_SPI_SCK` | 18 | SPI clock |
+| `SX128X_SPI_MOSI` | 19 | SPI MOSI |
+| `SX128X_SPI_MISO` | 16 | SPI MISO |
+| `SX128X_SPI_CS` | 17 | Chip select |
+| `SX128X_SPI_BUSY` | 20 | Busy |
+| `SX128X_SPI_DIO1` | 21 | DIO1 (TX/RX-done IRQ) |
+| `SX128X_SPI_RST` | 22 | Reset |
+| `SX128X_RXEN` | 14 | RX front-end enable |
+| `SX128X_TXEN` | 15 | TX front-end enable |
+| `STATUS_LED_PIN` | 25 | Status LED |
 
-#### 3. RX CRSF Interface Configuration
-* **`XLRS_CRSF_TX_PIN`** (default `8`) / **`XLRS_CRSF_RX_PIN`** (default `9`) — RX module CRSF UART to the flight controller.
-* **`XLRS_STATUS_LED_PIN`** (default `10`, Pico pin 13) — TX/RX status LED GPIO.
-* **`XLRS_STATUS_LED_ACTIVE_LOW`** (default `ON`) — set `OFF` if the LED is active high.
+### CRSF UART
 
----
+- `CRSF_UART_TX_PIN` (default `8`), `CRSF_UART_RX_PIN` (default `9`).
+- `CRSF_UART_BAUD` (default `400000`).
 
-### C. Feature Control Macros
-Configure high-level software settings:
+On the TX this UART takes CRSF in from the handset; on the RX it emits CRSF to the
+flight controller.
 
-* **`XLRS_DEFAULT_BINDING_PHRASE`** (default `"Kikobot-02"`)
-  * String literal used to seed the default **Link UID** if a customized bind phrase is not active.
+### Diagnostic builds
 
-Example:
+- `LORA_USB_DIAG=1` (`tx_usb_diag` env) — extra USB diagnostic logging.
+- `LORA_CRSF_DIAG=1` (`tx_crsf_diag` env) — CRSF diagnostic logging.
 
-```bash
-cmake -S . -B build -G Ninja \
-  -DXLRS_DEFAULT_BINDING_PHRASE="bench-pair-01" \
-  -DXLRS_STATUS_LED_PIN=25
+### RC handset (`rc-rp2350`)
+
+Built for the RP2350 board with its own flags, including
+`RC_CRSF_SIMPLETX_FRAME_US`, `RC_HANDSET_ENABLE_CORE1`, and
+`RC_SKIP_POWER_ON_SEQUENCE`. See [platformio.ini](../../platformio.ini) and
+[../rc-rp2350/index.md](../rc-rp2350/index.md).
+
+## 2. Runtime configuration
+
+Set over the USB serial CLI (115200 baud) and persisted in flash as a
+`ConfigRecord` (magic `LRL1`, CRC-protected). See
+[../build-test-flash.md](../build-test-flash.md) for the full command list.
+
+### Binding
+
+A binding phrase (1–32 characters) derives the link identity. Both ends must use
+the same phrase.
+
+```text
+bind get                 show phrase, UID, uid_check
+bind set <phrase>        set + persist (requires reboot to take effect)
+bind clear               revert to DEFAULT_BINDING_PHRASE
 ```
 
----
+- **Link UID** — 8 bytes derived from the phrase (`deriveUid`), seeds the FHSS
+  sequence and the SX1280 sync word (`syncWordFromUid`).
+- **`uid_check`** — 32-bit value (`uidCheck`) stamped into every OTA frame so a
+  receiver rejects traffic from any other binding. It is an anti-crosstalk
+  identity filter, **not** authentication.
 
-### D. Build, Test, Flash, and Monitor Scripts
+Binding can also be driven over `rc.v1` USB commands and the CRSF binding-control
+frame (`0x7D`). See [../crsf/binding.md](../crsf/binding.md).
 
-* **`scripts/check-env.sh`** verifies CMake, Ninja, Python, Pico SDK, Arm GCC/newlib, and optional USB-capable `picotool`.
-* **`scripts/build.sh`** configures and builds `xlrs_tx` and `xlrs_rx`.
-* **`scripts/test.sh`** runs the host-native CMake/CTest suite in `test/`.
-* **`scripts/flash.sh tx|rx|both`** flashes UF2 files using USB-capable `picotool` when available, else UF2 mass-storage copy.
-* **`scripts/monitor.sh tx|rx|both`** tails USB CDC logs at 115200 baud, with `[TX]`/`[RX]` prefixes for dual monitoring.
-* **`scripts/flash-monitor.sh tx|rx|both`** builds, flashes, then starts monitoring.
+### Rate
 
----
+Two rates, defined in the `kRates` table in `src/protocol.cpp`:
 
-## 2. Runtime Configuration
+| Rate | Packet period | Modulation | Bandwidth | Telemetry |
+| --- | --- | --- | --- | --- |
+| `L250` | 4000 µs (≈250 Hz) | LoRa SF6 | 812.5 kHz | none |
+| `L100` | 10000 µs (≈100 Hz) | LoRa SF5 | 812.5 kHz | every 64th slot (downlink) |
 
-Runtime configurations are dynamically resolved on boot, computed mathematically, or negotiated over-the-air between the TX and RX.
+Both use coding rate 5 and a FHSS hop interval of 4 ticks. Switch at runtime:
 
-### A. Core Identifiers
-* **Link UID (8 bytes / 64-bit)**
-  * **Source:** Derived by hashing the binding phrase with 64-bit **FNV-1a** (fast, non-cryptographic):
-    $$\text{Link UID} = \text{FNV-1a}(\text{Binding Phrase})$$
-  * **Implemented:** `linkUidFromPhrase()` in [`lib/xlrs/link/Uid.h`](../../lib/xlrs/link/Uid.h)
-    (big-endian split of the hash). Verified in the native suite: deterministic, phrase-sensitive,
-    and the bind property (same phrase ⇒ identical FHSS sequence; else isolation).
-  * **Role:** Seeds the FHSS pseudorandom hop sequence and forms the radio's hardware sync word.
-    In the active PlatformIO SX1280 path, `syncWordFromUid()` returns the actual 8-bit RadioLib
-    sync word after mixing all UID bytes and avoiding zero/public sync values. OTA `uid_check`
-    is a 32-bit FNV-1a check over all 8 UID bytes.
-* **Device Serial (8 bytes / 64-bit)**
-  * **Source:** Read directly from the microcontroller's unique board ID (`flash_get_unique_board_id()`).
-  * **Role:** Identifies the specific hardware board for logging and remote diagnostic operations. It is *never* used for link-addressing or FHSS seeding to preserve bind-phrase flexibility.
-
----
-
-### B. Dynamically Swappable Rates (`RateConfig`)
-Packet rates are stored in a static constant lookup table `kRates` inside [`RateConfig.h`](../../lib/xlrs/link/RateConfig.h). Rates can be switched dynamically at runtime:
-
-```cpp
-struct RateConfig {
-    const char* name;
-    uint16_t    intervalUs;       // Packet period / timer cadence
-    uint8_t     fhssHopInterval;  // Frequency hop interval (packets)
-    uint8_t     tlmRatioDenom;    // Telemetry ratio (e.g., 1:8 slots)
-    Modulation  modulation;       // LoRa vs. FLRC modulation
-    float       bwKHz;            // LoRa bandwidth (0.0f for FLRC)
-    uint8_t     sf;               // LoRa Spreading Factor (0 for FLRC)
-    uint8_t     cr;               // Coding Rate
-    uint16_t    flrcBitrateKbps;  // FLRC bitrate (0 for LoRa)
-    uint8_t     payloadLen;       // Nominal payload size (8 bytes)
-    uint16_t    airtime8Us;       // Pre-calculated 8-byte frame airtime
-    uint16_t    airtime16Us;      // Pre-calculated 16-byte frame airtime
-};
+```text
+rate L250
+rate L100
 ```
-* The TX requests a rate change via `Link::requestRate(idx)`; the new `rateIndex` rides in the
-  periodic `OtaType::Sync` beacon and the RX adopts `kRates[idx]` on decode (`Link::service`). All
-  current rows share `fhssHopInterval = 4`, so hop timing is unchanged across a switch and the link
-  survives it without re-acquiring (a future rate with a different hop interval would instead trigger
-  a brief re-acquisition). Verified in the native sim.
 
----
+### FHSS
 
-### C. Frequency-Hopping Spread Spectrum (FHSS) Table
-* **Channel Sequence:** ExpressLRS-compatible `FHSSrandomiseFHSSsequenceBuild` in
-  [`fhss/Fhss.h`](../../lib/xlrs/fhss/Fhss.h), seeded via `fhssSeedFromUid()` /
-  `elrsFhssSeedFromUid()` in [`Uid.h`](../../lib/xlrs/link/Uid.h) (UID bytes 2–5,
-  `OTA_VERSION` XOR on byte 5 — ELRS `OtaGetUidSeed()` parity). ISM2G4: 80 channels,
-  240-entry sequence (`primaryBandCount`), sync channel index 40; sync channel appears
-  every 80 sequence indices. Block-local shuffle uses ELRS `rngN()` ([`elrs_random.h`](../../lib/xlrs/fhss/elrs_random.h)).
-* **Frequency Mapping:** ELRS ISM2G4 spread formula in
-  [`fhss/fhss_domain.h`](../../lib/xlrs/fhss/fhss_domain.h) (2400.4–2479.4 MHz, 80 channels).
-  `fhssFreqMHzForChannelIndex()` / `fhssInitialSyncFreqMHz()` (~2440.4 MHz).
-* **Cadence:** Frequency advances on hop boundaries: `tick % RateConfig.fhssHopInterval == 0`.
-* **Acquisition (Link.{h,cpp}, M4):** unlocked RX dwells on the **sync channel** frequency
-  (`fhssInitialSyncFreqMHz()`); TX hops the full sequence. Sync slots occur when
-  `Fhss::onSyncChannel(txPos(tick))` (channel index 40 in the sequence), not `pos == 0`.
-  Verified in the native sim (acquire → hop → loss → re-acquire). Golden vectors:
-  [`test/fhss_tests.cpp`](../../test/fhss_tests.cpp).
+40 channels spanning 2404–2482 MHz at 2 MHz spacing
+(`fhssFrequencyMHz(ch) = 2404 + ch*2`). The hop sequence is a UID-seeded
+coprime-stride walk (`fhssChannelFor`), so a bound TX/RX hop together. Disable
+hopping for the bench with `RF_FIXED_CHANNEL` (build-time).
 
----
+### Failsafe
 
-### D. Cipher Nonce Layout (`ICipher` Integration)
-When pluggable security (`AeadCipher` at M8) is active, a unique 96-bit nonce is constructed dynamically on both sides using structured byte-concatenation to completely eliminate bit-level overlaps:
+The RX stops emitting CRSF RC frames when the uplink is stale (no valid frame
+within `kFailsafeTimeoutMs`, default 250 ms), so the flight controller enters
+RXLOSS and owns failsafe policy. See [safety-and-failsafe.md](safety-and-failsafe.md).
 
-$$\text{Nonce} = \big[\,4\text{-byte } \text{session\_salt}\,\big] \,\, \big|\big| \,\, \big[\,6\text{-byte } \text{packet\_counter}\,\big] \,\, \big|\big| \,\, \big[\,2\text{-byte } \text{fhss\_index}\,\big]$$
+## See also
 
-* **`session_salt`:** 32-bit random salt negotiated during connection handshake. Seeded from weak hardware entropy combined with a flash-persisted monotonic boot counter.
-* **`packet_counter`:** 48-bit rolling tick counter to prevent wrap-arounds.
-* **`fhss_index`:** 16-bit current hop index.
-
-**Implemented (M8):** `AeadCipher` ([`crypto/AeadCipher.h`](../../lib/xlrs/crypto/AeadCipher.h)) =
-ChaCha20-Poly1305 ([`crypto/Chacha20Poly1305.h`](../../lib/xlrs/crypto/Chacha20Poly1305.h), verified
-against the RFC 8439 §2.8.2 known-answer vector) with a **4-byte truncated tag**. The `Nonce96`
-is the 12-byte ChaCha20 IETF nonce, built as `Nonce96::build(session_salt, packet_counter, fhss_index)`.
-It's wired into the Link RC path opt-in (`Link::setCipher`) — `seal()` on TX `slotSend`, `open()`
-on RX `service`, defaulting to `NullCipher` (plaintext) so it's off unless enabled. Verified in the
-native sim: sealed RC round-trips; tamper and wrong key are rejected (channels never decode).
-⚠ Scope: M8 seals the **RC payload**; sealing Sync/Telemetry frames and negotiating a per-session
-random `session_salt` at Connect (vs. the fixed sim value) are follow-ups.
-
----
-
-### E. Clock Synchronization (Pfd) & Failsafes
-* **Timing Corrections:** The Phase-Frequency Detector (`Pfd`) tracks crystal ppm offsets using a Proportional-Integral (PI) loop (`Kp=1/4`, `Ki=1/256`). It takes the normalized arrival offset (`actual_arrival - expected_arrival - precomputed_airtime`) and nudges the local hardware timer registers dynamically to null out frequency drift.
-* **Failsafe Operations:** `NoPulses` (stops the CRSF stream → FC failsafe) or `Hold` (holds last
-  valid sticks). Implemented in [`Link.{h,cpp}`](../../lib/xlrs/link/Link.cpp): RX state machine
-  Disconnected → Connecting → Connected → Failsafe; falls to `Failsafe` after `FAILSAFE_MISS`
-  consecutive missed uplink slots, and `Link::outputActive()` returns false under `NoPulses` so
-  the app stops emitting CRSF. Verified in the native two-node sim (connect → channel flow →
-  induced loss → NoPulses failsafe → recovery; mismatched phrase never connects).
-
----
-
-### F. Telemetry Slotting & Link Statistics (M5)
-
-* **Slot schedule (both ends agree per tick):** `pos = (tick / fhssHopInterval) % seqLen`.
-  `Fhss::onSyncChannel(pos)` → **Sync** (TX→RX beacon on the sync RF channel); else
-  `tick % tlmRatioDenom == 0`
-  → **Telemetry** (RX→TX downlink); else → **Uplink** (TX→RC→RX). Each slot has exactly one sender
-  and one receiver, computed identically on both ends — **collision-free TDM**, no legacy "holdoff."
-* **Telemetry downlink (`OtaType::TlmDown`, RX→TX):** on telemetry slots the RX transmits its
-  uplink measurement (LQ / RSSI / SNR) so the TX side can show "how well the craft hears me."
-  The TX tracks the downlink reception ratio as `LinkStats.lqDown`.
-* **Link statistics to the FC:** the RX packs `LinkStats` into a CRSF `LINK_STATISTICS` (0x14)
-  10-byte frame via `buildCrsfLinkStatistics()`
-  ([`app/CrsfLinkStats.h`](../../lib/xlrs/app/CrsfLinkStats.h)). Uplink LQ is counted over **uplink
-  slots only** (Sync/Telemetry excluded, so a high telemetry ratio isn't read as packet loss).
-  Verified in the native sim (downlink reaches the TX without disturbing uplink RC; CRSF bytes correct).
-
----
-
-### G. Dynamic TX Power (M6)
-
-* **Policy:** LQ-first, RSSI-second, with hysteresis ([`link/DynamicPower.h`](../../lib/xlrs/link/DynamicPower.h)).
-  Raise power when uplink LQ sags (`< 80`); lower it only when LQ is high (`>= 99`) **and** there is
-  RSSI margin (`> -65 dBm`); hold in the deadband between. A step requires N consecutive readings, so
-  the controller doesn't oscillate (RSSI-only control would be twitchy).
-* **Inputs:** the TX feeds the controller the RX-reported uplink LQ/RSSI from `TlmDown` frames and
-  applies the result via `IRadioPhy::setOutputPowerDbm`. Verified as a unit (raise→max / lower→min /
-  deadband-hold) plus the TX↔power wiring in the sim (power steps down under a strong link). ⚠ The sim
-  does not close the power→RSSI feedback loop (MockPhy RSSI is fixed) — settling is validated on hardware.
+- [build-test-flash.md](../build-test-flash.md) — build flags in practice and the CLI.
+- [architecture.md](architecture.md) — how these settings drive the link.
+- [ota-protocol.md](ota-protocol.md) — frame format and `uid_check`.
+- [terminology.md](terminology.md) — naming.

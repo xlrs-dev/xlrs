@@ -43,6 +43,9 @@ static uint32_t g_validOtaFrames = 0;
 static uint32_t g_rejectedOtaFrames = 0;
 static constexpr uint16_t kRcSpikeJumpThreshold = 160;
 static constexpr uint16_t kRcSpikeConfirmTolerance = 80;
+static constexpr uint32_t kHandsetTelemetryIntervalMs = 250;
+static constexpr uint32_t kDownlinkTelemetryFreshMs = 2000;
+static constexpr uint32_t kTelemetryReplyGuardUs = 7000;
 #if LORA_RX_ROLE
 struct RfTimerIsrEvent {
     uint32_t timestampUs;
@@ -82,6 +85,13 @@ static uint32_t g_crsfInputRejects = 0;
 static uint32_t g_crsfInputSpikeHolds = 0;
 static uint32_t g_crsfInputBytes = 0;
 static uint32_t g_crsfBindingControlFrames = 0;
+static uint32_t g_lastDownlinkTelemetryMs = 0;
+static uint32_t g_lastHandsetTelemetryMs = 0;
+static uint32_t g_telemetryDio1Events = 0;
+static uint32_t g_telemetryReadAttempts = 0;
+static uint32_t g_telemetryWrongTypeFrames = 0;
+static uint32_t g_telemetryReadRejects = 0;
+static uint16_t g_lastTelemetryListenHop = 0;
 static uint8_t g_crsfByteRing[64];
 static uint8_t g_crsfByteRingPos = 0;
 static uint8_t g_telemetryListenSlotsRemaining = 0;
@@ -100,6 +110,9 @@ static uint32_t g_rxSpikeHolds = 0;
 static uint32_t g_lastFcChannelWriteUs = 0;
 static uint32_t g_fcChannelFrames = 0;
 static uint32_t g_fcChannelMaxGapUs = 0;
+static uint32_t g_rxTelemetryTransmitAttempts = 0;
+static uint32_t g_rxTelemetryTransmitDone = 0;
+static uint16_t g_lastTelemetryTransmitHop = 0;
 static RcSpikeGate g_rxOutputSpikeGate{};
 #endif
 
@@ -278,6 +291,7 @@ static bool configureRadio(float freqMHz) {
     }
     radio.setDio1Action(onDio1);
     radio.setCRC(2);
+    g_dio1 = false;
     radio.startReceive();
     g_rxWaiting = true;
     g_radioOp = RadioOp::Rx;
@@ -289,11 +303,11 @@ static void startReceiveOnHop() {
     if (!g_radioReady) return;
     digitalWrite(SX128X_TXEN, LOW);
     digitalWrite(SX128X_RXEN, HIGH);
+    g_dio1 = false;
     radio.setFrequency(rfFrequencyForHop(g_hop));
     radio.startReceive();
     g_rxWaiting = true;
     g_radioOp = RadioOp::Rx;
-    g_dio1 = false;
     g_lastRxHopAdvanceUs = micros();
 }
 
@@ -314,10 +328,10 @@ static void finishTransmitAndReceive(float receiveFrequencyMHz) {
     radio.finishTransmit();
     digitalWrite(SX128X_TXEN, LOW);
     digitalWrite(SX128X_RXEN, HIGH);
+    g_dio1 = false;
     radio.setFrequency(receiveFrequencyMHz);
     radio.startReceive();
     g_rxWaiting = true;
-    g_dio1 = false;
     g_radioOp = RadioOp::Rx;
 }
 
@@ -359,13 +373,18 @@ static void printStatus() {
                   static_cast<unsigned long>(g_rejectedOtaFrames));
 #if LORA_TX_ROLE
     const uint32_t crsfAgeMs = g_lastRcInputMs ? millis() - g_lastRcInputMs : 0xFFFFFFFFu;
-    Serial.printf(" ticks=%lu missed_ticks=%lu nonce=%u fhss=%u tx_done=%lu tlm=%lu tx_ok=%lu tx_try=%lu listen=%lu rc_failsafe=%lu crsf=%lu crsf_bind=%lu crsf_rej=%lu crsf_hold=%lu crsf_bytes=%lu crsf_age=%lu ch=%u,%u,%u,%u",
+    Serial.printf(" ticks=%lu missed_ticks=%lu nonce=%u fhss=%u tx_done=%lu tlm=%lu tlm_dio=%lu tlm_try=%lu tlm_bad=%lu tlm_type=%lu tlm_hop=%u tx_ok=%lu tx_try=%lu listen=%lu rc_failsafe=%lu crsf=%lu crsf_bind=%lu crsf_rej=%lu crsf_hold=%lu crsf_bytes=%lu crsf_age=%lu ch=%u,%u,%u,%u",
                   static_cast<unsigned long>(rfStats.timerTicks),
                   static_cast<unsigned long>(g_rfMissedTimerEvents + rfStats.missedTimerTicks),
                   rfStats.nonce,
                   rfStats.fhssIndex,
                   static_cast<unsigned long>(rfStats.txDone),
                   static_cast<unsigned long>(g_downlinkTelemetryFrames),
+                  static_cast<unsigned long>(g_telemetryDio1Events),
+                  static_cast<unsigned long>(g_telemetryReadAttempts),
+                  static_cast<unsigned long>(g_telemetryReadRejects),
+                  static_cast<unsigned long>(g_telemetryWrongTypeFrames),
+                  g_lastTelemetryListenHop,
                   static_cast<unsigned long>(g_uplinkTransmitSuccesses),
                   static_cast<unsigned long>(g_uplinkTransmitAttempts),
                   static_cast<unsigned long>(g_telemetryListenSlots),
@@ -411,6 +430,10 @@ static void printStatus() {
                   static_cast<unsigned long>(g_rxSpikeHolds),
                   static_cast<unsigned long>(g_fcChannelFrames),
                   static_cast<unsigned long>(g_fcChannelMaxGapUs));
+    Serial.printf(" tlm_tx=%lu tlm_done=%lu tlm_hop=%u",
+                  static_cast<unsigned long>(g_rxTelemetryTransmitAttempts),
+                  static_cast<unsigned long>(g_rxTelemetryTransmitDone),
+                  g_lastTelemetryTransmitHop);
 #endif
     Serial.printf(" config=%s\n", g_configFault ? "defaulted" : "ok");
 }
@@ -787,15 +810,29 @@ static void serviceTxCrsfInput() {
     }
 }
 
-static void sendTelemetryToHandset() {
+static void sendTelemetryToHandset(uint32_t nowMs) {
     uint8_t frame[16];
-    const size_t len = encodeCrsfLinkStats(g_lastRssi, g_lastSnr, g_linkQuality,
+    const uint8_t linkQuality = isLinkFresh(nowMs, g_lastDownlinkTelemetryMs, kDownlinkTelemetryFreshMs) ? g_linkQuality : 0;
+    const size_t len = encodeCrsfLinkStats(g_lastRssi, g_lastSnr, linkQuality,
                                            static_cast<uint8_t>(g_config.rate), frame, sizeof(frame));
-    if (len) Serial2.write(frame, len);
+    if (len) {
+        Serial2.write(frame, len);
+        g_lastHandsetTelemetryMs = nowMs;
+    }
+}
+
+static void serviceHandsetTelemetry() {
+    const uint32_t nowMs = millis();
+    if (g_lastHandsetTelemetryMs != 0 &&
+        static_cast<uint32_t>(nowMs - g_lastHandsetTelemetryMs) < kHandsetTelemetryIntervalMs) {
+        return;
+    }
+    sendTelemetryToHandset(nowMs);
 }
 
 static void txLoop() {
     serviceTxCrsfInput();
+    serviceHandsetTelemetry();
 
     if (g_dio1) {
         if (g_radioOp == RadioOp::Tx) {
@@ -806,12 +843,19 @@ static void txLoop() {
             ++g_uplinkTransmitSuccesses;
         } else if (g_radioOp == RadioOp::Rx) {
             OtaFrame rx{};
+            ++g_telemetryDio1Events;
+            ++g_telemetryReadAttempts;
             if (readOtaFrame(rx) && rx.type == OtaType::Telemetry) {
+                const uint32_t nowMs = millis();
                 g_linkQuality = rx.payload[0];
                 if (rx.payloadLen > 1) g_lastRssi = -static_cast<int16_t>(rx.payload[1]);
                 if (rx.payloadLen > 2) g_lastSnr = static_cast<int8_t>(rx.payload[2]);
+                g_lastDownlinkTelemetryMs = nowMs;
                 ++g_downlinkTelemetryFrames;
-                sendTelemetryToHandset();
+                sendTelemetryToHandset(nowMs);
+            } else {
+                if (rx.type != OtaType::Telemetry) ++g_telemetryWrongTypeFrames;
+                ++g_telemetryReadRejects;
             }
             startReceiveOnHop();
         } else {
@@ -826,6 +870,7 @@ static void txLoop() {
             ++g_telemetryListenSlots;
             g_sequence = g_rfScheduler.sequence();
             g_hop = g_rfScheduler.fhss().index();
+            g_lastTelemetryListenHop = g_hop;
             startReceiveOnHop();
             continue;
         }
@@ -938,6 +983,7 @@ static void rxLoop() {
     if (g_dio1) {
         if (g_radioOp == RadioOp::Tx) {
             g_rfScheduler.onTelemetryDone();
+            ++g_rxTelemetryTransmitDone;
             finishTransmitAndReceive(g_rfScheduler.fhss().frequencyMHz());
         } else if (g_radioOp == RadioOp::Rx) {
             OtaFrame frame{};
@@ -987,6 +1033,9 @@ static void rxLoop() {
                     tlm.payload[1] = static_cast<uint8_t>(g_lastRssi < 0 ? -g_lastRssi : g_lastRssi);
                     tlm.payload[2] = static_cast<uint8_t>(g_lastSnr);
                     tlm.payload[3] = static_cast<uint8_t>(g_config.rate);
+                    ++g_rxTelemetryTransmitAttempts;
+                    g_lastTelemetryTransmitHop = g_rfScheduler.fhss().index();
+                    busy_wait_us(kTelemetryReplyGuardUs);
                     startTransmitFrame(tlm, g_rfScheduler.fhss().frequencyMHz());
                 } else {
                     startReceiveOnHop();

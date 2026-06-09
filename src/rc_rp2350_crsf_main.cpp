@@ -1,21 +1,27 @@
 #ifndef UNIT_TEST
 
 #include <Arduino.h>
+#include <EEPROM.h>
 #include <stdio.h>
 #include <string.h>
 
 #include <string>
+#include <vector>
 
 #include "lora_link/protocol.h"
+#include "rc_handset/config/config.h"
 #include "rc_handset/core1/Runtime.h"
 #include "rc_handset/display/OledDisplay.h"
+#include "rc_handset/input/ArduinoInputSampler.h"
 #include "rc_handset/power/Rp2350Power.h"
 #include "rc_handset/telemetry/HandsetTelemetry.h"
 #include "rc_handset/usb/protocol.h"
 
 using namespace lora_link;
+namespace handset_config = rc_handset::config;
 using rc_handset::core1::LiveStateSnapshot;
 namespace handset_power = rc_handset::power;
+namespace handset_input = rc_handset::input;
 namespace handset_telemetry = rc_handset::telemetry;
 namespace handset_usb = rc_handset::usb;
 
@@ -58,6 +64,16 @@ static constexpr uint8_t kCrsfFrameLinkStatistics = 0x14;
 static constexpr uint8_t kCrsfFrameBatterySensor = 0x08;
 
 static uint32_t g_lastDisplayMs = 0;
+static uint32_t g_lastStreamStateMs = 0;
+static uint32_t g_streamStateIntervalMs = 0;
+static bool g_streamStateEnabled = false;
+static rc_handset::core1::ConfigSnapshot g_activeConfig = rc_handset::core1::makeDefaultConfigSnapshot();
+static rc_handset::core1::ConfigSnapshot g_pendingConfig = rc_handset::core1::makeDefaultConfigSnapshot();
+static bool g_configFault = false;
+static bool g_calibrating = false;
+static uint16_t g_calMin[handset_config::kRcHandsetAxisCount] = {};
+static uint16_t g_calCenter[handset_config::kRcHandsetAxisCount] = {};
+static uint16_t g_calMax[handset_config::kRcHandsetAxisCount] = {};
 static LiveStateSnapshot g_liveState = rc_handset::core1::makeDefaultLiveStateSnapshot();
 static rc_handset::display::OledDisplay g_display;
 static handset_telemetry::HandsetTelemetry g_handsetTelemetry(
@@ -99,6 +115,218 @@ static uint16_t readAveragedAdc(uint8_t pin) {
     uint32_t sum = 0;
     for (uint8_t i = 0; i < 8; ++i) sum += analogRead(pin);
     return static_cast<uint16_t>((sum + 4) / 8);
+}
+
+static uint16_t readAxisAdc(uint8_t axis) {
+    const handset_input::ArduinoInputPins pins = handset_input::defaultRp2350InputPins();
+    if (axis >= handset_config::kRcHandsetAxisCount) return 0;
+    return readAveragedAdc(pins.analog[axis]);
+}
+
+static std::string joinU16(const uint16_t* values, uint8_t count) {
+    std::string out;
+    for (uint8_t i = 0; i < count; ++i) {
+        if (i) out += ",";
+        out += std::to_string(values[i]);
+    }
+    return out;
+}
+
+static std::string configCalMinString(const handset_config::RcHandsetConfig& cfg) {
+    uint16_t values[handset_config::kRcHandsetAxisCount];
+    for (uint8_t i = 0; i < handset_config::kRcHandsetAxisCount; ++i) values[i] = cfg.axes[i].calibration.min;
+    return joinU16(values, handset_config::kRcHandsetAxisCount);
+}
+
+static std::string configCalCenterString(const handset_config::RcHandsetConfig& cfg) {
+    uint16_t values[handset_config::kRcHandsetAxisCount];
+    for (uint8_t i = 0; i < handset_config::kRcHandsetAxisCount; ++i) values[i] = cfg.axes[i].calibration.center;
+    return joinU16(values, handset_config::kRcHandsetAxisCount);
+}
+
+static std::string configCalMaxString(const handset_config::RcHandsetConfig& cfg) {
+    uint16_t values[handset_config::kRcHandsetAxisCount];
+    for (uint8_t i = 0; i < handset_config::kRcHandsetAxisCount; ++i) values[i] = cfg.axes[i].calibration.max;
+    return joinU16(values, handset_config::kRcHandsetAxisCount);
+}
+
+static std::string configAxisBoolString(const handset_config::RcHandsetConfig& cfg) {
+    std::string out;
+    for (uint8_t i = 0; i < handset_config::kRcHandsetAxisCount; ++i) {
+        if (i) out += ",";
+        out += cfg.axes[i].inverted ? "1" : "0";
+    }
+    return out;
+}
+
+static std::string configAxisDeadzoneString(const handset_config::RcHandsetConfig& cfg) {
+    uint16_t values[handset_config::kRcHandsetAxisCount];
+    for (uint8_t i = 0; i < handset_config::kRcHandsetAxisCount; ++i) values[i] = cfg.axes[i].deadzone;
+    return joinU16(values, handset_config::kRcHandsetAxisCount);
+}
+
+static std::string configAxisFunctionString(const handset_config::RcHandsetConfig& cfg) {
+    std::string out;
+    for (uint8_t i = 0; i < handset_config::kRcHandsetAxisCount; ++i) {
+        if (i) out += ",";
+        out += std::to_string(static_cast<unsigned>(cfg.axes[i].function));
+    }
+    return out;
+}
+
+static std::string configChannelTrimString(const handset_config::RcHandsetConfig& cfg) {
+    std::string out;
+    for (uint8_t i = 0; i < handset_config::kRcHandsetChannelCount; ++i) {
+        if (i) out += ",";
+        out += std::to_string(cfg.channels[i].trim);
+    }
+    return out;
+}
+
+static std::string configChannelCutoffMinString(const handset_config::RcHandsetConfig& cfg) {
+    uint16_t values[handset_config::kRcHandsetChannelCount];
+    for (uint8_t i = 0; i < handset_config::kRcHandsetChannelCount; ++i) values[i] = cfg.channels[i].cutoffMin;
+    return joinU16(values, handset_config::kRcHandsetChannelCount);
+}
+
+static std::string configChannelCutoffMaxString(const handset_config::RcHandsetConfig& cfg) {
+    uint16_t values[handset_config::kRcHandsetChannelCount];
+    for (uint8_t i = 0; i < handset_config::kRcHandsetChannelCount; ++i) values[i] = cfg.channels[i].cutoffMax;
+    return joinU16(values, handset_config::kRcHandsetChannelCount);
+}
+
+static std::string configFilterString(const handset_config::RcHandsetConfig& cfg) {
+    return std::to_string(cfg.filter.adcSamples) + "," +
+           std::to_string(cfg.filter.smoothingPercent) + ",0,0";
+}
+
+static std::vector<handset_usb::ResponseField> configResponseFields(const handset_config::RcHandsetConfig& cfg) {
+    return {
+        {"version", "1"},
+        {"cal_min", configCalMinString(cfg)},
+        {"cal_center", configCalCenterString(cfg)},
+        {"cal_max", configCalMaxString(cfg)},
+        {"invert", configAxisBoolString(cfg)},
+        {"deadzone", configAxisDeadzoneString(cfg)},
+        {"function", configAxisFunctionString(cfg)},
+        {"trim", configChannelTrimString(cfg)},
+        {"cutoff_min", configChannelCutoffMinString(cfg)},
+        {"cutoff_max", configChannelCutoffMaxString(cfg)},
+        {"filter", configFilterString(cfg)},
+        {"filter.low_pass", std::to_string(cfg.filter.smoothingPercent)},
+        {"filter.high_pass", "0"},
+    };
+}
+
+static bool parseInt(const std::string& value, int32_t& out) {
+    if (value.empty()) return false;
+    char* end = nullptr;
+    const long parsed = strtol(value.c_str(), &end, 10);
+    if (!end || *end != '\0') return false;
+    out = static_cast<int32_t>(parsed);
+    return true;
+}
+
+static bool parseIndexField(const std::string& field, const char* prefix, uint8_t limit, uint8_t& index) {
+    const size_t prefixLen = strlen(prefix);
+    if (field.compare(0, prefixLen, prefix) != 0) return false;
+    int32_t parsed = 0;
+    if (!parseInt(field.substr(prefixLen), parsed) || parsed < 0 || parsed >= limit) return false;
+    index = static_cast<uint8_t>(parsed);
+    return true;
+}
+
+static bool applyPendingConfigField(const std::string& field, const std::string& value) {
+    int32_t parsed = 0;
+    uint8_t index = 0;
+    handset_config::RcHandsetConfig& cfg = g_pendingConfig.handsetConfig;
+
+    if (field == "filter") {
+        int values[4] = {0, 0, 0, 0};
+        const char* cursor = value.c_str();
+        char* end = nullptr;
+        for (uint8_t i = 0; i < 4; ++i) {
+            values[i] = static_cast<int>(strtol(cursor, &end, 10));
+            if (end == cursor) return false;
+            if (i < 3) {
+                if (*end != ',') return false;
+                cursor = end + 1;
+            }
+        }
+        cfg.filter.adcSamples = static_cast<uint8_t>(values[0]);
+        cfg.filter.smoothingPercent = static_cast<uint8_t>(values[1]);
+        return handset_config::validateRcHandsetConfig(cfg);
+    }
+
+    if (!parseInt(value, parsed)) return false;
+
+    if (parseIndexField(field, "cal.min.", handset_config::kRcHandsetAxisCount, index)) {
+        cfg.axes[index].calibration.min = static_cast<uint16_t>(parsed);
+    } else if (parseIndexField(field, "cal.center.", handset_config::kRcHandsetAxisCount, index)) {
+        cfg.axes[index].calibration.center = static_cast<uint16_t>(parsed);
+    } else if (parseIndexField(field, "cal.max.", handset_config::kRcHandsetAxisCount, index)) {
+        cfg.axes[index].calibration.max = static_cast<uint16_t>(parsed);
+    } else if (parseIndexField(field, "axis.invert.", handset_config::kRcHandsetAxisCount, index)) {
+        cfg.axes[index].inverted = parsed != 0;
+    } else if (parseIndexField(field, "axis.deadzone.", handset_config::kRcHandsetAxisCount, index)) {
+        cfg.axes[index].deadzone = static_cast<uint16_t>(parsed);
+    } else if (parseIndexField(field, "axis.function.", handset_config::kRcHandsetAxisCount, index)) {
+        cfg.axes[index].function = static_cast<handset_config::ChannelFunction>(parsed);
+    } else if (parseIndexField(field, "channel.trim.", handset_config::kRcHandsetChannelCount, index)) {
+        cfg.channels[index].trim = static_cast<int16_t>(parsed);
+    } else if (parseIndexField(field, "channel.cutoff_min.", handset_config::kRcHandsetChannelCount, index)) {
+        cfg.channels[index].cutoffMin = static_cast<uint16_t>(parsed);
+    } else if (parseIndexField(field, "channel.cutoff_max.", handset_config::kRcHandsetChannelCount, index)) {
+        cfg.channels[index].cutoffMax = static_cast<uint16_t>(parsed);
+    } else if (field == "filter.low_pass") {
+        cfg.filter.smoothingPercent = static_cast<uint8_t>(parsed);
+    } else if (field == "filter.high_pass") {
+        return true;
+    } else {
+        return false;
+    }
+    return handset_config::validateRcHandsetConfig(cfg);
+}
+
+static bool saveRcConfig() {
+    uint8_t record[handset_config::kRcHandsetConfigRecordSize];
+    size_t written = 0;
+    if (!handset_config::encodeRcHandsetConfigRecord(g_activeConfig.handsetConfig, record, sizeof(record), written)) {
+        return false;
+    }
+    for (size_t i = 0; i < written; ++i) EEPROM.write(i, record[i]);
+    return EEPROM.commit();
+}
+
+static void loadRcConfig() {
+    EEPROM.begin(256);
+    uint8_t record[handset_config::kRcHandsetConfigRecordSize];
+    for (size_t i = 0; i < sizeof(record); ++i) record[i] = EEPROM.read(i);
+    handset_config::RcHandsetConfig stored{};
+    if (handset_config::decodeRcHandsetConfigRecord(record, sizeof(record), stored)) {
+        g_activeConfig.handsetConfig = stored;
+        g_configFault = false;
+    } else {
+        g_activeConfig.handsetConfig = handset_config::defaultRcHandsetConfig();
+        g_configFault = false;
+    }
+    g_activeConfig.crsfFrameIntervalUs = rc_handset::core1::kDefaultCrsfFrameIntervalUs;
+    g_pendingConfig = g_activeConfig;
+}
+
+static void publishActiveConfig() {
+    g_activeConfig.generation = rc_handset::core1::publishConfig(g_activeConfig);
+    g_pendingConfig = g_activeConfig;
+}
+
+static void collectCurrentAdc(uint16_t out[handset_config::kRcHandsetAxisCount]) {
+    for (uint8_t axis = 0; axis < handset_config::kRcHandsetAxisCount; ++axis) out[axis] = readAxisAdc(axis);
+}
+
+static std::string currentAdcString() {
+    uint16_t values[handset_config::kRcHandsetAxisCount];
+    collectCurrentAdc(values);
+    return joinU16(values, handset_config::kRcHandsetAxisCount);
 }
 
 static void refreshLiveState() {
@@ -265,6 +493,53 @@ static void printBindingResponse(const handset_usb::ParsedCommand& command, cons
     }).c_str());
 }
 
+static const handset_usb::Argument* commandArg(const handset_usb::ParsedCommand& command, const char* key) {
+    for (const handset_usb::Argument& arg : command.arguments) {
+        if (arg.key == key) return &arg;
+    }
+    return nullptr;
+}
+
+static std::vector<handset_usb::ResponseField> stateResponseFields() {
+    refreshLiveState();
+    const uint32_t nowMs = millis();
+    if (g_liveState.haveChannels) {
+        g_handsetTelemetry.updateLocalChannels(g_liveState.channels, nowMs);
+    }
+    handset_telemetry::PacketCounters counters{};
+    counters.uplinkTransmitAttempts = g_liveState.framesSent;
+    counters.uplinkTransmitSuccesses = g_liveState.framesSent;
+    counters.rejectedOtaFrames = g_liveState.channelGuardRejects;
+    counters.lostPackets = g_liveState.channelSpikeHolds;
+    g_handsetTelemetry.updatePacketCounters(counters, nowMs);
+    g_handsetTelemetry.setConfigFault(g_configFault, nowMs);
+    g_handsetTelemetry.refresh(nowMs);
+    const handset_telemetry::HandsetTelemetryState& telemetry = g_handsetTelemetry.state();
+
+    uint16_t toggles[4] = {};
+    for (uint8_t i = 0; i < 4; ++i) toggles[i] = g_liveState.channels[i + 4];
+    const rc_handset::display::BatteryState txBattery = readTxBattery();
+    std::vector<handset_usb::ResponseField> fields = {
+        {"adc", currentAdcString()},
+        {"ch", joinU16(g_liveState.channels, lora_link::kRcChannelCount)},
+        {"toggles", joinU16(toggles, 4)},
+        {"lq", std::to_string(telemetry.linkQuality)},
+        {"rssi", std::to_string(telemetry.rssiDbm)},
+        {"snr", std::to_string(telemetry.snrDb)},
+        {"tx_present", telemetry.txStatus != handset_telemetry::FieldStatus::Missing ? "1" : "0"},
+        {"tx_status", handset_telemetry::fieldStatusName(telemetry.txStatus)},
+        {"link_status", handset_telemetry::fieldStatusName(telemetry.linkStatsStatus)},
+        {"uid", telemetry.faults.bindingUidMismatch ? "mismatch" : (telemetry.faults.bindingUidMissing ? "missing" : "match")},
+    };
+    if (txBattery.available) {
+        fields.push_back({"tx_batt_mv", std::to_string(txBattery.millivolts)});
+    }
+    if (telemetry.rxBatteryStatus != handset_telemetry::FieldStatus::Missing) {
+        fields.push_back({"rx_batt_mv", std::to_string(telemetry.rxBattery.millivolts)});
+    }
+    return fields;
+}
+
 static bool handleRcV1Command(const char* line) {
     if (strncmp(line, "rc.v1", 5) != 0) return false;
 
@@ -281,7 +556,7 @@ static bool handleRcV1Command(const char* line) {
             Serial.print(handset_usb::formatOk(command, {
                 {"role", "rc_handset"},
                 {"fw", "0.1"},
-                {"caps", "state,config,binding,tx_proxy"},
+                {"caps", "state,stream_state,config,calibration,binding,tx_proxy"},
             }).c_str());
             return true;
 
@@ -344,24 +619,140 @@ static bool handleRcV1Command(const char* line) {
             return true;
         }
 
-        case handset_usb::CommandType::State: {
-            refreshLiveState();
-            if (g_liveState.haveChannels) {
-                g_handsetTelemetry.updateLocalChannels(g_liveState.channels, millis());
-            }
-            handset_telemetry::PacketCounters counters{};
-            counters.uplinkTransmitAttempts = g_liveState.framesSent;
-            counters.uplinkTransmitSuccesses = g_liveState.framesSent;
-            counters.rejectedOtaFrames = g_liveState.channelGuardRejects;
-            counters.lostPackets = g_liveState.channelSpikeHolds;
-            g_handsetTelemetry.updatePacketCounters(counters, millis());
-            g_handsetTelemetry.refresh(millis());
+        case handset_usb::CommandType::GetConfig:
+            Serial.print(handset_usb::formatOk(command, configResponseFields(g_pendingConfig.handsetConfig)).c_str());
+            return true;
 
-            char telemetryState[320];
-            handset_telemetry::formatUsbStateResponse(g_handsetTelemetry.state(),
-                                                       telemetryState,
-                                                       sizeof(telemetryState));
-            Serial.print(handset_usb::formatOk(command, {{"state", telemetryState}}).c_str());
+        case handset_usb::CommandType::SetConfig:
+            if (!applyPendingConfigField(command.field, command.value)) {
+                Serial.print(handset_usb::formatErr(command, "invalid_config_field",
+                                                    "field or value is invalid").c_str());
+                return true;
+            }
+            Serial.print(handset_usb::formatOk(command, {{"field", command.field}, {"value", command.value}}).c_str());
+            return true;
+
+        case handset_usb::CommandType::Apply:
+            if (!handset_config::validateRcHandsetConfig(g_pendingConfig.handsetConfig)) {
+                Serial.print(handset_usb::formatErr(command, "invalid_config",
+                                                    "pending config failed validation").c_str());
+                return true;
+            }
+            g_activeConfig.handsetConfig = g_pendingConfig.handsetConfig;
+            publishActiveConfig();
+            Serial.print(handset_usb::formatOk(command, {{"generation", std::to_string(g_activeConfig.generation)}}).c_str());
+            return true;
+
+        case handset_usb::CommandType::Save:
+            if (saveRcConfig()) {
+                Serial.print(handset_usb::formatOk(command, {{"persisted", "1"}}).c_str());
+            } else {
+                Serial.print(handset_usb::formatErr(command, "persist_failed",
+                                                    "failed to encode or commit config").c_str());
+            }
+            return true;
+
+        case handset_usb::CommandType::ResetDefaults:
+            if (!command.target.empty() && command.target != "rc_config") {
+                Serial.print(handset_usb::formatErr(command, "unsupported_target",
+                                                    "reset_defaults supports target=rc_config").c_str());
+                return true;
+            }
+            g_activeConfig.handsetConfig = handset_config::defaultRcHandsetConfig();
+            g_pendingConfig = g_activeConfig;
+            publishActiveConfig();
+            Serial.print(handset_usb::formatOk(command, configResponseFields(g_pendingConfig.handsetConfig)).c_str());
+            return true;
+
+        case handset_usb::CommandType::CalStart:
+            collectCurrentAdc(g_calCenter);
+            memcpy(g_calMin, g_calCenter, sizeof(g_calMin));
+            memcpy(g_calMax, g_calCenter, sizeof(g_calMax));
+            g_calibrating = true;
+            Serial.print(handset_usb::formatOk(command, {{"adc", joinU16(g_calCenter, handset_config::kRcHandsetAxisCount)}}).c_str());
+            return true;
+
+        case handset_usb::CommandType::CalSample: {
+            if (!g_calibrating) {
+                Serial.print(handset_usb::formatErr(command, "not_calibrating",
+                                                    "run cal_start before cal_sample").c_str());
+                return true;
+            }
+            uint16_t adc[handset_config::kRcHandsetAxisCount];
+            collectCurrentAdc(adc);
+            for (uint8_t axis = 0; axis < handset_config::kRcHandsetAxisCount; ++axis) {
+                if (adc[axis] < g_calMin[axis]) g_calMin[axis] = adc[axis];
+                if (adc[axis] > g_calMax[axis]) g_calMax[axis] = adc[axis];
+            }
+            Serial.print(handset_usb::formatOk(command, {
+                {"adc", joinU16(adc, handset_config::kRcHandsetAxisCount)},
+                {"cal_min", joinU16(g_calMin, handset_config::kRcHandsetAxisCount)},
+                {"cal_max", joinU16(g_calMax, handset_config::kRcHandsetAxisCount)},
+            }).c_str());
+            return true;
+        }
+
+        case handset_usb::CommandType::CalFinish: {
+            if (!g_calibrating) {
+                Serial.print(handset_usb::formatErr(command, "not_calibrating",
+                                                    "run cal_start before cal_finish").c_str());
+                return true;
+            }
+            collectCurrentAdc(g_calCenter);
+            for (uint8_t axis = 0; axis < handset_config::kRcHandsetAxisCount; ++axis) {
+                if (g_calMin[axis] >= g_calCenter[axis]) g_calMin[axis] = g_calCenter[axis] > 10 ? g_calCenter[axis] - 10 : 0;
+                if (g_calMax[axis] <= g_calCenter[axis]) g_calMax[axis] = static_cast<uint16_t>(g_calCenter[axis] + 10);
+                if (g_calMax[axis] > handset_config::kRcHandsetAdcMax) g_calMax[axis] = handset_config::kRcHandsetAdcMax;
+                g_pendingConfig.handsetConfig.axes[axis].calibration.min = g_calMin[axis];
+                g_pendingConfig.handsetConfig.axes[axis].calibration.center = g_calCenter[axis];
+                g_pendingConfig.handsetConfig.axes[axis].calibration.max = g_calMax[axis];
+            }
+            g_calibrating = false;
+            if (!handset_config::validateRcHandsetConfig(g_pendingConfig.handsetConfig)) {
+                Serial.print(handset_usb::formatErr(command, "invalid_calibration",
+                                                    "sampled calibration failed validation").c_str());
+                return true;
+            }
+            g_activeConfig.handsetConfig = g_pendingConfig.handsetConfig;
+            publishActiveConfig();
+            bool saveRequested = false;
+            if (const handset_usb::Argument* saveArg = commandArg(command, "save")) {
+                saveRequested = saveArg->value == "1" || saveArg->value == "true";
+            }
+            if (saveRequested && !saveRcConfig()) {
+                Serial.print(handset_usb::formatErr(command, "persist_failed",
+                                                    "calibration applied but save failed").c_str());
+                return true;
+            }
+            Serial.print(handset_usb::formatOk(command, configResponseFields(g_pendingConfig.handsetConfig)).c_str());
+            return true;
+        }
+
+        case handset_usb::CommandType::StreamState: {
+            uint32_t interval = 100;
+            bool enabled = true;
+            if (const handset_usb::Argument* intervalArg = commandArg(command, "interval_ms")) {
+                interval = static_cast<uint32_t>(strtoul(intervalArg->value.c_str(), nullptr, 10));
+            }
+            if (const handset_usb::Argument* enabledArg = commandArg(command, "enabled")) {
+                enabled = enabledArg->value != "0" && enabledArg->value != "false";
+            } else if (!command.value.empty()) {
+                enabled = command.value != "0" && command.value != "off";
+            }
+            if (interval < 50) interval = 50;
+            if (interval > 2000) interval = 2000;
+            g_streamStateEnabled = enabled;
+            g_streamStateIntervalMs = interval;
+            g_lastStreamStateMs = 0;
+            Serial.print(handset_usb::formatOk(command, {
+                {"enabled", enabled ? "1" : "0"},
+                {"interval_ms", std::to_string(interval)},
+            }).c_str());
+            return true;
+        }
+
+        case handset_usb::CommandType::State: {
+            Serial.print(handset_usb::formatOk(command, stateResponseFields()).c_str());
             return true;
         }
 
@@ -460,8 +851,7 @@ static void populateDisplayState(rc_handset::display::DisplayState& state,
     state.rxBattery.percent = telemetry.rxBattery.percent;
     state.link.connected = telemetry.txPresent &&
                            telemetry.txStatus == handset_telemetry::FieldStatus::Valid &&
-                           telemetry.linkStatsStatus == handset_telemetry::FieldStatus::Valid &&
-                           telemetry.linkQuality > 0;
+                           telemetry.linkStatsStatus == handset_telemetry::FieldStatus::Valid;
     state.link.metricsAvailable = telemetry.linkStatsStatus == handset_telemetry::FieldStatus::Valid;
     state.link.bindingMismatch = telemetry.faults.bindingUidMismatch;
     state.link.rateName = handset_telemetry::rateName(telemetry.activeRate);
@@ -509,6 +899,28 @@ static void serviceDisplay() {
     g_display.show(state);
 }
 
+static void printStateStreamLine() {
+    Serial.print("rc.v1 state");
+    for (const handset_usb::ResponseField& field : stateResponseFields()) {
+        Serial.print(' ');
+        Serial.print(field.key.c_str());
+        Serial.print('=');
+        Serial.print(handset_usb::percentEncode(field.value).c_str());
+    }
+    Serial.print('\n');
+}
+
+static void serviceStateStream() {
+    if (!g_streamStateEnabled || g_streamStateIntervalMs == 0) return;
+    const uint32_t nowMs = millis();
+    if (g_lastStreamStateMs != 0 &&
+        static_cast<uint32_t>(nowMs - g_lastStreamStateMs) < g_streamStateIntervalMs) {
+        return;
+    }
+    g_lastStreamStateMs = nowMs;
+    printStateStreamLine();
+}
+
 static void showBootScreen(uint8_t progressPercent, const char* message) {
     rc_handset::display::DisplayState state;
     state.screen = rc_handset::display::Screen::Boot;
@@ -524,7 +936,8 @@ void setup() {
     showBootScreen(15, "Power init");
     handset_power::rcPowerBegin();
     showBootScreen(25, "Core 0 init");
-    rc_handset::core1::publishDefaultConfig();
+    loadRcConfig();
+    publishActiveConfig();
     showBootScreen(50, "Core 1 launch");
     rc_handset::core1::begin();
     refreshLiveState();
@@ -542,6 +955,7 @@ void loop() {
     rc_handset::core1::loopOnceFallback();
     serviceCrsfTelemetry();
     serviceCli();
+    serviceStateStream();
     serviceDisplay();
     yield();
 }

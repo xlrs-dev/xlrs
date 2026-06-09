@@ -160,7 +160,9 @@ static void test_rf_scheduler_tx_consumes_telemetry_slot_without_rc_frame() {
     }
     TEST_ASSERT_TRUE(scheduler.shouldListenForTelemetry());
     TEST_ASSERT_FALSE(scheduler.onTimerTick());
-    TEST_ASSERT_EQUAL_UINT16(static_cast<uint16_t>(telemetryRate.telemetryRatio + 1), scheduler.sequence());
+    TEST_ASSERT_EQUAL_UINT16(static_cast<uint16_t>(telemetryRate.telemetryRatio - 1), scheduler.sequence());
+    TEST_ASSERT_TRUE(scheduler.onTimerTick());
+    TEST_ASSERT_EQUAL_UINT16(static_cast<uint16_t>(telemetryRate.telemetryRatio), scheduler.sequence());
 }
 
 static void test_rf_scheduler_tx_sync_scheduling_metadata() {

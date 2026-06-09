@@ -107,6 +107,7 @@ void TxScheduler::begin(const uint8_t uid[kUidSize], const RateConfig& rate) {
     stats_ = {};
     sequence_ = 0;
     telemetryListenPending_ = false;
+    telemetryAdvancePending_ = false;
     fhss_.begin(uid, rate_.fhssHopInterval);
 }
 
@@ -116,10 +117,14 @@ bool TxScheduler::onTimerTick() {
     stats_.fhssIndex = fhss_.index();
     if (telemetryListenPending_) {
         telemetryListenPending_ = false;
-        advanceTock();
+        telemetryAdvancePending_ = true;
         stats_.nonce = sequence_;
         stats_.fhssIndex = fhss_.index();
         return false;
+    }
+    if (telemetryAdvancePending_) {
+        telemetryAdvancePending_ = false;
+        advanceTock();
     }
     stats_.nonce = sequence_;
     stats_.fhssIndex = fhss_.index();
@@ -130,8 +135,9 @@ void TxScheduler::onTxDone() {
     ++stats_.txDone;
     if (shouldRequestTelemetry(static_cast<uint16_t>(sequence_ + 1), rate_.telemetryRatio)) {
         telemetryListenPending_ = true;
+    } else {
+        advanceTock();
     }
-    advanceTock();
     stats_.nonce = sequence_;
     stats_.fhssIndex = fhss_.index();
 }

@@ -6,7 +6,7 @@ namespace lora_link {
 
 const RateConfig kRates[2] = {
     {"L250", 4000, 0, 4, 812.5f, 6, 5},
-    {"L100", 10000, 0, 4, 812.5f, 5, 5},
+    {"L100", 10000, 64, 4, 812.5f, 5, 5},
 };
 
 static constexpr uint32_t kConfigMagic = 0x314C524Cu; // LRL1

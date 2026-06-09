@@ -130,6 +130,7 @@ private:
     SchedulerStats stats_{};
     uint16_t sequence_ = 0;
     bool telemetryListenPending_ = false;
+    bool telemetryAdvancePending_ = false;
 
     void advanceTock();
 };

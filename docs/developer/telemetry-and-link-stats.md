@@ -17,21 +17,22 @@ direction-qualified:
 
 | CRSF field | XLRS source |
 | --- | --- |
-| `uplink_RSSI_1` | RX-measured RSSI for TX-to-RX uplink frames |
+| `uplink_RSSI_1` | RX-measured RSSI for TX-to-RX uplink frames, encoded as signed dBm for EdgeTX |
 | `uplink_RSSI_2` | Reserved for future diversity; currently `0` |
 | `uplink_Link_quality` | RX-measured uplink LQ |
 | `uplink_SNR` | RX-measured uplink SNR |
 | `active_antenna` | Reserved for future diversity; currently `0` |
 | `rf_Mode` | Active XLRS rate index |
-| `uplink_TX_Power` | Reserved until TX power is mapped into CRSF power enums; currently `0` |
-| `downlink_RSSI` | TX-measured RSSI for RX-to-TX telemetry frames |
+| `uplink_TX_Power` | TX active power mapped to the CRSF power enum on the TX-to-handset path |
+| `downlink_RSSI` | TX-measured RSSI for RX-to-TX telemetry frames, encoded as signed dBm for EdgeTX |
 | `downlink_Link_quality` | TX-measured telemetry-slot success rate |
 | `downlink_SNR` | TX-measured SNR for RX-to-TX telemetry frames |
 
 When downlink telemetry is stale, TX reports zero uplink and downlink CRSF link
 statistics to the handset. RX-side CRSF link statistics sent to the flight
-controller report the RX uplink view and leave downlink-only fields at zero
-because RX cannot measure TX reception of telemetry slots.
+controller report the RX uplink view and leave downlink-only fields and
+`uplink_TX_Power` at zero because RX cannot measure TX reception of telemetry
+slots or infer the TX power enum without a TX-to-RX stats relay.
 
 ## Downlink Telemetry Payload
 
@@ -42,7 +43,7 @@ enabled:
 | ---: | --- |
 | 0 | payload version (`1`) |
 | 1 | `uplink_lq` |
-| 2 | `uplink_rssi_dbm * -1` |
+| 2 | compact `uplink_rssi_dbm * -1` magnitude for OTA transport |
 | 3 | `uplink_snr_db` |
 | 4 | `rf_mode` |
 | 5 | `uplink_tx_power` CRSF enum, or `0` when unavailable |

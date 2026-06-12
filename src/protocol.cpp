@@ -169,10 +169,16 @@ static uint32_t readBe32(const uint8_t* in) {
            static_cast<uint32_t>(in[3]);
 }
 
-static uint8_t crsfRssiByte(int16_t rssiDbm) {
+static uint8_t rssiMagnitudeByte(int16_t rssiDbm) {
     if (rssiDbm == 0) return 0;
     const int16_t magnitude = rssiDbm < 0 ? static_cast<int16_t>(-rssiDbm) : rssiDbm;
     return magnitude > 255 ? 255 : static_cast<uint8_t>(magnitude);
+}
+
+static uint8_t crsfSignedDbmByte(int16_t rssiDbm) {
+    if (rssiDbm < -128) rssiDbm = -128;
+    if (rssiDbm > 127) rssiDbm = 127;
+    return static_cast<uint8_t>(static_cast<int8_t>(rssiDbm));
 }
 
 static uint8_t clampPercent(uint8_t value) {
@@ -381,7 +387,7 @@ bool encodeDownlinkTelemetryPayload(const DownlinkTelemetryPayload& payload,
     memset(out, 0, kOtaPayloadSize);
     out[0] = kDownlinkTelemetryPayloadVersion;
     out[1] = clampPercent(payload.uplinkLinkQuality);
-    out[2] = crsfRssiByte(payload.uplinkRssiDbm);
+    out[2] = rssiMagnitudeByte(payload.uplinkRssiDbm);
     out[3] = static_cast<uint8_t>(payload.uplinkSnrDb);
     out[4] = payload.rfMode;
     out[5] = payload.uplinkTxPower;
@@ -469,14 +475,14 @@ size_t encodeCrsfLinkStats(const LinkStats& stats, uint8_t* out, size_t outLen) 
     out[0] = kCrsfAddressFlightController;
     out[1] = 12; // type + 10-byte payload + crc
     out[2] = kCrsfFrameLinkStatistics;
-    out[3] = crsfRssiByte(stats.uplinkRssiDbm);
-    out[4] = crsfRssiByte(stats.uplinkRssi2Dbm);
+    out[3] = crsfSignedDbmByte(stats.uplinkRssiDbm);
+    out[4] = crsfSignedDbmByte(stats.uplinkRssi2Dbm);
     out[5] = clampPercent(stats.uplinkLinkQuality);
     out[6] = static_cast<uint8_t>(stats.uplinkSnrDb);
     out[7] = stats.activeAntenna;
     out[8] = stats.rfMode;
     out[9] = stats.uplinkTxPower;
-    out[10] = crsfRssiByte(stats.downlinkRssiDbm);
+    out[10] = crsfSignedDbmByte(stats.downlinkRssiDbm);
     out[11] = clampPercent(stats.downlinkLinkQuality);
     out[12] = static_cast<uint8_t>(stats.downlinkSnrDb);
     out[13] = crsfCrc8(&out[2], 11);

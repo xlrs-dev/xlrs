@@ -66,8 +66,9 @@ Current limitations:
 - A dedicated XLRS CRSF RC configuration script is not implemented yet.
 - XLRS currently carries 8 OTA `rc_channel` values. CRSF channels 9-16 are parsed
   by the CRSF decoder but are not transmitted over the XLRS uplink.
-- `uplink_TX_Power` is still reported as `0` until the fixed/dynamic TX power
-  policy is mapped to CRSF power enums.
+- `uplink_TX_Power` reports the active TX power as a CRSF power enum. The current
+  fixed bench power maps to the nearest supported enum; future dynamic power
+  should update the same field from the active policy.
 
 See [index.md](index.md) for the complete current interface reference.
 For the CRSF support matrix and binding flow, see

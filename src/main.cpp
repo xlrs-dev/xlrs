@@ -156,6 +156,17 @@ static float syncChannelFrequencyMHz() {
     return fhssFrequencyMHz(rf::kSyncChannelFhssIndex);
 }
 
+static uint8_t crsfPowerIndexForDbm(int8_t powerDbm) {
+    if (powerDbm <= 10) return 1; // 10 mW
+    if (powerDbm <= 14) return 2; // 25 mW
+    if (powerDbm <= 17) return 8; // 50 mW
+    if (powerDbm <= 20) return 3; // 100 mW
+    if (powerDbm <= 24) return 7; // 250 mW
+    if (powerDbm <= 27) return 4; // 500 mW
+    if (powerDbm <= 30) return 5; // 1000 mW
+    return 6;                     // 2000 mW
+}
+
 #if LORA_RX_ROLE
 static bool rxAcquisitionChannelActive(uint32_t nowMs) {
     const rf::SchedulerStats rfStats = g_rfScheduler.stats();
@@ -936,7 +947,7 @@ static void sendTelemetryToHandset(uint32_t nowMs) {
     stats.uplinkLinkQuality = downlinkFresh ? g_linkQuality : 0;
     stats.uplinkSnrDb = downlinkFresh ? g_lastSnr : 0;
     stats.rfMode = static_cast<uint8_t>(g_config.rate);
-    stats.uplinkTxPower = 0; // CRSF power enum is unavailable for the current fixed dBm policy.
+    stats.uplinkTxPower = crsfPowerIndexForDbm(kBenchTxPowerDbm);
     stats.downlinkRssiDbm = downlinkFresh ? g_downlinkRssiDbm : 0;
     stats.downlinkLinkQuality = downlinkFresh ? g_downlinkLinkQuality : 0;
     stats.downlinkSnrDb = downlinkFresh ? g_downlinkSnrDb : 0;

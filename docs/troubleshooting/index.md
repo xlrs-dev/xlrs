@@ -350,7 +350,7 @@ direction-qualified fields this way:
 | uplink LQ/RSSI/SNR | RX is hearing TX uplink RC frames |
 | downlink LQ/RSSI/SNR | TX is hearing RX telemetry slots |
 | `rf_Mode` | Active XLRS rate index |
-| `uplink_TX_Power` | Currently `0`; TX power enum mapping is not implemented yet |
+| `uplink_TX_Power` | Active TX power mapped to the CRSF power enum |
 
 If uplink looks good but downlink is zero or stale, debug telemetry-slot timing,
 RX telemetry transmit, or TX receive quality before debugging CRSF input/output.

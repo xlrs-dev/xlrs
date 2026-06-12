@@ -36,8 +36,8 @@ Implemented today:
   transport. RX persists them to flash.
 - Bind RX puts the TX module into a temporary OTA bind-transmit window. An
   unconnected RX periodically scans the shared XLRS bind identity, accepts a
-  valid bind frame, persists the offered Link UID, and reboots back to normal
-  operation.
+  valid bind frame, persists the offered Link UID, and resumes normal
+  acquisition with that identity.
 - RX forwards valid flight-controller CRSF telemetry frames over downlink
   telemetry. TX writes those frames back to the controller CRSF port.
 

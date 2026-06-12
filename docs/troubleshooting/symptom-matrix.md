@@ -4,7 +4,7 @@
 | --- | --- | --- |
 | No USB serial port appears | Board not booted, bad cable, stuck in BOOTSEL, firmware not flashed | Try another cable, check `/dev/cu.usbmodem*`, reflash UF2, verify board exits BOOTSEL |
 | Repeated reboot every ~1 second | RF core heartbeat stopped, often radio init failure | Watch for `[HW FAULT]`; inspect SX1280 wiring, BUSY/DIO1, SPI pins, power rail |
-| TX/RX identities differ | Binding phrase/config mismatch | Rebuild both with same `XLRS_DEFAULT_BINDING_PHRASE` or reset/persist same binding phrase |
+| TX/RX identities differ | RX has not learned the TX Link UID, or stale config was restored | Run TX bind mode and reset the RX so it can learn the Link UID; then compare `bind get` on both devices |
 | Same identity, never connects | RF init, sync word, RF channel table, antenna/path issue | Compare `[PHY]` lines, check antennas/load, inspect PHY timeout/CRC counters |
 | Connects then drops | PFD/timing instability, weak RF path, CRC errors, radio recovery | Watch LQ/RSSI/CRC, test boards close together at low power, then with attenuation |
 | RX status reaches Connected but no FC input | CRSF wiring, baud, output gating, FC serial config | Check RX GP8/GP9 wiring to FC, CRSF baud, FC serial protocol, `outputActive` behavior |

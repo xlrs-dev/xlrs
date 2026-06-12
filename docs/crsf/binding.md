@@ -16,8 +16,8 @@ bind workflow:
    enters short bind-scan windows on the shared bind identity and bind
    acquisition rf_channel.
 5. If RX receives a valid bind frame while scanning, it persists the offered
-   Link UID and reboots.
-6. After reboot, RX uses the learned Link UID for normal acquisition.
+   Link UID and restarts normal acquisition with that UID.
+6. TX and RX then use the learned Link UID for normal acquisition.
 
 This means Bind RX can pair an RX that is not already connected to the TX. After
 the RX has connected normally once in a boot, bind scan is disabled until the RX
@@ -36,16 +36,18 @@ Instead, RX only accepts bind frames when all of these are true:
 | Radio sync word and rf_channel match the shared bind acquisition settings | Avoid normal-link or random same-frequency frames |
 | OTA frame type is `Bind` | Accept only the binding frame type |
 | Bind payload magic/version is valid | Reject malformed bind-looking payloads |
-| Offered Link UID CRC matches | Reject corrupted UID payloads |
+| Offered Link UID check matches | Reject corrupted UID payloads |
 
 This protects against accidental noise or malformed packets. It is not a secure
 ownership proof.
 
 ## Relationship To Binding Phrase
 
-The binding phrase still exists as a local way to derive a Link UID. OTA bind
-does not exchange the phrase; it exchanges the derived Link UID. After a
-successful bind, the RX stores the learned UID directly in flash.
+The binding phrase still exists as a local label and as a legacy fallback. OTA
+bind does not exchange the phrase; it exchanges the TX Link UID. New or migrated
+TX configs generate that UID from TX hardware identity plus phrase, so two TXs
+with the same phrase no longer share the same RF identity. After a successful
+bind, the RX stores the learned UID directly in flash.
 
 Compile-time phrase binding remains supported:
 
@@ -54,7 +56,8 @@ cmake -S . -B build -G Ninja -DXLRS_DEFAULT_BINDING_PHRASE="your-phrase"
 cmake --build build --target xlrs_tx xlrs_rx
 ```
 
-Use the same phrase on both modules when relying on compile-time binding.
+Use OTA bind after upgrading phrase-derived v1 configs. TX migration intentionally
+changes the active Link UID, so existing RX modules must learn the new UID.
 
 ## Operator Flow
 
@@ -62,8 +65,8 @@ Use the same phrase on both modules when relying on compile-time binding.
 2. Power the TX and open the controller CRSF device parameters.
 3. Power the RX.
 4. Trigger Bind RX from the controller.
-5. Wait for the RX to receive the bind frame, persist the UID, and reboot.
-6. After reboot, TX and RX should acquire normally using the same Link UID.
+5. Wait for the RX to receive the bind frame and persist the UID.
+6. TX and RX should acquire normally using the same Link UID.
 
 ## RX Debug Indicators
 
@@ -73,7 +76,7 @@ The status LED on TX and RX exposes binding progress during bench bring-up:
 | --- | --- |
 | Bind scan window open, listening for bind packets | Double flash, pause |
 | Valid bind frame received | Very fast blink |
-| Link UID persisted successfully | Five short flashes, then reboot |
+| Link UID persisted successfully | Returns to normal acquisition |
 
 RX serial status lines also append:
 
@@ -105,5 +108,5 @@ antennas are attached, and the RX is within range.
 
 - There is no physical bind-button workflow yet.
 - There is no cryptographic challenge/response yet.
-- The custom UART controller protocol can still set the TX binding phrase, but
-  CRSF Bind RX is the implemented unconnected RX pairing path.
+- The USB/CRSF binding controls can still set the TX binding phrase label, but
+  OTA bind is the implemented unconnected RX pairing path.

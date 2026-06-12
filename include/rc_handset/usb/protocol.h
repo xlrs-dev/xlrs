@@ -27,6 +27,7 @@ enum class CommandType : uint8_t {
     BindingSet,
     BindingClear,
     BindingVerify,
+    BindingBind,
     SpecialMode,
 };
 

@@ -192,6 +192,16 @@ rc.v1 binding_verify seq=33 target=rx phrase=Field%20Radio
 rc.v1 ok seq=33 target=rx op=binding_verify result=ok phrase=Field%20Radio uid=0011223344556677 uid_check=89ABCDEF persisted=0 requires_reboot=0
 ```
 
+### binding_bind
+
+TX only. Starts the 30-second OTA bind transmit window so an unconnected RX can
+learn the TX Link UID.
+
+```text
+rc.v1 binding_bind seq=34 target=tx
+rc.v1 ok seq=34 target=tx op=binding_bind result=ok phrase=Field%20Radio uid=0011223344556677 uid_check=89ABCDEF persisted=1 requires_reboot=0
+```
+
 ### special_mode
 
 Requests a special mode such as bootloader entry. Requires `mode` or `value`.
@@ -220,7 +230,7 @@ raw parser details:
 | Start calibration | `cal_start` |
 | Capture calibration sample | `cal_sample` |
 | Finish calibration | `cal_finish save=<0|1>` |
-| TX binding through RC USB | `binding_get/set/clear/verify target=tx` |
+| TX binding through RC USB | `binding_get/set/clear/verify/binding_bind target=tx` |
 | RX binding through direct USB | `binding_get/set/clear/verify target=rx` |
 | Bootloader/update mode | `special_mode mode=bootloader` |
 
@@ -228,8 +238,8 @@ raw parser details:
 
 | Endpoint | Implemented `rc.v1` handlers |
 | --- | --- |
-| RC USB | `hello`, `tx_hello`, `state`, `binding_get/set/clear/verify target=tx` |
-| TX direct USB | `hello`, `binding_get/set/clear/verify target=tx` |
+| RC USB | `hello`, `tx_hello`, `state`, `binding_get/set/clear/verify/binding_bind target=tx` |
+| TX direct USB | `hello`, `binding_get/set/clear/verify/binding_bind target=tx` |
 | RX direct USB | `hello`, `binding_get/set/clear/verify target=rx` |
 
 The parser accepts `get_config`, `set_config`, `apply`, `save`,

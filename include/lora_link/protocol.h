@@ -32,6 +32,7 @@ enum class OtaType : uint8_t {
     Rc = 1,
     Telemetry = 2,
     Sync = 3,
+    Bind = 4,
 };
 
 enum class RateId : uint8_t {
@@ -70,6 +71,7 @@ struct OtaSyncPayload {
 
 struct DeviceConfig {
     char bindingPhrase[33];
+    uint8_t linkUid[kUidSize];
     RateId rate;
 };
 
@@ -78,6 +80,7 @@ enum class BindingControlOp : uint8_t {
     Set = 2,
     Clear = 3,
     Verify = 4,
+    Bind = 5,
 };
 
 enum class BindingResult : uint8_t {
@@ -107,6 +110,12 @@ struct ConfigRecord {
     char bindingPhrase[33];
     uint8_t reserved;
     uint16_t crc;
+    uint8_t linkUid[kUidSize];
+};
+
+struct OtaBindPayload {
+    uint8_t linkUid[kUidSize];
+    uint32_t uidCheck;
 };
 
 struct RcSpikeGate {
@@ -119,15 +128,20 @@ extern const RateConfig kRates[2];
 uint16_t crc16Ccitt(const uint8_t* data, size_t len);
 uint8_t crsfCrc8(const uint8_t* data, size_t len);
 void deriveUid(const char* phrase, uint8_t uid[kUidSize]);
+void derivePairUidFromHardware(const char* phrase, const uint8_t boardId[kUidSize], uint8_t uid[kUidSize]);
 uint32_t uidCheck(const uint8_t uid[kUidSize]);
 uint8_t syncWordFromUid(const uint8_t uid[kUidSize]);
 bool validateBindingPhrase(const char* phrase);
 void makeBindingStatus(const char* phrase, bool persisted, bool requiresReboot, BindingStatus& out);
+void makeBindingStatus(const char* phrase, const uint8_t uid[kUidSize], bool persisted,
+                       bool requiresReboot, BindingStatus& out);
 
 bool encodeOtaFrame(const OtaFrame& frame, uint8_t out[kOtaFrameSize]);
 bool decodeOtaFrame(const uint8_t in[kOtaFrameSize], uint32_t expectedUidCheck, OtaFrame& out);
 bool encodeOtaSyncPayload(const OtaSyncPayload& payload, uint8_t out[kOtaPayloadSize], uint8_t& payloadLen);
 bool decodeOtaSyncPayload(const OtaFrame& frame, OtaSyncPayload& out);
+bool encodeOtaBindPayload(const OtaBindPayload& payload, uint8_t out[kOtaPayloadSize], uint8_t& payloadLen);
+bool decodeOtaBindPayload(const OtaFrame& frame, OtaBindPayload& out);
 uint8_t rateIndexForConfig(const RateConfig& rate);
 bool isValidRateIndex(uint8_t rateIndex);
 
@@ -159,6 +173,7 @@ bool parseCrsfBindingResponseFrame(uint8_t byte, BindingStatus& status, BindingR
 void configDefaults(DeviceConfig& cfg, const char* defaultPhrase);
 ConfigRecord makeConfigRecord(const DeviceConfig& cfg);
 bool readConfigRecord(const ConfigRecord& record, DeviceConfig& cfg);
+bool readConfigRecord(const ConfigRecord& record, DeviceConfig& cfg, bool& migratedFromV1);
 
 uint8_t fhssChannelFor(const uint8_t uid[kUidSize], uint16_t hop);
 float fhssFrequencyMHz(uint8_t channel);

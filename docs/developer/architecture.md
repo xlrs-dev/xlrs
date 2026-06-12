@@ -70,10 +70,10 @@ from the shared tick/hop and the binding-derived UID.
 ## OTA frame
 
 A frame is **33 bytes**: a 9-byte header, a 22-byte payload, and a CRC16-CCITT.
-The header carries the `OtaType` (`Rc`, `Telemetry`, `Sync`), a 16-bit sequence,
-and the 32-bit `uid_check` derived from the binding phrase. Decode rejects a
-frame whose `uid_check` does not match the local binding or whose CRC fails, so a
-receiver only accepts traffic from its bound partner.
+The header carries the `OtaType` (`Rc`, `Telemetry`, `Sync`, `Bind`), a 16-bit
+sequence, and the 32-bit `uid_check` derived from the stored Link UID. Decode
+rejects a frame whose `uid_check` does not match the active link identity or
+whose CRC fails, so a receiver only accepts traffic from its bound partner.
 
 RC payloads pack 16 channels at 11 bits each (CRSF raw range 172–1811). Frames
 are **plaintext**: the CRC + `uid_check` provide integrity and link selection,
@@ -82,17 +82,17 @@ are **plaintext**: the CRC + `uid_check` provide integrity and link selection,
 
 ## Binding identity
 
-A binding phrase (1–32 chars) derives:
+A stored 8-byte **Link UID** is the active pair identity. It derives:
 
-- an 8-byte **Link UID** (`deriveUid`),
 - the SX1280 **sync word** (`syncWordFromUid`),
 - the **FHSS sequence** (`fhssChannelFor`), and
 - the 32-bit **`uid_check`** stamped into every frame.
 
-Matching phrases on both ends bind the pair — there is no OTA pairing handshake.
-The phrase and selected rate persist in flash (`ConfigRecord`, magic `LRL1`, with
-a CRC). Binding can be changed over the USB CLI (`bind set …`) or the `rc.v1` /
-CRSF binding-control path (CRSF frame type `0x7D`). See
+New or migrated TX configs generate the Link UID from TX hardware identity plus
+phrase. RX stores the TX-offered Link UID through OTA bind. The phrase, Link UID,
+and selected rate persist in flash (`ConfigRecord`, magic `LRL1`, with a CRC).
+Binding can be managed over the USB CLI (`bind start`, `bind set …`) or the
+`rc.v1` / CRSF binding-control path (CRSF frame type `0x7D`). See
 [../crsf/binding.md](../crsf/binding.md).
 
 ## CRSF interfaces

@@ -54,10 +54,12 @@ static void test_binding_commands_parse() {
     ParseResult set = parseLine("rc.v1 binding_set target=tx phrase=Field%20Radio");
     ParseResult clear = parseLine("rc.v1 binding_clear");
     ParseResult verify = parseLine("rc.v1 binding_verify value=Field%20Radio");
+    ParseResult bind = parseLine("rc.v1 binding_bind target=tx");
     TEST_ASSERT_TRUE(get.ok);
     TEST_ASSERT_TRUE(set.ok);
     TEST_ASSERT_TRUE(clear.ok);
     TEST_ASSERT_TRUE(verify.ok);
+    TEST_ASSERT_TRUE(bind.ok);
     TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(CommandType::BindingGet),
                             static_cast<uint8_t>(get.command.type));
     TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(CommandType::BindingSet),
@@ -66,8 +68,11 @@ static void test_binding_commands_parse() {
                             static_cast<uint8_t>(clear.command.type));
     TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(CommandType::BindingVerify),
                             static_cast<uint8_t>(verify.command.type));
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(CommandType::BindingBind),
+                            static_cast<uint8_t>(bind.command.type));
     TEST_ASSERT_EQUAL_STRING("Field Radio", set.command.value.c_str());
     TEST_ASSERT_EQUAL_STRING("tx", set.command.target.c_str());
+    TEST_ASSERT_EQUAL_STRING("tx", bind.command.target.c_str());
 }
 
 static void test_webui_utility_commands_parse() {

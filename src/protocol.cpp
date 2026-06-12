@@ -10,11 +10,15 @@ const RateConfig kRates[2] = {
 };
 
 static constexpr uint32_t kConfigMagic = 0x314C524Cu; // LRL1
-static constexpr uint8_t kConfigVersion = 1;
+static constexpr uint8_t kConfigVersionV1 = 1;
+static constexpr uint8_t kConfigVersion = 2;
 static constexpr uint8_t kOtaMagic = 0xA7;
 static constexpr uint8_t kOtaHeaderSize = 9;
 static constexpr uint8_t kOtaCrcOffset = kOtaHeaderSize + kOtaPayloadSize;
 static constexpr uint8_t kOtaSyncPayloadSize = 16;
+static constexpr uint8_t kOtaBindPayloadSize = 17;
+static constexpr uint8_t kOtaBindMagic[4] = {'X', 'B', 'N', 'D'};
+static constexpr uint8_t kOtaBindVersion = 1;
 static constexpr uint8_t kCrsfAddressFlightController = 0xC8;
 static constexpr uint8_t kCrsfAddressRadioTransmitter = 0xEA;
 static constexpr uint8_t kCrsfAddressCrsfTransmitter = 0xEE;
@@ -25,10 +29,11 @@ static constexpr uint8_t kBindingControlVersion = 1;
 static constexpr uint8_t kBindingControlMagic[4] = {'X', 'L', 'R', 'S'};
 static constexpr uint16_t kSpikeJumpThreshold = 450;
 static constexpr uint16_t kSpikeHighThreshold = kCrsfRaw2000 - 24;
-static constexpr uint8_t kConfigRecordCrcSize = 4 + 1 + 1 + 33 + 1;
+static constexpr uint8_t kConfigRecordV1CrcSize = 4 + 1 + 1 + 33 + 1;
+static constexpr uint8_t kConfigRecordCrcSize = 4 + 1 + 1 + 33 + kUidSize + 1;
 
-static_assert(offsetof(ConfigRecord, crc) == kConfigRecordCrcSize,
-              "ConfigRecord crc offset must match explicit serialized CRC bytes");
+static_assert(offsetof(ConfigRecord, crc) == kConfigRecordV1CrcSize,
+              "ConfigRecord crc offset must stay compatible with v1 EEPROM records");
 
 uint16_t crc16Ccitt(const uint8_t* data, size_t len) {
     uint16_t crc = 0xFFFF;
@@ -59,6 +64,27 @@ void deriveUid(const char* phrase, uint8_t uid[kUidSize]) {
     if (!phrase) phrase = "";
     while (*phrase) {
         hash ^= static_cast<uint8_t>(*phrase++);
+        hash *= 1099511628211ull;
+    }
+    for (uint8_t i = 0; i < kUidSize; ++i) {
+        uid[i] = static_cast<uint8_t>(hash >> (8 * i));
+    }
+}
+
+void derivePairUidFromHardware(const char* phrase, const uint8_t boardId[kUidSize], uint8_t uid[kUidSize]) {
+    uint64_t hash = 14695981039346656037ull;
+    static constexpr char kDomain[] = "XLRS-pair-uid-v1";
+    for (size_t i = 0; i < sizeof(kDomain) - 1; ++i) {
+        hash ^= static_cast<uint8_t>(kDomain[i]);
+        hash *= 1099511628211ull;
+    }
+    if (!phrase) phrase = "";
+    while (*phrase) {
+        hash ^= static_cast<uint8_t>(*phrase++);
+        hash *= 1099511628211ull;
+    }
+    for (uint8_t i = 0; i < kUidSize; ++i) {
+        hash ^= boardId ? boardId[i] : 0;
         hash *= 1099511628211ull;
     }
     for (uint8_t i = 0; i < kUidSize; ++i) {
@@ -108,6 +134,16 @@ void makeBindingStatus(const char* phrase, bool persisted, bool requiresReboot, 
     out.requiresReboot = requiresReboot;
 }
 
+void makeBindingStatus(const char* phrase, const uint8_t uid[kUidSize], bool persisted,
+                       bool requiresReboot, BindingStatus& out) {
+    memset(&out, 0, sizeof(out));
+    if (phrase) strncpy(out.phrase, phrase, sizeof(out.phrase) - 1);
+    if (uid) memcpy(out.uid, uid, kUidSize);
+    out.uidCheck = uidCheck(out.uid);
+    out.persisted = persisted;
+    out.requiresReboot = requiresReboot;
+}
+
 bool encodeOtaFrame(const OtaFrame& frame, uint8_t out[kOtaFrameSize]) {
     if (frame.payloadLen > kOtaPayloadSize) return false;
     memset(out, 0, kOtaFrameSize);
@@ -136,7 +172,10 @@ bool decodeOtaFrame(const uint8_t in[kOtaFrameSize], uint32_t expectedUidCheck, 
                             static_cast<uint32_t>(in[7]);
     if (gotUid != expectedUidCheck || in[8] > kOtaPayloadSize) return false;
     out.type = static_cast<OtaType>(in[1]);
-    if (out.type != OtaType::Rc && out.type != OtaType::Telemetry && out.type != OtaType::Sync) return false;
+    if (out.type != OtaType::Rc && out.type != OtaType::Telemetry &&
+        out.type != OtaType::Sync && out.type != OtaType::Bind) {
+        return false;
+    }
     out.sequence = static_cast<uint16_t>((in[2] << 8) | in[3]);
     out.uidCheck = gotUid;
     out.payloadLen = in[8];
@@ -197,6 +236,28 @@ bool decodeOtaSyncPayload(const OtaFrame& frame, OtaSyncPayload& out) {
     out.txTick = readBe32(&frame.payload[12]);
     return isValidRateIndex(out.rateIndex) && isValidRateIndex(out.nextRateIndex) &&
            out.fhssHopInterval != 0;
+}
+
+bool encodeOtaBindPayload(const OtaBindPayload& payload, uint8_t out[kOtaPayloadSize], uint8_t& payloadLen) {
+    if (!out || uidCheck(payload.linkUid) != payload.uidCheck) return false;
+    memset(out, 0, kOtaPayloadSize);
+    memcpy(&out[0], kOtaBindMagic, sizeof(kOtaBindMagic));
+    out[4] = kOtaBindVersion;
+    memcpy(&out[5], payload.linkUid, kUidSize);
+    writeBe32(&out[13], payload.uidCheck);
+    payloadLen = kOtaBindPayloadSize;
+    return true;
+}
+
+bool decodeOtaBindPayload(const OtaFrame& frame, OtaBindPayload& out) {
+    if (frame.type != OtaType::Bind || frame.payloadLen != kOtaBindPayloadSize) return false;
+    if (memcmp(&frame.payload[0], kOtaBindMagic, sizeof(kOtaBindMagic)) != 0 ||
+        frame.payload[4] != kOtaBindVersion) {
+        return false;
+    }
+    memcpy(out.linkUid, &frame.payload[5], kUidSize);
+    out.uidCheck = readBe32(&frame.payload[13]);
+    return uidCheck(out.linkUid) == out.uidCheck;
 }
 
 uint8_t rateIndexForConfig(const RateConfig& rate) {
@@ -578,6 +639,7 @@ void configDefaults(DeviceConfig& cfg, const char* defaultPhrase) {
     memset(&cfg, 0, sizeof(cfg));
     if (!defaultPhrase || !defaultPhrase[0]) defaultPhrase = "default";
     strncpy(cfg.bindingPhrase, defaultPhrase, sizeof(cfg.bindingPhrase) - 1);
+    deriveUid(cfg.bindingPhrase, cfg.linkUid);
     cfg.rate = RateId::L100;
 }
 
@@ -595,7 +657,25 @@ static uint16_t configRecordCrc(const ConfigRecord& record) {
     bytes[5] = record.rate;
     memcpy(&bytes[6], record.bindingPhrase, sizeof(record.bindingPhrase));
     bytes[39] = record.reserved;
+    memcpy(&bytes[40], record.linkUid, kUidSize);
     return crc16Ccitt(bytes, sizeof(bytes));
+}
+
+static uint16_t configRecordV1Crc(const ConfigRecord& record) {
+    uint8_t bytes[kConfigRecordV1CrcSize] = {};
+    writeLe32(bytes, record.magic);
+    bytes[4] = record.version;
+    bytes[5] = record.rate;
+    memcpy(&bytes[6], record.bindingPhrase, sizeof(record.bindingPhrase));
+    bytes[39] = record.reserved;
+    return crc16Ccitt(bytes, sizeof(bytes));
+}
+
+static bool uidIsAllZero(const uint8_t uid[kUidSize]) {
+    for (uint8_t i = 0; i < kUidSize; ++i) {
+        if (uid[i] != 0) return false;
+    }
+    return true;
 }
 
 ConfigRecord makeConfigRecord(const DeviceConfig& cfg) {
@@ -604,19 +684,37 @@ ConfigRecord makeConfigRecord(const DeviceConfig& cfg) {
     record.version = kConfigVersion;
     record.rate = static_cast<uint8_t>(cfg.rate);
     strncpy(record.bindingPhrase, cfg.bindingPhrase, sizeof(record.bindingPhrase) - 1);
+    memcpy(record.linkUid, cfg.linkUid, kUidSize);
     record.reserved = 0;
     record.crc = configRecordCrc(record);
     return record;
 }
 
-bool readConfigRecord(const ConfigRecord& record, DeviceConfig& cfg) {
-    if (record.magic != kConfigMagic || record.version != kConfigVersion || record.rate > 1) return false;
+bool readConfigRecord(const ConfigRecord& record, DeviceConfig& cfg, bool& migratedFromV1) {
+    migratedFromV1 = false;
+    if (record.magic != kConfigMagic || record.rate > 1 || record.bindingPhrase[0] == '\0') return false;
+    if (record.version == kConfigVersionV1) {
+        if (configRecordV1Crc(record) != record.crc) return false;
+        memset(&cfg, 0, sizeof(cfg));
+        strncpy(cfg.bindingPhrase, record.bindingPhrase, sizeof(cfg.bindingPhrase) - 1);
+        deriveUid(cfg.bindingPhrase, cfg.linkUid);
+        cfg.rate = static_cast<RateId>(record.rate);
+        migratedFromV1 = true;
+        return true;
+    }
+    if (record.version != kConfigVersion) return false;
     const uint16_t crc = configRecordCrc(record);
-    if (crc != record.crc || record.bindingPhrase[0] == '\0') return false;
+    if (crc != record.crc || uidIsAllZero(record.linkUid)) return false;
     memset(&cfg, 0, sizeof(cfg));
     strncpy(cfg.bindingPhrase, record.bindingPhrase, sizeof(cfg.bindingPhrase) - 1);
+    memcpy(cfg.linkUid, record.linkUid, kUidSize);
     cfg.rate = static_cast<RateId>(record.rate);
     return true;
+}
+
+bool readConfigRecord(const ConfigRecord& record, DeviceConfig& cfg) {
+    bool migratedFromV1 = false;
+    return readConfigRecord(record, cfg, migratedFromV1);
 }
 
 uint8_t fhssChannelFor(const uint8_t uid[kUidSize], uint16_t hop) {

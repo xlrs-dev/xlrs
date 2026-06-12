@@ -257,8 +257,8 @@ bool RxScheduler::onValidSyncFrame(const OtaSyncPayload& sync, uint32_t beginPro
     ++stats_.syncAccepted;
     consecutiveRcFrames_ = 0;
     disconnectedScanTick_ = 0;
-    nextExpectedSequence_ = sync.nonce;
-    fhss_.setCurrIndex(sync.fhssIndex);
+    nextExpectedSequence_ = static_cast<uint16_t>(sync.nonce + 1u);
+    fhss_.setFromSequence(nextExpectedSequence_);
     pfd_.extEvent(packetTockReferenceUs(beginProcessingUs));
     ++stats_.pfdExternalEvents;
     stats_.nonce = nextExpectedSequence_;
@@ -308,6 +308,21 @@ bool RxScheduler::onValidRcFrame(uint16_t sequence, uint32_t beginProcessingUs, 
     stats_.fhssIndex = fhss_.index();
     stats_.rxTimerState = timerState_;
     return true;
+}
+
+bool RxScheduler::onAcquisitionRcFrame(uint16_t sequence, uint32_t beginProcessingUs, uint32_t nowMs) {
+    const bool firstAcquisitionFrame = !haveSequence_ ||
+                                       stats_.connectionState == ConnectionState::Disconnected;
+    haveSequence_ = true;
+    nextExpectedSequence_ = sequence;
+    fhss_.setFromSequence(sequence);
+    if (firstAcquisitionFrame) {
+        haveSequence_ = true;
+        stats_.connectionState = ConnectionState::Tentative;
+        timerState_ = RxTimerState::TimTentative;
+        pfd_.reset();
+    }
+    return onValidRcFrame(sequence, beginProcessingUs, nowMs);
 }
 
 void RxScheduler::onTelemetryDone() {

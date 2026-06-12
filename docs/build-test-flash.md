@@ -63,6 +63,31 @@ pio test -e native
 
 ## Flash
 
+When exactly one matching Pico is connected, use the direct role helpers. These
+build and upload the selected PlatformIO environment:
+
+```bash
+scripts/flash-tx.sh
+scripts/flash-rx.sh
+scripts/flash-rc.sh
+```
+
+If more than one serial device is connected, pass the port explicitly:
+
+```bash
+scripts/flash-tx.sh /dev/cu.usbmodem1101
+scripts/flash-rx.sh /dev/cu.usbmodem5
+scripts/flash-rc.sh /dev/cu.usbmodem14101
+```
+
+Equivalent environment-variable form:
+
+```bash
+TX_PORT=/dev/cu.usbmodem1101 scripts/flash-tx.sh
+RX_PORT=/dev/cu.usbmodem5 scripts/flash-rx.sh
+RC_PORT=/dev/cu.usbmodem14101 scripts/flash-rc.sh
+```
+
 Hold BOOTSEL while plugging in one Pico, then run:
 
 ```bash
@@ -123,3 +148,36 @@ rc.v1 binding_verify target=tx phrase=<phrase>
 ```
 
 TX/RX direct USB accepts local binding commands with `target=tx` or `target=rx`.
+
+## Multi-Module Monitor
+
+Show color-tagged TX, RX, and RC USB serial logs in one terminal:
+
+```bash
+scripts/monitor-all.sh
+```
+
+The monitor probes connected USB serial ports with `status`, ignores devices
+that do not report `role=tx`, `role=rx`, or `role=rc-rp2350`, then prints
+colorized lines with timestamps. It also sends `status` every 5 seconds by
+default so quiet modules remain visible.
+
+Explicit ports:
+
+```bash
+scripts/monitor-all.sh /dev/cu.usbmodem1101 /dev/cu.usbmodem5 /dev/cu.usbmodem14101
+```
+
+Environment-variable form:
+
+```bash
+TX_PORT=/dev/cu.usbmodem1101 RX_PORT=/dev/cu.usbmodem5 RC_PORT=/dev/cu.usbmodem14101 scripts/monitor-all.sh
+```
+
+Useful options:
+
+```bash
+scripts/monitor-all.sh --status-interval 1
+scripts/monitor-all.sh --status-interval 0
+scripts/monitor-all.sh --no-clear
+```

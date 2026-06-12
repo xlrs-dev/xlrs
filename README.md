@@ -36,6 +36,48 @@ scripts/flash.sh rx    # → .pio/build/rx_lora_pico/firmware.uf2
 scripts/flash.sh rc    # → .pio/build/rc-rp2350/firmware.uf2  (handset)
 ```
 
+Targeted direct flash helpers build and upload one role. Use these when a
+single matching board is connected:
+
+```bash
+scripts/flash-tx.sh
+scripts/flash-rx.sh
+scripts/flash-rc.sh
+```
+
+When multiple USB serial devices are connected, pass the target port explicitly:
+
+```bash
+scripts/flash-tx.sh /dev/cu.usbmodem1101
+scripts/flash-rx.sh /dev/cu.usbmodem5
+scripts/flash-rc.sh /dev/cu.usbmodem14101
+```
+
+The same ports can be supplied through environment variables:
+
+```bash
+TX_PORT=/dev/cu.usbmodem1101 scripts/flash-tx.sh
+RX_PORT=/dev/cu.usbmodem5 scripts/flash-rx.sh
+RC_PORT=/dev/cu.usbmodem14101 scripts/flash-rc.sh
+```
+
+Monitor all connected modules in one color-tagged terminal view:
+
+```bash
+scripts/monitor-all.sh
+```
+
+The monitor probes USB serial ports with `status`, identifies `role=tx`,
+`role=rx`, and `role=rc-rp2350`, ignores non-module ports, and prints timestamped
+TX/RX/RC logs. It sends `status` every 5 seconds by default. Useful variants:
+
+```bash
+scripts/monitor-all.sh /dev/cu.usbmodem1101 /dev/cu.usbmodem5 /dev/cu.usbmodem14101
+scripts/monitor-all.sh --status-interval 1
+scripts/monitor-all.sh --status-interval 0
+scripts/monitor-all.sh --no-clear
+```
+
 Equivalent manual PlatformIO commands:
 
 ```bash

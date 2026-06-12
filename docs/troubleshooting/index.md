@@ -342,6 +342,26 @@ On telemetry slots, RX transmits downlink telemetry to TX. TX reports this as
 `LQdown`. In CRSF RC builds, valid flight-controller CRSF telemetry is bridged
 from RX to TX and then written back to the CRSF RC controller port.
 
+The CRSF RC controller also receives standard `LINK_STATISTICS` from TX. Use the
+direction-qualified fields this way:
+
+| Field | What it proves |
+| --- | --- |
+| uplink LQ/RSSI/SNR | RX is hearing TX uplink RC frames |
+| downlink LQ/RSSI/SNR | TX is hearing RX telemetry slots |
+| `rf_Mode` | Active XLRS rate index |
+| `uplink_TX_Power` | Currently `0`; TX power enum mapping is not implemented yet |
+
+If uplink looks good but downlink is zero or stale, debug telemetry-slot timing,
+RX telemetry transmit, or TX receive quality before debugging CRSF input/output.
+If downlink looks good but uplink is poor, debug TX transmit quality, RX receive
+quality, FHSS lock, and RX-side timing.
+
+Versioned XLRS downlink telemetry also carries compact diagnostic flags for
+field captures: uplink stale, config defaulted, FHSS not connected, timing drift,
+and rejected OTA frames. These flags are not a replacement for USB serial logs,
+but they identify the first subsystem to inspect when a link degrades.
+
 If uplink works but TX telemetry is zero/stale:
 
 1. Check TX status `LQdown`.

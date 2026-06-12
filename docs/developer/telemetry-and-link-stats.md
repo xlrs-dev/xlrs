@@ -10,6 +10,63 @@ Use direction-qualified names for telemetry:
 Link quality accounting excludes Sync/Telemetry/Idle slots from uplink expected
 counts. This prevents telemetry ratio from looking like packet loss.
 
+## CRSF Link Statistics
+
+XLRS emits the standard 10-byte CRSF `LINK_STATISTICS` payload. The fields are
+direction-qualified:
+
+| CRSF field | XLRS source |
+| --- | --- |
+| `uplink_RSSI_1` | RX-measured RSSI for TX-to-RX uplink frames |
+| `uplink_RSSI_2` | Reserved for future diversity; currently `0` |
+| `uplink_Link_quality` | RX-measured uplink LQ |
+| `uplink_SNR` | RX-measured uplink SNR |
+| `active_antenna` | Reserved for future diversity; currently `0` |
+| `rf_Mode` | Active XLRS rate index |
+| `uplink_TX_Power` | Reserved until TX power is mapped into CRSF power enums; currently `0` |
+| `downlink_RSSI` | TX-measured RSSI for RX-to-TX telemetry frames |
+| `downlink_Link_quality` | TX-measured telemetry-slot success rate |
+| `downlink_SNR` | TX-measured SNR for RX-to-TX telemetry frames |
+
+When downlink telemetry is stale, TX reports zero uplink and downlink CRSF link
+statistics to the handset. RX-side CRSF link statistics sent to the flight
+controller report the RX uplink view and leave downlink-only fields at zero
+because RX cannot measure TX reception of telemetry slots.
+
+## Downlink Telemetry Payload
+
+RX-to-TX `downlink_telemetry` uses a versioned payload when telemetry slots are
+enabled:
+
+| Byte | Field |
+| ---: | --- |
+| 0 | payload version (`1`) |
+| 1 | `uplink_lq` |
+| 2 | `uplink_rssi_dbm * -1` |
+| 3 | `uplink_snr_db` |
+| 4 | `rf_mode` |
+| 5 | `uplink_tx_power` CRSF enum, or `0` when unavailable |
+| 6 | XLRS diagnostic fault flags |
+| 7 | current `fhss_index` |
+| 8 | expected `fhss_index` |
+| 9 | `phase_error_us / 10`, clamped to int8 |
+| 10 | lost connection count, saturated at 255 |
+| 11 | rejected OTA frame count, saturated at 255 |
+
+The decoder still accepts the legacy 4-byte payload
+`uplink_lq, uplink_rssi_dbm * -1, uplink_snr_db, rf_mode` so mixed bench
+firmware does not immediately reject older RX telemetry.
+
+Fault flags:
+
+| Flag | Meaning |
+| --- | --- |
+| `0x01` | uplink is stale at RX |
+| `0x02` | config defaulted from invalid flash-backed config |
+| `0x04` | RX scheduler is not connected / FHSS is not locked to usable uplink |
+| `0x08` | PFD phase error bucket exceeds the timing-drift threshold |
+| `0x10` | one or more OTA frames were rejected by CRC/type/UID checks |
+
 ```mermaid
 graph TD
     classDef tick fill:#e0f2fe,stroke:#0284c7,stroke-width:2px;

@@ -68,6 +68,42 @@ struct OtaSyncPayload {
     uint32_t txTick;
 };
 
+enum XlrsTelemetryFaultFlags : uint8_t {
+    kXlrsTelemetryFaultNone = 0,
+    kXlrsTelemetryFaultUplinkStale = 1u << 0,
+    kXlrsTelemetryFaultConfigDefaulted = 1u << 1,
+    kXlrsTelemetryFaultFhssUnlocked = 1u << 2,
+    kXlrsTelemetryFaultTimingDrift = 1u << 3,
+    kXlrsTelemetryFaultRadioRejects = 1u << 4,
+};
+
+struct LinkStats {
+    int16_t uplinkRssiDbm = 0;
+    int16_t uplinkRssi2Dbm = 0;
+    uint8_t uplinkLinkQuality = 0;
+    int8_t uplinkSnrDb = 0;
+    uint8_t activeAntenna = 0;
+    uint8_t rfMode = 0;
+    uint8_t uplinkTxPower = 0;
+    int16_t downlinkRssiDbm = 0;
+    uint8_t downlinkLinkQuality = 0;
+    int8_t downlinkSnrDb = 0;
+};
+
+struct DownlinkTelemetryPayload {
+    uint8_t uplinkLinkQuality = 0;
+    int16_t uplinkRssiDbm = 0;
+    int8_t uplinkSnrDb = 0;
+    uint8_t rfMode = 0;
+    uint8_t uplinkTxPower = 0;
+    uint8_t faultFlags = kXlrsTelemetryFaultNone;
+    uint8_t fhssIndex = 0;
+    uint8_t expectedFhssIndex = 0;
+    int8_t phaseErrorBucket = 0;
+    uint8_t lostConnectionCount = 0;
+    uint8_t radioRejectCount = 0;
+};
+
 struct DeviceConfig {
     char bindingPhrase[33];
     RateId rate;
@@ -145,8 +181,12 @@ uint32_t telemetryListenWindowMs(const RateConfig& rate, uint8_t listenSlots = k
 uint16_t hopForSequence(uint16_t sequence, uint8_t telemetryRatio, uint8_t listenSlots = kTelemetryResponseListenSlots);
 uint16_t nextHopAfterReceivedSequence(uint16_t sequence, uint8_t telemetryRatio,
                                       uint8_t listenSlots = kTelemetryResponseListenSlots);
+bool encodeDownlinkTelemetryPayload(const DownlinkTelemetryPayload& payload,
+                                    uint8_t out[kOtaPayloadSize], uint8_t& payloadLen);
+bool decodeDownlinkTelemetryPayload(const OtaFrame& frame, DownlinkTelemetryPayload& out);
 size_t encodeCrsfRcFrame(const uint16_t channels[kRcChannelCount], uint8_t* out, size_t outLen);
 bool parseCrsfRcFrame(uint8_t byte, uint16_t channels[kRcChannelCount]);
+size_t encodeCrsfLinkStats(const LinkStats& stats, uint8_t* out, size_t outLen);
 size_t encodeCrsfLinkStats(int16_t rssiDbm, int8_t snr, uint8_t linkQuality, uint8_t activeRate,
                            uint8_t* out, size_t outLen);
 bool parseCrsfBindingRequestFrame(uint8_t byte, BindingControlRequest& out);

@@ -997,16 +997,83 @@ static void test_telemetry_listen_window_is_short_and_scheduled_by_ratio() {
 
 static void test_crsf_link_stats_puts_rate_in_rf_mode_not_power() {
     uint8_t frame[16] = {};
-    const size_t len = encodeCrsfLinkStats(-71, 8, 93, static_cast<uint8_t>(RateId::L100),
-                                           frame, sizeof(frame));
+    LinkStats stats{};
+    stats.uplinkRssiDbm = -71;
+    stats.uplinkRssi2Dbm = -73;
+    stats.uplinkLinkQuality = 93;
+    stats.uplinkSnrDb = 8;
+    stats.activeAntenna = 1;
+    stats.rfMode = static_cast<uint8_t>(RateId::L100);
+    stats.uplinkTxPower = 0;
+    stats.downlinkRssiDbm = -68;
+    stats.downlinkLinkQuality = 87;
+    stats.downlinkSnrDb = 6;
+    const size_t len = encodeCrsfLinkStats(stats, frame, sizeof(frame));
     TEST_ASSERT_EQUAL_UINT(14, len);
     TEST_ASSERT_EQUAL_UINT8(0x14, frame[2]);
     TEST_ASSERT_EQUAL_UINT8(71, frame[3]);
+    TEST_ASSERT_EQUAL_UINT8(73, frame[4]);
     TEST_ASSERT_EQUAL_UINT8(93, frame[5]);
     TEST_ASSERT_EQUAL_UINT8(8, frame[6]);
+    TEST_ASSERT_EQUAL_UINT8(1, frame[7]);
     TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RateId::L100), frame[8]);
     TEST_ASSERT_EQUAL_UINT8(0, frame[9]);
+    TEST_ASSERT_EQUAL_UINT8(68, frame[10]);
+    TEST_ASSERT_EQUAL_UINT8(87, frame[11]);
+    TEST_ASSERT_EQUAL_UINT8(6, frame[12]);
     TEST_ASSERT_EQUAL_UINT8(crsfCrc8(&frame[2], 11), frame[13]);
+}
+
+static void test_downlink_telemetry_payload_round_trips_diagnostics() {
+    DownlinkTelemetryPayload payload{};
+    payload.uplinkLinkQuality = 97;
+    payload.uplinkRssiDbm = -64;
+    payload.uplinkSnrDb = 9;
+    payload.rfMode = static_cast<uint8_t>(RateId::L250);
+    payload.uplinkTxPower = 3;
+    payload.faultFlags = kXlrsTelemetryFaultTimingDrift | kXlrsTelemetryFaultRadioRejects;
+    payload.fhssIndex = 12;
+    payload.expectedFhssIndex = 13;
+    payload.phaseErrorBucket = -11;
+    payload.lostConnectionCount = 2;
+    payload.radioRejectCount = 7;
+
+    OtaFrame frame{};
+    frame.type = OtaType::Telemetry;
+    TEST_ASSERT_TRUE(encodeDownlinkTelemetryPayload(payload, frame.payload, frame.payloadLen));
+    TEST_ASSERT_EQUAL_UINT8(12, frame.payloadLen);
+
+    DownlinkTelemetryPayload parsed{};
+    TEST_ASSERT_TRUE(decodeDownlinkTelemetryPayload(frame, parsed));
+    TEST_ASSERT_EQUAL_UINT8(97, parsed.uplinkLinkQuality);
+    TEST_ASSERT_EQUAL_INT16(-64, parsed.uplinkRssiDbm);
+    TEST_ASSERT_EQUAL_INT8(9, parsed.uplinkSnrDb);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RateId::L250), parsed.rfMode);
+    TEST_ASSERT_EQUAL_UINT8(3, parsed.uplinkTxPower);
+    TEST_ASSERT_EQUAL_UINT8(payload.faultFlags, parsed.faultFlags);
+    TEST_ASSERT_EQUAL_UINT8(12, parsed.fhssIndex);
+    TEST_ASSERT_EQUAL_UINT8(13, parsed.expectedFhssIndex);
+    TEST_ASSERT_EQUAL_INT8(-11, parsed.phaseErrorBucket);
+    TEST_ASSERT_EQUAL_UINT8(2, parsed.lostConnectionCount);
+    TEST_ASSERT_EQUAL_UINT8(7, parsed.radioRejectCount);
+}
+
+static void test_downlink_telemetry_decoder_accepts_legacy_four_byte_payload() {
+    OtaFrame frame{};
+    frame.type = OtaType::Telemetry;
+    frame.payloadLen = 4;
+    frame.payload[0] = 88;
+    frame.payload[1] = 52;
+    frame.payload[2] = static_cast<uint8_t>(-4);
+    frame.payload[3] = static_cast<uint8_t>(RateId::L100);
+
+    DownlinkTelemetryPayload parsed{};
+    TEST_ASSERT_TRUE(decodeDownlinkTelemetryPayload(frame, parsed));
+    TEST_ASSERT_EQUAL_UINT8(88, parsed.uplinkLinkQuality);
+    TEST_ASSERT_EQUAL_INT16(-52, parsed.uplinkRssiDbm);
+    TEST_ASSERT_EQUAL_INT8(-4, parsed.uplinkSnrDb);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RateId::L100), parsed.rfMode);
+    TEST_ASSERT_EQUAL_UINT8(kXlrsTelemetryFaultNone, parsed.faultFlags);
 }
 
 static void test_core1_config_snapshot_generation_and_ack() {
@@ -1797,6 +1864,8 @@ int main(int argc, char** argv) {
     RUN_TEST(test_failsafe_freshness_helper_uses_named_timeout);
     RUN_TEST(test_telemetry_listen_window_is_short_and_scheduled_by_ratio);
     RUN_TEST(test_crsf_link_stats_puts_rate_in_rf_mode_not_power);
+    RUN_TEST(test_downlink_telemetry_payload_round_trips_diagnostics);
+    RUN_TEST(test_downlink_telemetry_decoder_accepts_legacy_four_byte_payload);
     RUN_TEST(test_core1_config_snapshot_generation_and_ack);
     RUN_TEST(test_core1_live_state_snapshot_is_latest_value);
     RUN_TEST(test_handset_adc_calibration_maps_raw_to_crsf_units);

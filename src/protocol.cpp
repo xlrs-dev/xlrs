@@ -15,6 +15,8 @@ static constexpr uint8_t kOtaMagic = 0xA7;
 static constexpr uint8_t kOtaHeaderSize = 9;
 static constexpr uint8_t kOtaCrcOffset = kOtaHeaderSize + kOtaPayloadSize;
 static constexpr uint8_t kOtaSyncPayloadSize = 16;
+static constexpr uint8_t kDownlinkTelemetryPayloadVersion = 1;
+static constexpr uint8_t kDownlinkTelemetryPayloadSize = 12;
 static constexpr uint8_t kCrsfAddressFlightController = 0xC8;
 static constexpr uint8_t kCrsfAddressRadioTransmitter = 0xEA;
 static constexpr uint8_t kCrsfAddressCrsfTransmitter = 0xEE;
@@ -165,6 +167,16 @@ static uint32_t readBe32(const uint8_t* in) {
            (static_cast<uint32_t>(in[1]) << 16) |
            (static_cast<uint32_t>(in[2]) << 8) |
            static_cast<uint32_t>(in[3]);
+}
+
+static uint8_t crsfRssiByte(int16_t rssiDbm) {
+    if (rssiDbm == 0) return 0;
+    const int16_t magnitude = rssiDbm < 0 ? static_cast<int16_t>(-rssiDbm) : rssiDbm;
+    return magnitude > 255 ? 255 : static_cast<uint8_t>(magnitude);
+}
+
+static uint8_t clampPercent(uint8_t value) {
+    return value > 100 ? 100 : value;
 }
 
 bool encodeOtaSyncPayload(const OtaSyncPayload& payload, uint8_t out[kOtaPayloadSize], uint8_t& payloadLen) {
@@ -363,6 +375,54 @@ uint16_t nextHopAfterReceivedSequence(uint16_t sequence, uint8_t telemetryRatio,
     return hopForSequence(static_cast<uint16_t>(sequence + 1), telemetryRatio, listenSlots);
 }
 
+bool encodeDownlinkTelemetryPayload(const DownlinkTelemetryPayload& payload,
+                                    uint8_t out[kOtaPayloadSize], uint8_t& payloadLen) {
+    if (!out) return false;
+    memset(out, 0, kOtaPayloadSize);
+    out[0] = kDownlinkTelemetryPayloadVersion;
+    out[1] = clampPercent(payload.uplinkLinkQuality);
+    out[2] = crsfRssiByte(payload.uplinkRssiDbm);
+    out[3] = static_cast<uint8_t>(payload.uplinkSnrDb);
+    out[4] = payload.rfMode;
+    out[5] = payload.uplinkTxPower;
+    out[6] = payload.faultFlags;
+    out[7] = payload.fhssIndex;
+    out[8] = payload.expectedFhssIndex;
+    out[9] = static_cast<uint8_t>(payload.phaseErrorBucket);
+    out[10] = payload.lostConnectionCount;
+    out[11] = payload.radioRejectCount;
+    payloadLen = kDownlinkTelemetryPayloadSize;
+    return true;
+}
+
+bool decodeDownlinkTelemetryPayload(const OtaFrame& frame, DownlinkTelemetryPayload& out) {
+    if (frame.type != OtaType::Telemetry) return false;
+    memset(&out, 0, sizeof(out));
+    if (frame.payloadLen == 4) {
+        out.uplinkLinkQuality = clampPercent(frame.payload[0]);
+        out.uplinkRssiDbm = -static_cast<int16_t>(frame.payload[1]);
+        out.uplinkSnrDb = static_cast<int8_t>(frame.payload[2]);
+        out.rfMode = frame.payload[3];
+        return true;
+    }
+    if (frame.payloadLen < kDownlinkTelemetryPayloadSize ||
+        frame.payload[0] != kDownlinkTelemetryPayloadVersion) {
+        return false;
+    }
+    out.uplinkLinkQuality = clampPercent(frame.payload[1]);
+    out.uplinkRssiDbm = -static_cast<int16_t>(frame.payload[2]);
+    out.uplinkSnrDb = static_cast<int8_t>(frame.payload[3]);
+    out.rfMode = frame.payload[4];
+    out.uplinkTxPower = frame.payload[5];
+    out.faultFlags = frame.payload[6];
+    out.fhssIndex = frame.payload[7];
+    out.expectedFhssIndex = frame.payload[8];
+    out.phaseErrorBucket = static_cast<int8_t>(frame.payload[9]);
+    out.lostConnectionCount = frame.payload[10];
+    out.radioRejectCount = frame.payload[11];
+    return true;
+}
+
 size_t encodeCrsfRcFrame(const uint16_t channels[kRcChannelCount], uint8_t* out, size_t outLen) {
     if (!out || outLen < 26) return 0;
     uint16_t sanitized[kRcChannelCount];
@@ -404,24 +464,33 @@ bool parseCrsfRcFrame(uint8_t byte, uint16_t channels[kRcChannelCount]) {
     return false;
 }
 
-size_t encodeCrsfLinkStats(int16_t rssiDbm, int8_t snr, uint8_t linkQuality, uint8_t activeRate,
-                           uint8_t* out, size_t outLen) {
+size_t encodeCrsfLinkStats(const LinkStats& stats, uint8_t* out, size_t outLen) {
     if (!out || outLen < 14) return 0;
     out[0] = kCrsfAddressFlightController;
     out[1] = 12; // type + 10-byte payload + crc
     out[2] = kCrsfFrameLinkStatistics;
-    out[3] = static_cast<uint8_t>(rssiDbm < 0 ? -rssiDbm : rssiDbm);
-    out[4] = 0;
-    out[5] = linkQuality;
-    out[6] = static_cast<uint8_t>(snr);
-    out[7] = 0;
-    out[8] = activeRate; // CRSF rf_mode: expose active LoRa rate index to handset/FC UI.
-    out[9] = 0;          // uplink_tx_power is unknown here.
-    out[10] = 0;
-    out[11] = 0;
-    out[12] = 0;
+    out[3] = crsfRssiByte(stats.uplinkRssiDbm);
+    out[4] = crsfRssiByte(stats.uplinkRssi2Dbm);
+    out[5] = clampPercent(stats.uplinkLinkQuality);
+    out[6] = static_cast<uint8_t>(stats.uplinkSnrDb);
+    out[7] = stats.activeAntenna;
+    out[8] = stats.rfMode;
+    out[9] = stats.uplinkTxPower;
+    out[10] = crsfRssiByte(stats.downlinkRssiDbm);
+    out[11] = clampPercent(stats.downlinkLinkQuality);
+    out[12] = static_cast<uint8_t>(stats.downlinkSnrDb);
     out[13] = crsfCrc8(&out[2], 11);
     return 14;
+}
+
+size_t encodeCrsfLinkStats(int16_t rssiDbm, int8_t snr, uint8_t linkQuality, uint8_t activeRate,
+                           uint8_t* out, size_t outLen) {
+    LinkStats stats{};
+    stats.uplinkRssiDbm = rssiDbm;
+    stats.uplinkLinkQuality = linkQuality;
+    stats.uplinkSnrDb = snr;
+    stats.rfMode = activeRate;
+    return encodeCrsfLinkStats(stats, out, outLen);
 }
 
 static bool crsfAddressCanCarryBindingControl(uint8_t address) {

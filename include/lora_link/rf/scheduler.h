@@ -7,7 +7,7 @@
 namespace lora_link {
 namespace rf {
 
-constexpr uint16_t kSyncChannelFhssIndex = 0;
+constexpr uint16_t kSyncChannelFhssIndex = 32;
 constexpr uint16_t kSyncFrameInterval = 32;
 
 enum class ConnectionState : uint8_t {
@@ -142,6 +142,7 @@ public:
     RxTimerEventResult onTimerEvent(RxTimerHalfEvent half, uint32_t eventUs, bool linkFresh, uint32_t nowMs);
     bool onValidSyncFrame(const OtaSyncPayload& sync, uint32_t beginProcessingUs);
     bool onValidRcFrame(uint16_t sequence, uint32_t beginProcessingUs, uint32_t nowMs);
+    bool onAcquisitionRcFrame(uint16_t sequence, uint32_t beginProcessingUs, uint32_t nowMs);
     void onTelemetryDone();
     void setConnected(bool connected);
     uint32_t packetTockReferenceUs(uint32_t beginProcessingUs) const;

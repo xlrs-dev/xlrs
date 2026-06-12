@@ -65,6 +65,7 @@ static constexpr uint8_t kCrsfFrameBatterySensor = 0x08;
 
 static uint32_t g_lastDisplayMs = 0;
 static uint32_t g_lastStreamStateMs = 0;
+static uint32_t g_lastTxBindingProbeMs = 0;
 static uint32_t g_streamStateIntervalMs = 0;
 static bool g_streamStateEnabled = false;
 static rc_handset::core1::ConfigSnapshot g_activeConfig = rc_handset::core1::makeDefaultConfigSnapshot();
@@ -78,6 +79,8 @@ static LiveStateSnapshot g_liveState = rc_handset::core1::makeDefaultLiveStateSn
 static rc_handset::display::OledDisplay g_display;
 static handset_telemetry::HandsetTelemetry g_handsetTelemetry(
     {100u, 1500u, kLinkTelemetryFreshMs, 5000u});
+static BindingStatus g_txBindingStatus = {};
+static bool g_haveTxBindingStatus = false;
 
 static const char* bindingResultName(BindingResult result) {
     switch (result) {
@@ -366,13 +369,31 @@ static uint32_t defaultBindingUidCheck() {
     return uidCheck(uid);
 }
 
+static void cacheTxBindingStatus(const BindingStatus& status) {
+    g_txBindingStatus = status;
+    g_haveTxBindingStatus = true;
+}
+
+static const char* displayBindingPhrase() {
+    return g_haveTxBindingStatus ? g_txBindingStatus.phrase : DEFAULT_BINDING_PHRASE;
+}
+
+static uint32_t expectedTxUidCheck() {
+    return g_haveTxBindingStatus ? g_txBindingStatus.uidCheck : defaultBindingUidCheck();
+}
+
 static void publishTxBindingTelemetry(bool present, const BindingStatus* status, uint32_t nowMs) {
+    if (status) cacheTxBindingStatus(*status);
     const handset_telemetry::HandsetTelemetryState& state = g_handsetTelemetry.state();
+    const bool haveExpectedUid = g_haveTxBindingStatus || status != nullptr;
+    const uint32_t expectedUid = status ? status->uidCheck : expectedTxUidCheck();
+    const bool haveObservedUid = status != nullptr || state.haveObservedUidCheck;
+    const uint32_t observedUid = status ? status->uidCheck : state.observedUidCheck;
     g_handsetTelemetry.updateTxStatus(present,
-                                      true,
-                                      defaultBindingUidCheck(),
-                                      status != nullptr,
-                                      status ? status->uidCheck : state.observedUidCheck,
+                                      haveExpectedUid,
+                                      expectedUid,
+                                      haveObservedUid,
+                                      observedUid,
                                       state.activeRate,
                                       nowMs);
 }
@@ -415,8 +436,8 @@ static void handleCrsfTelemetryFrame(const uint8_t frame[64], uint8_t frameLen) 
         const int8_t snrDb = static_cast<int8_t>(frame[6]);
         const handset_telemetry::HandsetTelemetryState& state = g_handsetTelemetry.state();
         g_handsetTelemetry.updateTxStatus(true,
-                                          true,
-                                          defaultBindingUidCheck(),
+                                          g_haveTxBindingStatus || state.haveExpectedUidCheck,
+                                          g_haveTxBindingStatus ? g_txBindingStatus.uidCheck : state.expectedUidCheck,
                                           state.haveObservedUidCheck,
                                           state.observedUidCheck,
                                           rateIdFromCrsfRfMode(frame[8]),
@@ -473,6 +494,25 @@ static bool proxyTxBindingRequest(const BindingControlRequest& request, BindingS
         yield();
     }
     return false;
+}
+
+static void serviceTxBindingProbe() {
+    const uint32_t nowMs = millis();
+    const uint32_t intervalMs = g_haveTxBindingStatus ? 30000u : 2000u;
+    if (g_lastTxBindingProbeMs != 0 &&
+        static_cast<uint32_t>(nowMs - g_lastTxBindingProbeMs) < intervalMs) {
+        return;
+    }
+    g_lastTxBindingProbeMs = nowMs;
+
+    BindingControlRequest request{};
+    request.op = BindingControlOp::Get;
+    BindingStatus status{};
+    BindingResult result = BindingResult::InvalidCommand;
+    BindingControlOp responseOp = BindingControlOp::Get;
+    if (!proxyTxBindingRequest(request, status, result, responseOp) || result != BindingResult::Ok) {
+        publishTxBindingTelemetry(false, nullptr, nowMs);
+    }
 }
 
 static void printBindingResponse(const handset_usb::ParsedCommand& command, const BindingStatus& status,
@@ -536,6 +576,12 @@ static std::vector<handset_usb::ResponseField> stateResponseFields() {
     }
     if (telemetry.rxBatteryStatus != handset_telemetry::FieldStatus::Missing) {
         fields.push_back({"rx_batt_mv", std::to_string(telemetry.rxBattery.millivolts)});
+    }
+    if (g_haveTxBindingStatus) {
+        fields.push_back({"tx_phrase", g_txBindingStatus.phrase});
+        fields.push_back({"tx_uid", uidHexString(g_txBindingStatus.uid)});
+        fields.push_back({"tx_uid_check", uidCheckHexString(g_txBindingStatus.uidCheck)});
+        fields.push_back({"tx_requires_reboot", g_txBindingStatus.requiresReboot ? "1" : "0"});
     }
     return fields;
 }
@@ -785,7 +831,7 @@ static void serviceCli() {
             }
             refreshLiveState();
             if (strcmp(line, "status") == 0) {
-                Serial.printf("role=rc-rp2350 core1=%u baud=%lu frames=%lu cfg=%lu ack=%lu guard=%lu hold=%lu ch=%u,%u,%u,%u\n",
+                Serial.printf("role=rc-rp2350 core1=%u baud=%lu frames=%lu cfg=%lu ack=%lu guard=%lu hold=%lu tx_phrase=%s tx_uid=%s ch=%u,%u,%u,%u\n",
                               rc_handset::core1::isCore1Started() ? 1u : 0u,
                               static_cast<unsigned long>(kCrsfBaud),
                               static_cast<unsigned long>(g_liveState.framesSent),
@@ -793,6 +839,8 @@ static void serviceCli() {
                               static_cast<unsigned long>(rc_handset::core1::ackedConfigGeneration()),
                               static_cast<unsigned long>(g_liveState.channelGuardRejects),
                               static_cast<unsigned long>(g_liveState.channelSpikeHolds),
+                              g_haveTxBindingStatus ? g_txBindingStatus.phrase : "unknown",
+                              g_haveTxBindingStatus ? uidCheckHexString(g_txBindingStatus.uidCheck).c_str() : "unknown",
                               g_liveState.channels[0], g_liveState.channels[1],
                               g_liveState.channels[2], g_liveState.channels[3]);
                 handset_power::rcPowerPrintStatus();
@@ -869,7 +917,7 @@ static void populateDisplayState(rc_handset::display::DisplayState& state,
     }
 
     state.config.rateName = handset_telemetry::rateName(telemetry.activeRate);
-    state.config.bindingPhrase = DEFAULT_BINDING_PHRASE;
+    state.config.bindingPhrase = displayBindingPhrase();
     state.config.calibrationValid = g_liveState.haveChannels;
     state.config.framesSent = g_liveState.framesSent;
     state.config.guardRejects = g_liveState.channelGuardRejects;
@@ -955,6 +1003,7 @@ void loop() {
     rc_handset::core1::loopOnceFallback();
     serviceCrsfTelemetry();
     serviceCli();
+    serviceTxBindingProbe();
     serviceStateStream();
     serviceDisplay();
     yield();

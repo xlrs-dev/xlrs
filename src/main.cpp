@@ -45,7 +45,22 @@ static constexpr uint16_t kRcSpikeJumpThreshold = 160;
 static constexpr uint16_t kRcSpikeConfirmTolerance = 80;
 static constexpr uint32_t kHandsetTelemetryIntervalMs = 250;
 static constexpr uint32_t kDownlinkTelemetryFreshMs = 2000;
-static constexpr uint32_t kTelemetryReplyGuardUs = 7000;
+static constexpr uint32_t kTelemetryReplyGuardUs = 1500;
+static constexpr uint8_t kAcquisitionSyncIntervalFrames = 4;
+static constexpr uint8_t kStartupCliGraceLoops = 3;
+static constexpr int8_t kBenchTxPowerDbm = 0;
+static constexpr bool kBenchSingleFrequency = true;
+static constexpr uint8_t kSx1280OpWriteRegister = 0x18;
+static constexpr uint8_t kSx1280OpReadRegister = 0x19;
+static constexpr uint16_t kSx1280RegRxGain = 0x0891;
+static constexpr uint16_t kSx1280RegLoraSfConfig = 0x0925;
+static constexpr uint16_t kSx1280RegFreqErrorComp = 0x093C;
+static constexpr uint8_t kSx1280RxGainHighSensitivity = 0xC0;
+static constexpr uint8_t kSx1280RxGainKeepMask = 0x3F;
+static constexpr uint8_t kSx1280LoraSfConfigSf5Sf6 = 0x1E;
+static constexpr uint8_t kSx1280LoraSfConfigSf7Sf8 = 0x37;
+static constexpr uint8_t kSx1280LoraSfConfigSf9Sf12 = 0x32;
+static constexpr uint8_t kSx1280FreqErrorCompOn = 0x01;
 #if LORA_RX_ROLE
 struct RfTimerIsrEvent {
     uint32_t timestampUs;
@@ -67,6 +82,8 @@ static volatile uint32_t g_rfTimerLastTickUs = 0;
 static uint32_t g_rfTimerEventsHandled = 0;
 static uint32_t g_rfMissedTimerEvents = 0;
 static uint8_t g_otaTxBytes[kOtaFrameSize];
+static uint32_t g_radioTuneOk = 0;
+static uint32_t g_radioTuneFail = 0;
 enum class RadioOp : uint8_t {
     Idle = 0,
     Rx = 1,
@@ -80,6 +97,7 @@ static uint32_t g_uplinkTransmitAttempts = 0;
 static uint32_t g_uplinkTransmitSuccesses = 0;
 static uint32_t g_telemetryListenSlots = 0;
 static uint32_t g_txRcFailsafeFrames = 0;
+static uint32_t g_txSyncFrames = 0;
 static uint32_t g_crsfInputFrames = 0;
 static uint32_t g_crsfInputRejects = 0;
 static uint32_t g_crsfInputSpikeHolds = 0;
@@ -113,6 +131,7 @@ static uint32_t g_fcChannelMaxGapUs = 0;
 static uint32_t g_rxTelemetryTransmitAttempts = 0;
 static uint32_t g_rxTelemetryTransmitDone = 0;
 static uint16_t g_lastTelemetryTransmitHop = 0;
+static uint32_t g_rxAcquisitionChannelUntilMs = 0;
 static RcSpikeGate g_rxOutputSpikeGate{};
 #endif
 
@@ -128,8 +147,16 @@ static float rfFrequencyForHop(uint16_t hop) {
 }
 
 static float syncChannelFrequencyMHz() {
-    return rfFrequencyForHop(rf::kSyncChannelFhssIndex);
+    return fhssFrequencyMHz(rf::kSyncChannelFhssIndex);
 }
+
+#if LORA_RX_ROLE
+static bool rxAcquisitionChannelActive(uint32_t nowMs) {
+    const rf::SchedulerStats rfStats = g_rfScheduler.stats();
+    return rfStats.connectionState == rf::ConnectionState::Disconnected ||
+           static_cast<int32_t>(nowMs - g_rxAcquisitionChannelUntilMs) < 0;
+}
+#endif
 
 static void onDio1() {
     g_dio1 = true;
@@ -272,11 +299,74 @@ static void restoreDefaultBindingPhrase() {
     copyBindingPhrase(DEFAULT_BINDING_PHRASE);
 }
 
+static bool sx1280WaitBusy(uint32_t timeoutUs = 10000) {
+    const uint32_t startUs = micros();
+    while (digitalRead(SX128X_SPI_BUSY)) {
+        if (static_cast<uint32_t>(micros() - startUs) > timeoutUs) return false;
+        yield();
+    }
+    return true;
+}
+
+static bool sx1280WriteRegister(uint16_t addr, const uint8_t* data, uint8_t len) {
+    if (!sx1280WaitBusy()) return false;
+    SPI.beginTransaction(SPISettings(8000000, MSBFIRST, SPI_MODE0));
+    digitalWrite(SX128X_SPI_CS, LOW);
+    delayMicroseconds(2);
+    SPI.transfer(kSx1280OpWriteRegister);
+    SPI.transfer(static_cast<uint8_t>(addr >> 8));
+    SPI.transfer(static_cast<uint8_t>(addr));
+    for (uint8_t i = 0; i < len; ++i) SPI.transfer(data[i]);
+    delayMicroseconds(2);
+    digitalWrite(SX128X_SPI_CS, HIGH);
+    SPI.endTransaction();
+    return sx1280WaitBusy();
+}
+
+static bool sx1280ReadRegister(uint16_t addr, uint8_t* data, uint8_t len) {
+    if (!sx1280WaitBusy()) return false;
+    SPI.beginTransaction(SPISettings(8000000, MSBFIRST, SPI_MODE0));
+    digitalWrite(SX128X_SPI_CS, LOW);
+    delayMicroseconds(2);
+    SPI.transfer(kSx1280OpReadRegister);
+    SPI.transfer(static_cast<uint8_t>(addr >> 8));
+    SPI.transfer(static_cast<uint8_t>(addr));
+    SPI.transfer(0x00);
+    for (uint8_t i = 0; i < len; ++i) data[i] = SPI.transfer(0x00);
+    delayMicroseconds(2);
+    digitalWrite(SX128X_SPI_CS, HIGH);
+    SPI.endTransaction();
+    return sx1280WaitBusy();
+}
+
+static bool applySx1280LoraTuning() {
+    uint8_t sfConfig = kSx1280LoraSfConfigSf9Sf12;
+    if (activeRate().spreadingFactor <= 6) {
+        sfConfig = kSx1280LoraSfConfigSf5Sf6;
+    } else if (activeRate().spreadingFactor <= 8) {
+        sfConfig = kSx1280LoraSfConfigSf7Sf8;
+    }
+    if (!sx1280WriteRegister(kSx1280RegLoraSfConfig, &sfConfig, 1)) return false;
+
+    uint8_t freqErrorComp = 0;
+    if (!sx1280ReadRegister(kSx1280RegFreqErrorComp, &freqErrorComp, 1)) return false;
+    freqErrorComp |= kSx1280FreqErrorCompOn;
+    if (!sx1280WriteRegister(kSx1280RegFreqErrorComp, &freqErrorComp, 1)) return false;
+
+    uint8_t rxGain = 0;
+    if (!sx1280ReadRegister(kSx1280RegRxGain, &rxGain, 1)) return false;
+    rxGain = static_cast<uint8_t>((rxGain & kSx1280RxGainKeepMask) | kSx1280RxGainHighSensitivity);
+    return sx1280WriteRegister(kSx1280RegRxGain, &rxGain, 1);
+}
+
 static bool configureRadio(float freqMHz) {
     SPI.setSCK(SX128X_SPI_SCK);
     SPI.setTX(SX128X_SPI_MOSI);
     SPI.setRX(SX128X_SPI_MISO);
     SPI.begin();
+    pinMode(SX128X_SPI_CS, OUTPUT);
+    digitalWrite(SX128X_SPI_CS, HIGH);
+    pinMode(SX128X_SPI_BUSY, INPUT);
     pinMode(SX128X_RXEN, OUTPUT);
     pinMode(SX128X_TXEN, OUTPUT);
     digitalWrite(SX128X_RXEN, HIGH);
@@ -284,13 +374,18 @@ static bool configureRadio(float freqMHz) {
 
     const RateConfig& rate = activeRate();
     const int16_t state = radio.begin(freqMHz, rate.bandwidthKHz, rate.spreadingFactor,
-                                      rate.codingRate, syncWordFromUid(g_uid), 10, 12);
+                                      rate.codingRate, syncWordFromUid(g_uid), kBenchTxPowerDbm, 12);
     if (state != RADIOLIB_ERR_NONE) {
         Serial.printf("radio init failed: %d\n", state);
         return false;
     }
     radio.setDio1Action(onDio1);
     radio.setCRC(2);
+    if (applySx1280LoraTuning()) {
+        ++g_radioTuneOk;
+    } else {
+        ++g_radioTuneFail;
+    }
     g_dio1 = false;
     radio.startReceive();
     g_rxWaiting = true;
@@ -304,7 +399,20 @@ static void startReceiveOnHop() {
     digitalWrite(SX128X_TXEN, LOW);
     digitalWrite(SX128X_RXEN, HIGH);
     g_dio1 = false;
-    radio.setFrequency(rfFrequencyForHop(g_hop));
+#if LORA_RX_ROLE
+    const bool useAcquisitionChannel = rxAcquisitionChannelActive(millis());
+    const float receiveFrequencyMHz = useAcquisitionChannel
+                                          ? syncChannelFrequencyMHz()
+                                          : rfFrequencyForHop(g_hop);
+#elif LORA_TX_ROLE
+    const bool useAcquisitionChannel = !isLinkFresh(millis(), g_lastDownlinkTelemetryMs, kDownlinkTelemetryFreshMs);
+    const float receiveFrequencyMHz = useAcquisitionChannel
+                                          ? syncChannelFrequencyMHz()
+                                          : rfFrequencyForHop(g_hop);
+#else
+    const float receiveFrequencyMHz = rfFrequencyForHop(g_hop);
+#endif
+    radio.setFrequency(kBenchSingleFrequency ? syncChannelFrequencyMHz() : receiveFrequencyMHz);
     radio.startReceive();
     g_rxWaiting = true;
     g_radioOp = RadioOp::Rx;
@@ -360,7 +468,7 @@ static bool readOtaFrame(OtaFrame& out, uint32_t* beginProcessingUs = nullptr) {
 
 static void printStatus() {
     const rf::SchedulerStats rfStats = g_rfScheduler.stats();
-    Serial.printf("role=%s phrase=%s rate=%s uid=%02X%02X%02X%02X%02X%02X%02X%02X lq=%u rssi=%d snr=%d good=%lu bad=%lu",
+    Serial.printf("role=%s phrase=%s rate=%s uid=%02X%02X%02X%02X%02X%02X%02X%02X sync_mhz=%.1f lq=%u rssi=%d snr=%d good=%lu bad=%lu tune_ok=%lu tune_fail=%lu",
 #if LORA_TX_ROLE
                   "tx",
 #else
@@ -368,17 +476,21 @@ static void printStatus() {
 #endif
                   g_config.bindingPhrase, activeRate().name,
                   g_uid[0], g_uid[1], g_uid[2], g_uid[3], g_uid[4], g_uid[5], g_uid[6], g_uid[7],
+                  static_cast<double>(syncChannelFrequencyMHz()),
                   g_linkQuality, g_lastRssi, g_lastSnr,
                   static_cast<unsigned long>(g_validOtaFrames),
-                  static_cast<unsigned long>(g_rejectedOtaFrames));
+                  static_cast<unsigned long>(g_rejectedOtaFrames),
+                  static_cast<unsigned long>(g_radioTuneOk),
+                  static_cast<unsigned long>(g_radioTuneFail));
 #if LORA_TX_ROLE
     const uint32_t crsfAgeMs = g_lastRcInputMs ? millis() - g_lastRcInputMs : 0xFFFFFFFFu;
-    Serial.printf(" ticks=%lu missed_ticks=%lu nonce=%u fhss=%u tx_done=%lu tlm=%lu tlm_dio=%lu tlm_try=%lu tlm_bad=%lu tlm_type=%lu tlm_hop=%u tx_ok=%lu tx_try=%lu listen=%lu rc_failsafe=%lu crsf=%lu crsf_bind=%lu crsf_rej=%lu crsf_hold=%lu crsf_bytes=%lu crsf_age=%lu ch=%u,%u,%u,%u",
+    Serial.printf(" ticks=%lu missed_ticks=%lu nonce=%u fhss=%u tx_done=%lu sync_tx=%lu tlm=%lu tlm_dio=%lu tlm_try=%lu tlm_bad=%lu tlm_type=%lu tlm_hop=%u tx_ok=%lu tx_try=%lu listen=%lu rc_failsafe=%lu crsf=%lu crsf_bind=%lu crsf_rej=%lu crsf_hold=%lu crsf_bytes=%lu crsf_age=%lu ch=%u,%u,%u,%u",
                   static_cast<unsigned long>(rfStats.timerTicks),
                   static_cast<unsigned long>(g_rfMissedTimerEvents + rfStats.missedTimerTicks),
                   rfStats.nonce,
                   rfStats.fhssIndex,
                   static_cast<unsigned long>(rfStats.txDone),
+                  static_cast<unsigned long>(g_txSyncFrames),
                   static_cast<unsigned long>(g_downlinkTelemetryFrames),
                   static_cast<unsigned long>(g_telemetryDio1Events),
                   static_cast<unsigned long>(g_telemetryReadAttempts),
@@ -839,7 +951,10 @@ static void txLoop() {
             g_rfScheduler.onTxDone();
             g_sequence = g_rfScheduler.sequence();
             g_hop = g_rfScheduler.fhss().index();
-            finishTransmitAndReceive(g_rfScheduler.fhss().frequencyMHz());
+            const bool acquisitionMode = !isLinkFresh(millis(), g_lastDownlinkTelemetryMs, kDownlinkTelemetryFreshMs);
+            const float receiveFrequencyMHz = acquisitionMode ? syncChannelFrequencyMHz()
+                                                              : g_rfScheduler.fhss().frequencyMHz();
+            finishTransmitAndReceive(kBenchSingleFrequency ? syncChannelFrequencyMHz() : receiveFrequencyMHz);
             ++g_uplinkTransmitSuccesses;
         } else if (g_radioOp == RadioOp::Rx) {
             OtaFrame rx{};
@@ -881,14 +996,23 @@ static void txLoop() {
         }
         OtaFrame frame{};
         const uint16_t txSequence = g_rfScheduler.sequence();
-        frame.type = g_rfScheduler.shouldSendSyncFrame() ? OtaType::Sync : OtaType::Rc;
+        const bool downlinkFresh = isLinkFresh(millis(), g_lastDownlinkTelemetryMs, kDownlinkTelemetryFreshMs);
+        const bool acquisitionMode = !downlinkFresh;
+        const bool acquisitionSync = !kBenchSingleFrequency && acquisitionMode &&
+                                     (txSequence % kAcquisitionSyncIntervalFrames) == 0;
+        frame.type = (!kBenchSingleFrequency && (acquisitionSync || g_rfScheduler.shouldSendSyncFrame()))
+                         ? OtaType::Sync
+                         : OtaType::Rc;
         frame.sequence = txSequence;
         frame.uidCheck = g_uidCheck;
-        float txFrequencyMHz = g_rfScheduler.fhss().frequencyMHz();
+        float txFrequencyMHz = (kBenchSingleFrequency || acquisitionMode)
+                                   ? syncChannelFrequencyMHz()
+                                   : g_rfScheduler.fhss().frequencyMHz();
         if (frame.type == OtaType::Sync) {
             const OtaSyncPayload sync = g_rfScheduler.syncPayload();
             if (!encodeOtaSyncPayload(sync, frame.payload, frame.payloadLen)) continue;
             txFrequencyMHz = syncChannelFrequencyMHz();
+            ++g_txSyncFrames;
         } else {
             frame.payloadLen = kOtaPayloadSize;
             packRcChannels11Bit(g_channels, frame.payload);
@@ -939,6 +1063,11 @@ static void writeFcLinkStats() {
 }
 
 static void updateRxSequenceStats(uint16_t rxSequence) {
+    if (kBenchSingleFrequency) {
+        g_haveLastSequence = true;
+        g_lastSequence = rxSequence;
+        return;
+    }
     if (g_haveLastSequence) {
         const uint16_t expected = static_cast<uint16_t>(g_lastSequence + 1);
         if (rxSequence != expected) {
@@ -978,13 +1107,33 @@ static void resetRxSequenceTracking() {
     g_rxOutputSpikeGate.havePending = false;
 }
 
+static void sendRxTelemetryNow() {
+    OtaFrame tlm{};
+    tlm.type = OtaType::Telemetry;
+    tlm.sequence = g_sequence++;
+    tlm.uidCheck = g_uidCheck;
+    tlm.payloadLen = 4;
+    tlm.payload[0] = g_linkQuality;
+    tlm.payload[1] = static_cast<uint8_t>(g_lastRssi < 0 ? -g_lastRssi : g_lastRssi);
+    tlm.payload[2] = static_cast<uint8_t>(g_lastSnr);
+    tlm.payload[3] = static_cast<uint8_t>(g_config.rate);
+    ++g_rxTelemetryTransmitAttempts;
+    g_lastTelemetryTransmitHop = g_rfScheduler.fhss().index();
+    busy_wait_us(kTelemetryReplyGuardUs);
+    startTransmitFrame(tlm, syncChannelFrequencyMHz());
+}
+
 static void rxLoop() {
     bool acceptedFrameForLq = false;
     if (g_dio1) {
         if (g_radioOp == RadioOp::Tx) {
             g_rfScheduler.onTelemetryDone();
             ++g_rxTelemetryTransmitDone;
-            finishTransmitAndReceive(g_rfScheduler.fhss().frequencyMHz());
+            const uint32_t nowMs = millis();
+            const float receiveFrequencyMHz = rxAcquisitionChannelActive(nowMs)
+                                                  ? syncChannelFrequencyMHz()
+                                                  : g_rfScheduler.fhss().frequencyMHz();
+            finishTransmitAndReceive(kBenchSingleFrequency ? syncChannelFrequencyMHz() : receiveFrequencyMHz);
         } else if (g_radioOp == RadioOp::Rx) {
             OtaFrame frame{};
             uint32_t beginProcessingUs = 0;
@@ -995,6 +1144,7 @@ static void rxLoop() {
                     g_rfScheduler.onValidSyncFrame(sync, beginProcessingUs)) {
                     g_lastSyncMs = nowMs;
                     g_hop = g_rfScheduler.fhss().index();
+                    g_rxAcquisitionChannelUntilMs = nowMs + 1000u;
                     startReceiveOnHop();
                     alignRfTimerTock(g_rfScheduler.packetTockReferenceUs(beginProcessingUs));
                 } else {
@@ -1006,11 +1156,16 @@ static void rxLoop() {
                 const uint32_t nowMs = millis();
                 const bool reacquired = !isLinkFresh(nowMs, g_lastUplinkMs);
                 if (reacquired) resetRxSequenceTracking();
-                if (!g_rfScheduler.onValidRcFrame(rxSequence, beginProcessingUs, nowMs)) {
+                const bool acquiring = kBenchSingleFrequency || rxAcquisitionChannelActive(nowMs);
+                if (!(acquiring
+                          ? g_rfScheduler.onAcquisitionRcFrame(rxSequence, beginProcessingUs, nowMs)
+                          : g_rfScheduler.onValidRcFrame(rxSequence, beginProcessingUs, nowMs))) {
                     startReceiveOnHop();
                     return;
                 }
+                if (acquiring) alignRfTimerTock(g_rfScheduler.packetTockReferenceUs(beginProcessingUs));
                 g_hop = g_rfScheduler.fhss().index();
+                if (acquiring || reacquired) g_rxAcquisitionChannelUntilMs = nowMs + 1500u;
                 unpackRcChannels11Bit(frame.payload, candidate);
                 g_lastUplinkMs = nowMs;
                 updateRxSequenceStats(rxSequence);
@@ -1024,19 +1179,7 @@ static void rxLoop() {
                     ++g_rxChannelGuardRejects;
                 }
                 if (shouldRequestTelemetry(static_cast<uint16_t>(frame.sequence + 1), activeRate().telemetryRatio)) {
-                    OtaFrame tlm{};
-                    tlm.type = OtaType::Telemetry;
-                    tlm.sequence = g_sequence++;
-                    tlm.uidCheck = g_uidCheck;
-                    tlm.payloadLen = 4;
-                    tlm.payload[0] = g_linkQuality;
-                    tlm.payload[1] = static_cast<uint8_t>(g_lastRssi < 0 ? -g_lastRssi : g_lastRssi);
-                    tlm.payload[2] = static_cast<uint8_t>(g_lastSnr);
-                    tlm.payload[3] = static_cast<uint8_t>(g_config.rate);
-                    ++g_rxTelemetryTransmitAttempts;
-                    g_lastTelemetryTransmitHop = g_rfScheduler.fhss().index();
-                    busy_wait_us(kTelemetryReplyGuardUs);
-                    startTransmitFrame(tlm, g_rfScheduler.fhss().frequencyMHz());
+                    sendRxTelemetryNow();
                 } else {
                     startReceiveOnHop();
                 }
@@ -1054,6 +1197,12 @@ static void rxLoop() {
     const bool linkFresh = uplinkFresh || isLinkFresh(nowMs, g_lastSyncMs);
     RfTimerIsrEvent timerEvent{};
     while (g_radioOp != RadioOp::Tx && popRfTimerEvent(timerEvent)) {
+        if (kBenchSingleFrequency) {
+            if (timerEvent.half == static_cast<uint8_t>(rf::RxTimerHalfEvent::Tock) && uplinkFresh) {
+                writeFcChannels();
+            }
+            continue;
+        }
         const rf::RxTimerEventResult timerResult = g_rfScheduler.onTimerEvent(
             static_cast<rf::RxTimerHalfEvent>(timerEvent.half), timerEvent.timestampUs, linkFresh, nowMs);
         g_hop = g_rfScheduler.fhss().index();
@@ -1077,7 +1226,7 @@ void setup() {
     digitalWrite(STATUS_LED_PIN, LOW);
     Serial.begin(115200);
     Serial.ignoreFlowControl(true);
-    for (uint8_t i = 0; i < 30; ++i) {
+    for (uint8_t i = 0; i < kStartupCliGraceLoops; ++i) {
         serviceCli();
         delay(100);
     }
@@ -1102,9 +1251,19 @@ void setup() {
     Serial.println("Clean LoRa Link");
     printStatus();
     g_rfScheduler.begin(g_uid, activeRate());
-    g_radioReady = configureRadio(rfFrequencyForHop(0));
+    g_radioReady = configureRadio(
+#if LORA_RX_ROLE
+        syncChannelFrequencyMHz()
+#else
+        rfFrequencyForHop(0)
+#endif
+    );
     if (!g_radioReady) Serial.println("radio fault: CLI remains available");
-    else startRfTimer();
+    else {
+#if LORA_TX_ROLE
+        startRfTimer();
+#endif
+    }
 }
 
 void loop() {

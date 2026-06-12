@@ -172,7 +172,7 @@ static void test_rf_scheduler_tx_sync_scheduling_metadata() {
     scheduler.begin(uid, kRates[0]);
 
     TEST_ASSERT_TRUE(scheduler.onTimerTick());
-    TEST_ASSERT_TRUE(scheduler.shouldSendSyncFrame());
+    TEST_ASSERT_FALSE(scheduler.shouldSendSyncFrame());
     OtaSyncPayload sync = scheduler.syncPayload();
     TEST_ASSERT_EQUAL_UINT16(0, sync.nonce);
     TEST_ASSERT_EQUAL_UINT16(0, sync.fhssIndex);
@@ -180,27 +180,16 @@ static void test_rf_scheduler_tx_sync_scheduling_metadata() {
     TEST_ASSERT_EQUAL_UINT8(kRates[0].telemetryRatio, sync.telemetryRatio);
     TEST_ASSERT_EQUAL_UINT8(kRates[0].fhssHopInterval, sync.fhssHopInterval);
 
-    for (uint8_t i = 0; i < link_rf::kSyncFrameInterval; ++i) {
-        scheduler.onTxDone();
-        if (i + 1 < link_rf::kSyncFrameInterval) {
-            TEST_ASSERT_TRUE(scheduler.onTimerTick());
-            TEST_ASSERT_FALSE(scheduler.shouldSendSyncFrame());
-        }
-    }
-
-    TEST_ASSERT_TRUE(scheduler.onTimerTick());
-    TEST_ASSERT_FALSE(scheduler.shouldSendSyncFrame());
-    sync = scheduler.syncPayload();
-    TEST_ASSERT_EQUAL_UINT16(link_rf::kSyncFrameInterval, sync.nonce);
-    TEST_ASSERT_EQUAL_UINT16(8, sync.fhssIndex);
-
-    while (scheduler.sequence() < kFhssChannelCount * kRates[0].fhssHopInterval) {
+    const uint16_t firstSyncSequence =
+        static_cast<uint16_t>(link_rf::kSyncChannelFhssIndex * kRates[0].fhssHopInterval);
+    while (scheduler.sequence() < firstSyncSequence) {
         scheduler.onTxDone();
         TEST_ASSERT_TRUE(scheduler.onTimerTick());
     }
+
     TEST_ASSERT_TRUE(scheduler.shouldSendSyncFrame());
     sync = scheduler.syncPayload();
-    TEST_ASSERT_EQUAL_UINT16(kFhssChannelCount * kRates[0].fhssHopInterval, sync.nonce);
+    TEST_ASSERT_EQUAL_UINT16(firstSyncSequence, sync.nonce);
     TEST_ASSERT_EQUAL_UINT16(link_rf::kSyncChannelFhssIndex, sync.fhssIndex);
 }
 
@@ -217,15 +206,13 @@ static void test_rf_scheduler_rx_relocks_fhss_from_received_sequence() {
     sync.telemetryRatio = kRates[0].telemetryRatio;
     sync.fhssHopInterval = kRates[0].fhssHopInterval;
     TEST_ASSERT_TRUE(scheduler.onValidSyncFrame(sync, 10000));
-    scheduler.onTimerEvent(link_rf::RxTimerHalfEvent::Tock,
-                           scheduler.packetTockReferenceUs(10000), true, 10);
     TEST_ASSERT_EQUAL_UINT16(37, scheduler.nextExpectedSequence());
-    TEST_ASSERT_EQUAL_UINT16(sync.fhssIndex, scheduler.fhss().index());
     TEST_ASSERT_TRUE(scheduler.onValidRcFrame(37, 20000, 20));
     scheduler.onTimerEvent(link_rf::RxTimerHalfEvent::Tock,
                            scheduler.packetTockReferenceUs(20000) - 100u, true, 20);
     TEST_ASSERT_EQUAL_UINT16(38, scheduler.nextExpectedSequence());
-    TEST_ASSERT_EQUAL_UINT16(sync.fhssIndex, scheduler.fhss().index());
+    TEST_ASSERT_EQUAL_UINT16(static_cast<uint16_t>(37 / kRates[0].fhssHopInterval),
+                             scheduler.fhss().index());
     TEST_ASSERT_EQUAL_INT32(100, scheduler.stats().phaseErrorUs);
 }
 
@@ -300,8 +287,7 @@ static void test_rf_scheduler_rx_acquires_timing_from_sync_frame() {
     sync.fhssHopInterval = kRates[0].fhssHopInterval;
 
     TEST_ASSERT_TRUE(scheduler.onValidSyncFrame(sync, 10000));
-    TEST_ASSERT_EQUAL_UINT16(36, scheduler.nextExpectedSequence());
-    TEST_ASSERT_EQUAL_UINT16(sync.fhssIndex, scheduler.fhss().index());
+    TEST_ASSERT_EQUAL_UINT16(37, scheduler.nextExpectedSequence());
     TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(link_rf::ConnectionState::Tentative),
                             static_cast<uint8_t>(scheduler.stats().connectionState));
     TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(link_rf::RxTimerState::TimDisconnected),
@@ -313,6 +299,23 @@ static void test_rf_scheduler_rx_acquires_timing_from_sync_frame() {
                             static_cast<uint8_t>(scheduler.stats().connectionState));
     TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(link_rf::RxTimerState::TimTentative),
                             static_cast<uint8_t>(scheduler.stats().rxTimerState));
+}
+
+static void test_rf_scheduler_rx_acquires_directly_from_acquisition_rc_frame() {
+    uint8_t uid[kUidSize];
+    deriveUid("scheduler-rx-direct-rc", uid);
+    link_rf::RxScheduler scheduler;
+    scheduler.begin(uid, kRates[0]);
+
+    TEST_ASSERT_TRUE(scheduler.onAcquisitionRcFrame(123, 10000, 10));
+    TEST_ASSERT_EQUAL_UINT16(123, scheduler.nextExpectedSequence());
+    TEST_ASSERT_EQUAL_UINT16(123 / kRates[0].fhssHopInterval, scheduler.fhss().index());
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(link_rf::ConnectionState::Connected),
+                            static_cast<uint8_t>(scheduler.stats().connectionState));
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(link_rf::RxTimerState::TimTentative),
+                            static_cast<uint8_t>(scheduler.stats().rxTimerState));
+    TEST_ASSERT_EQUAL_UINT32(1, scheduler.stats().rxDone);
+    TEST_ASSERT_EQUAL_UINT32(0, scheduler.stats().rcRejectedNoSync);
 }
 
 static void test_rx_pfd_reports_external_minus_internal_offset() {
@@ -522,14 +525,14 @@ static void test_rf_scheduler_rx_tick_tock_event_sequencing() {
 
     TEST_ASSERT_TRUE(scheduler.onValidSyncFrame(sync, 10000));
     scheduler.onTimerEvent(link_rf::RxTimerHalfEvent::Tick, 11000, true, 10);
-    TEST_ASSERT_EQUAL_UINT16(12, scheduler.nextExpectedSequence());
+    TEST_ASSERT_EQUAL_UINT16(13, scheduler.nextExpectedSequence());
     TEST_ASSERT_EQUAL_UINT32(0, scheduler.stats().missedRcFrames);
 
     scheduler.onTimerEvent(link_rf::RxTimerHalfEvent::Tock,
                            scheduler.packetTockReferenceUs(10000), true, 10);
-    TEST_ASSERT_EQUAL_UINT16(13, scheduler.nextExpectedSequence());
-    scheduler.onTimerEvent(link_rf::RxTimerHalfEvent::Tock, 20000, true, 20);
     TEST_ASSERT_EQUAL_UINT16(14, scheduler.nextExpectedSequence());
+    scheduler.onTimerEvent(link_rf::RxTimerHalfEvent::Tock, 20000, true, 20);
+    TEST_ASSERT_EQUAL_UINT16(15, scheduler.nextExpectedSequence());
     TEST_ASSERT_EQUAL_UINT32(1, scheduler.stats().missedRcFrames);
 }
 
@@ -549,7 +552,7 @@ static void test_rf_scheduler_rx_rejects_invalid_sync_metadata() {
 
     TEST_ASSERT_FALSE(scheduler.onValidSyncFrame(sync, 10000));
     TEST_ASSERT_EQUAL_UINT16(0, scheduler.nextExpectedSequence());
-    TEST_ASSERT_EQUAL_UINT16(link_rf::kSyncChannelFhssIndex, scheduler.fhss().index());
+    TEST_ASSERT_EQUAL_UINT16(0, scheduler.fhss().index());
 }
 
 static void test_rf_scheduler_rx_disconnected_scan_stays_on_sync_channel() {
@@ -558,11 +561,11 @@ static void test_rf_scheduler_rx_disconnected_scan_stays_on_sync_channel() {
     link_rf::RxScheduler scheduler;
     scheduler.begin(uid, kRates[0]);
     scheduler.onTimerTick(false);
-    TEST_ASSERT_EQUAL_UINT16(link_rf::kSyncChannelFhssIndex, scheduler.fhss().index());
+    TEST_ASSERT_EQUAL_UINT16(0, scheduler.fhss().index());
     scheduler.onTimerTick(false);
-    TEST_ASSERT_EQUAL_UINT16(link_rf::kSyncChannelFhssIndex, scheduler.fhss().index());
+    TEST_ASSERT_EQUAL_UINT16(0, scheduler.fhss().index());
     scheduler.onTimerTick(false);
-    TEST_ASSERT_EQUAL_UINT16(link_rf::kSyncChannelFhssIndex, scheduler.fhss().index());
+    TEST_ASSERT_EQUAL_UINT16(0, scheduler.fhss().index());
     TEST_ASSERT_EQUAL_UINT16(0, scheduler.nextExpectedSequence());
 }
 
@@ -989,7 +992,7 @@ static void test_telemetry_listen_window_is_short_and_scheduled_by_ratio() {
     TEST_ASSERT_FALSE(shouldRequestTelemetry(17, kRates[0].telemetryRatio));
     TEST_ASSERT_FALSE(shouldRequestTelemetry(16, 0));
     TEST_ASSERT_EQUAL_UINT32(4, telemetryListenWindowMs(kRates[0]));
-    TEST_ASSERT_EQUAL_UINT32(10, telemetryListenWindowMs(kRates[1]));
+    TEST_ASSERT_EQUAL_UINT32(40, telemetryListenWindowMs(kRates[1]));
 }
 
 static void test_crsf_link_stats_puts_rate_in_rf_mode_not_power() {
@@ -1763,6 +1766,7 @@ int main(int argc, char** argv) {
     RUN_TEST(test_rf_scheduler_rx_timer_miss_advances_expected_slot);
     RUN_TEST(test_rf_scheduler_rx_connected_miss_requests_retune_on_hop_boundary);
     RUN_TEST(test_rf_scheduler_rx_acquires_timing_from_sync_frame);
+    RUN_TEST(test_rf_scheduler_rx_acquires_directly_from_acquisition_rc_frame);
     RUN_TEST(test_rx_pfd_reports_external_minus_internal_offset);
     RUN_TEST(test_rf_scheduler_rx_pfd_lpf_offset_and_derivative);
     RUN_TEST(test_rf_scheduler_rx_tentative_phase_shift_uses_raw_offset);

@@ -27,7 +27,7 @@ Terminology:
 
 ```text
 byte 0      magic
-byte 1      type: 1=RC, 2=Telemetry
+byte 1      type: 1=RC, 2=Telemetry, 3=Sync
 byte 2..3   sequence, big-endian
 byte 4..7   uid_check, big-endian
 byte 8      payload length
@@ -37,6 +37,8 @@ byte 31..32 CRC16-CCITT over bytes 0..30
 
 RC payloads carry 16 CRSF 11-bit channel values packed into 22 bytes.
 Telemetry payloads currently carry link quality, RSSI magnitude, SNR, and rate.
+Sync payloads (`OtaSyncPayload`) carry the nonce, FHSS index, current/next rate,
+telemetry ratio, hop interval, and TX tick so the RX can acquire and stay aligned.
 
 ## FHSS / Fixed Channel
 
@@ -50,8 +52,8 @@ valid RC frame resets local sequence tracking, receives on `hopForSequence()`,
 and then starts listening on `nextHopAfterReceivedSequence()` so TX/RX alignment
 recovers from link drops.
 
-The legacy CMake/Pico SDK frame implementation under `lib/xlrs/ota/` remains in
-the tree for reference, but it is not the active PlatformIO OTA contract.
+The legacy CMake/Pico SDK frame implementation under `_legacy/xlrs/ota/` remains
+in the tree for reference, but it is not the active PlatformIO OTA contract.
 
 See [architecture.md](architecture.md), [configuration.md](configuration.md), and
 [terminology.md](terminology.md) for current constraints.

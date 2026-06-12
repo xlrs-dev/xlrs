@@ -1221,6 +1221,26 @@ static void rxLoop() {
 }
 #endif
 
+static void updateStatusLed() {
+#if LORA_RX_ROLE
+    const uint32_t nowMs = millis();
+    const bool connected = isLinkFresh(nowMs, g_lastUplinkMs);
+    if (connected) {
+        digitalWrite(STATUS_LED_PIN, HIGH);
+        return;
+    }
+
+    static constexpr uint32_t kBoundDisconnectedBlinkPeriodMs = 500;
+    static constexpr uint32_t kUnboundDisconnectedBlinkPeriodMs = 1000;
+    const bool bound = !g_configFault && validateBindingPhrase(g_config.bindingPhrase);
+    const uint32_t periodMs = bound ? kBoundDisconnectedBlinkPeriodMs
+                                    : kUnboundDisconnectedBlinkPeriodMs;
+    digitalWrite(STATUS_LED_PIN, (nowMs % periodMs) < (periodMs / 2u) ? HIGH : LOW);
+#else
+    digitalWrite(STATUS_LED_PIN, LOW);
+#endif
+}
+
 void setup() {
     pinMode(STATUS_LED_PIN, OUTPUT);
     digitalWrite(STATUS_LED_PIN, LOW);
@@ -1273,7 +1293,7 @@ void loop() {
 #else
     rxLoop();
 #endif
-    digitalWrite(STATUS_LED_PIN, isLinkFresh(millis(), g_lastUplinkMs) ? HIGH : LOW);
+    updateStatusLed();
     yield();
 }
 

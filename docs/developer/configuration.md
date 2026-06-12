@@ -40,6 +40,10 @@ Exactly one role must be set; it picks the code path in `src/main.cpp`.
 | `SX128X_TXEN` | 15 | TX front-end enable |
 | `STATUS_LED_PIN` | 25 | Status LED |
 
+On the RX, the GPIO status LED is solid when connected, blinks with a 500 ms
+period while bound but waiting for uplink, and blinks with a 1 s period when the
+RX is disconnected after falling back to default/unbound config.
+
 ### CRSF UART
 
 - `CRSF_UART_TX_PIN` (default `8`), `CRSF_UART_RX_PIN` (default `9`).

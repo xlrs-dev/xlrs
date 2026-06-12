@@ -78,7 +78,7 @@ graph TD
     Tick["Timer Tick (t)"]:::tick
     SlotType{"slotForTick(t)"}:::decision
 
-    SyncSlot["Sync Slot<br/>(pos == 0)"]:::decision
+    SyncSlot["Sync Slot<br/>(fhss == sync channel<br/>and sequence % sync interval == 0)"]:::decision
     TlmSlot["Telemetry Slot<br/>(t % tlmRatioDenom == 0)"]:::decision
     UplinkSlot["Uplink Slot<br/>(Otherwise)"]:::decision
 

@@ -86,6 +86,19 @@ static void test_uid_check_uses_all_uid_bytes() {
     }
 }
 
+static void test_pair_uid_includes_hardware_id() {
+    const uint8_t boardA[kUidSize] = {0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF};
+    const uint8_t boardB[kUidSize] = {0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEE};
+    uint8_t uidA[kUidSize];
+    uint8_t uidA2[kUidSize];
+    uint8_t uidB[kUidSize];
+    derivePairUidFromHardware("same-phrase", boardA, uidA);
+    derivePairUidFromHardware("same-phrase", boardA, uidA2);
+    derivePairUidFromHardware("same-phrase", boardB, uidB);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(uidA, uidA2, kUidSize);
+    TEST_ASSERT_FALSE(memcmp(uidA, uidB, kUidSize) == 0);
+}
+
 static void test_crc_known_answer_vectors() {
     const uint8_t value[] = {'1', '2', '3', '4', '5', '6', '7', '8', '9'};
     TEST_ASSERT_EQUAL_UINT16(0x29B1, crc16Ccitt(value, sizeof(value)));
@@ -834,11 +847,14 @@ static void test_config_record_validation() {
     DeviceConfig cfg{};
     configDefaults(cfg, "default-phrase");
     cfg.rate = RateId::L100;
+    const uint8_t uid[kUidSize] = {0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27};
+    memcpy(cfg.linkUid, uid, kUidSize);
     ConfigRecord record = makeConfigRecord(cfg);
 
     DeviceConfig out{};
     TEST_ASSERT_TRUE(readConfigRecord(record, out));
     TEST_ASSERT_EQUAL_STRING("default-phrase", out.bindingPhrase);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(uid, out.linkUid, kUidSize);
     TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RateId::L100), static_cast<uint8_t>(out.rate));
 
     record.bindingPhrase[0] ^= 0x01;
@@ -847,6 +863,39 @@ static void test_config_record_validation() {
     record = makeConfigRecord(cfg);
     record.reserved = 0xA5;
     TEST_ASSERT_FALSE(readConfigRecord(record, out));
+}
+
+static void writeLe32ForTest(uint8_t* bytes, uint32_t value) {
+    bytes[0] = static_cast<uint8_t>(value);
+    bytes[1] = static_cast<uint8_t>(value >> 8);
+    bytes[2] = static_cast<uint8_t>(value >> 16);
+    bytes[3] = static_cast<uint8_t>(value >> 24);
+}
+
+static void test_config_record_v1_migrates_to_phrase_uid() {
+    ConfigRecord record{};
+    record.magic = 0x314C524Cu;
+    record.version = 1;
+    record.rate = static_cast<uint8_t>(RateId::L250);
+    strncpy(record.bindingPhrase, "legacy-pair", sizeof(record.bindingPhrase) - 1);
+    record.reserved = 0;
+    uint8_t crcBytes[40] = {};
+    writeLe32ForTest(crcBytes, record.magic);
+    crcBytes[4] = record.version;
+    crcBytes[5] = record.rate;
+    memcpy(&crcBytes[6], record.bindingPhrase, sizeof(record.bindingPhrase));
+    crcBytes[39] = record.reserved;
+    record.crc = crc16Ccitt(crcBytes, sizeof(crcBytes));
+
+    DeviceConfig out{};
+    bool migrated = false;
+    TEST_ASSERT_TRUE(readConfigRecord(record, out, migrated));
+    TEST_ASSERT_TRUE(migrated);
+    TEST_ASSERT_EQUAL_STRING("legacy-pair", out.bindingPhrase);
+    uint8_t expected[kUidSize];
+    deriveUid("legacy-pair", expected);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(expected, out.linkUid, kUidSize);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RateId::L250), static_cast<uint8_t>(out.rate));
 }
 
 static void test_binding_phrase_validation() {
@@ -869,6 +918,37 @@ static void test_binding_status_derives_uid_check() {
     TEST_ASSERT_EQUAL_UINT32(uidCheck(uid), status.uidCheck);
     TEST_ASSERT_TRUE(status.persisted);
     TEST_ASSERT_TRUE(status.requiresReboot);
+}
+
+static void test_binding_status_can_report_stored_pair_uid() {
+    const uint8_t uid[kUidSize] = {0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98};
+    BindingStatus status{};
+    makeBindingStatus("label", uid, true, false, status);
+    TEST_ASSERT_EQUAL_STRING("label", status.phrase);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(uid, status.uid, kUidSize);
+    TEST_ASSERT_EQUAL_UINT32(uidCheck(uid), status.uidCheck);
+    TEST_ASSERT_TRUE(status.persisted);
+    TEST_ASSERT_FALSE(status.requiresReboot);
+}
+
+static void test_ota_bind_payload_round_trip_and_validation() {
+    OtaBindPayload payload{};
+    deriveUid("offered-link", payload.linkUid);
+    payload.uidCheck = uidCheck(payload.linkUid);
+
+    OtaFrame frame{};
+    frame.type = OtaType::Bind;
+    frame.sequence = 7;
+    frame.uidCheck = uidCheck(payload.linkUid);
+    TEST_ASSERT_TRUE(encodeOtaBindPayload(payload, frame.payload, frame.payloadLen));
+
+    OtaBindPayload decoded{};
+    TEST_ASSERT_TRUE(decodeOtaBindPayload(frame, decoded));
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(payload.linkUid, decoded.linkUid, kUidSize);
+    TEST_ASSERT_EQUAL_UINT32(payload.uidCheck, decoded.uidCheck);
+
+    frame.payload[4] ^= 0x01;
+    TEST_ASSERT_FALSE(decodeOtaBindPayload(frame, decoded));
 }
 
 static size_t makeBindingRequestFrame(BindingControlOp op, const char* phrase, uint8_t* out, size_t outLen) {
@@ -1754,6 +1834,7 @@ int main(int argc, char** argv) {
     RUN_TEST(test_uid_is_deterministic);
     RUN_TEST(test_sync_word_is_eight_bit_and_guards_effective_zero);
     RUN_TEST(test_uid_check_uses_all_uid_bytes);
+    RUN_TEST(test_pair_uid_includes_hardware_id);
     RUN_TEST(test_crc_known_answer_vectors);
     RUN_TEST(test_fhss_depends_on_uid_and_permutates_channels);
     RUN_TEST(test_fhss_frequency_uses_named_channel_count);
@@ -1790,8 +1871,11 @@ int main(int argc, char** argv) {
     RUN_TEST(test_spike_gate_accepts_fast_continuous_ramp);
     RUN_TEST(test_radio_transmitter_address_frame_is_accepted_as_crsf_raw);
     RUN_TEST(test_config_record_validation);
+    RUN_TEST(test_config_record_v1_migrates_to_phrase_uid);
     RUN_TEST(test_binding_phrase_validation);
     RUN_TEST(test_binding_status_derives_uid_check);
+    RUN_TEST(test_binding_status_can_report_stored_pair_uid);
+    RUN_TEST(test_ota_bind_payload_round_trip_and_validation);
     RUN_TEST(test_crsf_binding_request_and_response_frames);
     RUN_TEST(test_crsf_binding_request_encoder_and_response_parser);
     RUN_TEST(test_failsafe_freshness_helper_uses_named_timeout);

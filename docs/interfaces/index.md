@@ -58,21 +58,22 @@ cmake -S . -B build-crsf -G Ninja -DXLRS_TX_CONTROLLER_PROTOCOL=CRSF
 
 ## Binding
 
-Binding is Link-UID based. A Link UID can be derived from a local binding phrase
-or learned through the OTA bind workflow.
+Binding is Link-UID based. The binding phrase is a local label and legacy
+fallback; the active RF identity is the stored Link UID.
 
-Both modules must have the same binding phrase. On boot each module:
+On boot each module:
 
 1. Loads the persisted binding UID from flash.
-2. If no valid binding record exists, writes the default binding phrase.
-3. Derives an 8-byte Link UID from the phrase using 64-bit FNV-1a.
-4. Uses that UID to derive:
+2. If no valid binding record exists, writes defaults.
+3. TX generates a Link UID from TX hardware identity plus phrase; RX uses its
+   stored or legacy phrase-derived UID until OTA bind teaches it the TX UID.
+4. Uses the active Link UID to derive:
    - FHSS sequence seed.
    - SX1280 sync word.
    - UID CRC carried in sync beacons.
 
-If the phrases differ, the modules use different sync words and FHSS sequences,
-and the RX rejects sync frames whose UID CRC does not match.
+If Link UIDs differ, the modules use different sync words and FHSS sequences,
+and the RX rejects frames whose UID CRC does not match.
 
 ### OTA Bind
 
@@ -81,7 +82,8 @@ switches to a shared XLRS bind identity for about 30 seconds and transmits a
 bind frame containing its current Link UID. An RX that has not yet connected
 normally in the current boot periodically alternates between normal acquisition
 and short bind-scan windows on that shared bind identity. If it receives a valid
-bind frame while scanning, it persists the offered Link UID and reboots.
+bind frame while scanning, it persists the offered Link UID and resumes normal
+acquisition with that UID.
 
 The RX does not check the normal binding phrase during bind scan; doing so would
 prevent first-time pairing. It only accepts bind frames while explicitly in
@@ -97,24 +99,25 @@ cmake -S . -B build -G Ninja -DXLRS_DEFAULT_BINDING_PHRASE="your-phrase"
 cmake --build build --target xlrs_tx xlrs_rx
 ```
 
-Flash both TX and RX with builds that use the same phrase.
+After flashing, bind RX modules to the TX so they learn its Link UID.
 
 ### Runtime TX Binding Command
 
-The TX module currently supports setting its binding phrase over the controller
-UART using `UART_MSG_CMD_SET_BIND_TX` (`0x16`). The payload is the ASCII binding
-phrase, 1 to 32 bytes, with no trailing NUL required.
+The TX module supports binding phrase label updates over the controller UART
+using `UART_MSG_CMD_SET_BIND_TX` (`0x16`). The payload is the ASCII label, 1 to
+32 bytes, with no trailing NUL required. Normal RF identity is the persisted Link
+UID, not the phrase text.
 
 When accepted, TX:
 
 1. Sends `ACK` for `UART_MSG_CMD_SET_BIND_TX`.
-2. Persists the derived UID to flash.
+2. Persists the updated local label and active Link UID to flash.
 3. Reboots.
 
 Current limitation: `UART_MSG_CMD_SET_BIND_RX` (`0x17`) exists in the protocol
 enum/parser, but `xlrs_rx` does not run `UARTProtocol`, and `xlrs_tx` ignores
-that command. There is no implemented external command path for setting the RX
-binding phrase at runtime.
+that command. RX modules learn the TX Link UID through bind mode rather than by
+setting a matching phrase at runtime.
 
 ## TX Controller UART Protocol
 

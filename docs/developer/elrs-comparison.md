@@ -118,22 +118,22 @@ loss in the simulated link.
 
 ## Binding And Link Identity
 
-XLRS binding is phrase-based. [Uid.h](../../lib/xlrs/link/Uid.h) derives an
-8-byte Link UID with 64-bit FNV-1a. That UID drives:
+The active PlatformIO firmware stores an 8-byte Link UID as the pair identity.
+TX generates that UID from local hardware identity plus phrase, and RX learns it
+through OTA bind. The Link UID drives:
 
 - FHSS seed selection.
 - SX1280 sync word derivation.
 - UID CRC validation in sync frames.
 
 The interface documentation describes the runtime behavior in
-[docs/interfaces/index.md](../interfaces/index.md): both modules must use the
-same binding phrase, and `UART_MSG_CMD_SET_BIND_TX` can update the TX binding
+[docs/interfaces/index.md](../interfaces/index.md): RX modules learn the TX Link
+UID through OTA bind, and `UART_MSG_CMD_SET_BIND_TX` can update the TX binding
 phrase at runtime. Runtime RX binding update is still reserved/not implemented.
 
-The native tests in [core_tests.cpp](../../test/core_tests.cpp) verify that equal
-phrases produce the same UID/FHSS behavior and different phrases isolate links.
-[link_tests.cpp](../../test/link_tests.cpp) also verifies that mismatched
-phrases do not connect in the two-node simulation.
+The native tests verify that equal Link UIDs produce the same FHSS behavior and
+different Link UIDs isolate links. The PlatformIO tests also cover hardware-seeded
+pair UID derivation and OTA bind payload validation.
 
 ## Crypto And Authentication
 
@@ -218,4 +218,3 @@ behavior, but they do keep pure link logic fast to verify.
 | Crypto | Commonly treated as non-cryptographic link isolation. | Defaults to `NullCipher`; opt-in ChaCha20-Poly1305 core exists and is tested. |
 | Failsafe | Ecosystem/config dependent behavior. | Default `NoPulses` stops CRSF RC output; `Hold` is explicit. |
 | Test strategy | Strong hardware/field validation culture. | Host-native simulation and unit tests for pure logic, with hardware validation still required. |
-

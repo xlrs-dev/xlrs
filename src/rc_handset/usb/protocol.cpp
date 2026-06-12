@@ -59,6 +59,7 @@ bool commandTypeFromName(const std::string& name, CommandType& out) {
     else if (name == "binding_set") out = CommandType::BindingSet;
     else if (name == "binding_clear") out = CommandType::BindingClear;
     else if (name == "binding_verify") out = CommandType::BindingVerify;
+    else if (name == "binding_bind") out = CommandType::BindingBind;
     else if (name == "special_mode") out = CommandType::SpecialMode;
     else return false;
     return true;
@@ -252,6 +253,7 @@ const char* commandTypeName(CommandType type) {
     case CommandType::BindingSet: return "binding_set";
     case CommandType::BindingClear: return "binding_clear";
     case CommandType::BindingVerify: return "binding_verify";
+    case CommandType::BindingBind: return "binding_bind";
     case CommandType::SpecialMode: return "special_mode";
     }
     return "unknown";

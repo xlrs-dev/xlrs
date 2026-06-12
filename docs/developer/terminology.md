@@ -158,9 +158,9 @@ struct LinkStats {
 
 | Term | Meaning | Avoid Using For |
 | --- | --- | --- |
-| `binding_phrase` | Shared human-entered phrase used to derive link identity. | Device serial |
-| `link_uid` | 64-bit value derived from binding phrase; seeds FHSS and sync word. | Hardware board ID |
-| `device_serial` | Hardware-specific MCU ID for diagnostics. | Pairing or FHSS seeding |
+| `binding_phrase` | Human-readable binding label and legacy identity fallback. | Device serial |
+| `link_uid` | 64-bit shared pair identity stored in flash; seeds FHSS and sync word. | Local-only hardware board ID |
+| `device_serial` | Hardware-specific MCU ID for diagnostics and TX pair-UID generation. | Runtime connection |
 | `bind` | Operation that establishes or stores shared link identity. | Runtime connection only |
 | `connect` | Runtime session establishment after identity is known. | First-time binding |
 | `session` | One connected runtime lifetime with its own counters/salt. | Persistent binding |

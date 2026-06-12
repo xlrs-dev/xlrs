@@ -29,11 +29,13 @@ status
 bind get
 ```
 
-Both devices must report the same binding phrase. Change and persist it with:
+Fresh TX devices generate a hardware-seeded Link UID; RX devices learn that UID
+through binding. Start TX bind mode, power or reset the RX, then confirm both
+devices report the same UID:
 
 ```text
-bind set your-phrase
-reboot
+bind start
+bind get
 ```
 
 See [Build, Test, Flash](build-test-flash.md) for the complete workflow.

@@ -8,13 +8,13 @@ The current OTA frame is intentionally plaintext. It is protected by:
 
 - SX1280/RadioLib PHY CRC.
 - A firmware CRC16 over the encoded OTA bytes.
-- A 32-bit `uid_check` hashed from all 8 binding phrase UID bytes.
+- A 32-bit `uid_check` hashed from all 8 Link UID bytes.
 
 `uid_check` is an anti-crosstalk identity filter, not authentication. The UID is
-derived from the binding phrase with FNV-1a, which is fast and
-non-cryptographic. There is no active ChaCha20-Poly1305/AEAD layer in the
-PlatformIO rewrite. Reintroducing authentication or encryption should be treated
-as a safety-sensitive OTA format change.
+persisted as the pair identity; TX generates it from local board identity and RX
+learns it through OTA bind. There is no active ChaCha20-Poly1305/AEAD layer in
+the PlatformIO rewrite. Reintroducing authentication or encryption should be
+treated as a safety-sensitive OTA format change.
 
 Terminology:
 
@@ -27,7 +27,7 @@ Terminology:
 
 ```text
 byte 0      magic
-byte 1      type: 1=RC, 2=Telemetry, 3=Sync
+byte 1      type: 1=RC, 2=Telemetry, 3=Sync, 4=Bind
 byte 2..3   sequence, big-endian
 byte 4..7   uid_check, big-endian
 byte 8      payload length
@@ -39,6 +39,9 @@ RC payloads carry 16 CRSF 11-bit channel values packed into 22 bytes.
 Telemetry payloads currently carry link quality, RSSI magnitude, SNR, and rate.
 Sync payloads (`OtaSyncPayload`) carry the nonce, FHSS index, current/next rate,
 telemetry ratio, hop interval, and TX tick so the RX can acquire and stay aligned.
+Bind payloads carry a magic/version marker and the TX-offered Link UID. They are
+only accepted while RX is in the pre-first-link bind scan window on the shared
+bind acquisition identity.
 
 ## FHSS / Fixed Channel
 

@@ -72,20 +72,27 @@ Set over the USB serial CLI (115200 baud) and persisted in flash as a
 
 ### Binding
 
-A binding phrase (1–32 characters) derives the link identity. Both ends must use
-the same phrase.
+The active RF identity is the persisted 8-byte Link UID. The binding phrase
+(1–32 printable characters) is retained as a human label and as a fallback for
+legacy v1 config migration.
 
 ```text
-bind get                 show phrase, UID, uid_check
-bind set <phrase>        set + persist (requires reboot to take effect)
-bind clear               revert to DEFAULT_BINDING_PHRASE
+bind get                 show phrase
+bind set <phrase>        set label + persist local identity update
+bind clear               revert phrase to DEFAULT_BINDING_PHRASE
+bind start               TX only: transmit OTA bind frames for 30 seconds
 ```
 
-- **Link UID** — 8 bytes derived from the phrase (`deriveUid`), seeds the FHSS
-  sequence and the SX1280 sync word (`syncWordFromUid`).
+- **Link UID** — 8 bytes stored in flash, seeds the FHSS sequence and the SX1280
+  sync word (`syncWordFromUid`). New or migrated TX configs generate it from the
+  TX hardware board ID plus phrase; RX stores the TX-offered UID after OTA bind.
 - **`uid_check`** — 32-bit value (`uidCheck`) stamped into every OTA frame so a
-  receiver rejects traffic from any other binding. It is an anti-crosstalk
+  receiver rejects traffic from any other Link UID. It is an anti-crosstalk
   identity filter, **not** authentication.
+
+Upgrading from v1 phrase-derived config auto-uniquifies TX identity and requires
+rebinding RX modules. RX v1 configs keep their phrase-derived UID until they
+learn the TX UID through OTA bind.
 
 Binding can also be driven over `rc.v1` USB commands and the CRSF binding-control
 frame (`0x7D`). See [../crsf/binding.md](../crsf/binding.md).

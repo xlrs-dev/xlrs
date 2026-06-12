@@ -156,7 +156,7 @@ The RX status counters answer whether the flight-controller side works:
 | --- | --- | --- |
 | No USB serial port appears | Board not booted, bad cable, stuck in BOOTSEL, firmware not flashed | Try another cable, check `/dev/cu.usbmodem*`, reflash UF2, verify board exits BOOTSEL |
 | Repeated reboot every ~1 second | RF core heartbeat stopped, often radio init failure | Watch for `[HW FAULT]` and `LastFailOp`; see [sx1280-phy-init.md](sx1280-phy-init.md); inspect SX1280 wiring, BUSY/DIO1, SPI pins, power rail |
-| TX/RX identities differ | Binding phrase/config mismatch | Rebuild both with same `XLRS_DEFAULT_BINDING_PHRASE` or reset/persist same binding phrase |
+| TX/RX identities differ | RX has not learned the TX Link UID, or stale config was restored | Run TX bind mode and reset the RX so it can learn the Link UID; then compare `bind get` on both devices |
 | Same identity, never connects | RF init, sync word, RF channel table, antenna/path issue | Compare `[PHY]` lines, check antennas/load, inspect PHY timeout/CRC counters |
 | Connects then drops | PFD/timing instability, weak RF path, CRC errors, radio recovery | Watch LQ/RSSI/CRC, test boards close together at low power, then with attenuation |
 | RX status reaches Connected but no FC input | CRSF wiring, baud, output gating, FC serial config | Check RX GP8/GP9 wiring to FC, CRSF baud, FC serial protocol, `outputActive` behavior |
@@ -191,8 +191,10 @@ Important values:
 
 ### Binding Identity
 
-The binding phrase derives the 64-bit Link UID. The Link UID seeds FHSS and the
-radio sync word. A mismatch guarantees acquisition failure.
+The persisted 64-bit Link UID seeds FHSS and the radio sync word. A mismatch
+guarantees acquisition failure. The binding phrase is a label and legacy
+fallback; after TX migration or `bind set`, rebind the RX so it learns the TX
+Link UID.
 
 Check both logs:
 
@@ -203,10 +205,9 @@ Check both logs:
 
 If they differ:
 
-1. Reconfigure/rebuild both images with the same default phrase.
-2. If a persisted phrase exists, set the same phrase through the TX binding
-   command path or erase/reset stored config.
-3. Reflash both boards and compare boot logs again.
+1. On TX, run `bind start` or `rc.v1 binding_bind`.
+2. Power-cycle the RX before it has connected normally so bind scan is enabled.
+3. Wait for `[BIND RX]` / Link UID persisted, then compare status `uid` values.
 
 ---
 

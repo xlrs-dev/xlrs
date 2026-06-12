@@ -5,6 +5,7 @@
 #include <RadioLib.h>
 #include <SPI.h>
 #include <pico/time.h>
+#include <pico/unique_id.h>
 #include <string.h>
 
 #include "lora_link/protocol.h"
@@ -38,9 +39,15 @@ static int8_t g_lastSnr = 0;
 static uint8_t g_linkQuality = 0;
 static bool g_radioReady = false;
 static bool g_bindingRequiresReboot = false;
+static bool g_configMigratedFromV1 = false;
 static uint32_t g_lastRxHopAdvanceUs = 0;
 static uint32_t g_validOtaFrames = 0;
 static uint32_t g_rejectedOtaFrames = 0;
+static constexpr uint32_t kTxBindWindowMs = 30000;
+static constexpr uint32_t kRxBindScanPeriodMs = 500;
+static constexpr uint32_t kRxBindScanWindowMs = 120;
+static const uint8_t kBindAcquisitionUid[kUidSize] = {0x58, 0x4C, 0x52, 0x53, 0x42, 0x4E, 0x44, 0x31};
+static bool g_bindIdentityActive = false;
 static constexpr uint16_t kRcSpikeJumpThreshold = 160;
 static constexpr uint16_t kRcSpikeConfirmTolerance = 80;
 static constexpr uint32_t kHandsetTelemetryIntervalMs = 250;
@@ -105,6 +112,7 @@ static uint32_t g_crsfInputBytes = 0;
 static uint32_t g_crsfBindingControlFrames = 0;
 static uint32_t g_lastDownlinkTelemetryMs = 0;
 static uint32_t g_lastHandsetTelemetryMs = 0;
+static uint32_t g_txBindUntilMs = 0;
 static uint32_t g_telemetryDio1Events = 0;
 static uint32_t g_telemetryReadAttempts = 0;
 static uint32_t g_telemetryWrongTypeFrames = 0;
@@ -132,6 +140,8 @@ static uint32_t g_rxTelemetryTransmitAttempts = 0;
 static uint32_t g_rxTelemetryTransmitDone = 0;
 static uint16_t g_lastTelemetryTransmitHop = 0;
 static uint32_t g_rxAcquisitionChannelUntilMs = 0;
+static bool g_rxNormalLinkSeen = false;
+static bool g_rxBindScanActive = false;
 static RcSpikeGate g_rxOutputSpikeGate{};
 #endif
 
@@ -139,6 +149,37 @@ SX1280 radio = new Module(SX128X_SPI_CS, SX128X_SPI_DIO1, SX128X_SPI_RST, SX128X
 
 static const RateConfig& activeRate() {
     return kRates[static_cast<uint8_t>(g_config.rate)];
+}
+
+static uint32_t bindAcquisitionUidCheck() {
+    return uidCheck(kBindAcquisitionUid);
+}
+
+static void copyActiveUidFromConfig() {
+    memcpy(g_uid, g_config.linkUid, kUidSize);
+    g_uidCheck = uidCheck(g_uid);
+}
+
+static void generateHardwarePairUid(uint8_t uid[kUidSize]) {
+    pico_unique_board_id_t boardId{};
+    pico_get_unique_board_id(&boardId);
+    derivePairUidFromHardware(g_config.bindingPhrase, boardId.id, uid);
+}
+
+static void applyRadioSyncWord(const uint8_t uid[kUidSize]) {
+    if (!g_radioReady) return;
+    radio.setSyncWord(syncWordFromUid(uid));
+    g_bindIdentityActive = uid == kBindAcquisitionUid;
+}
+
+static void applyNormalRadioIdentity() {
+    applyRadioSyncWord(g_uid);
+    g_bindIdentityActive = false;
+}
+
+static void applyBindRadioIdentity() {
+    applyRadioSyncWord(kBindAcquisitionUid);
+    g_bindIdentityActive = true;
 }
 
 static float rfFrequencyForHop(uint16_t hop) {
@@ -280,13 +321,21 @@ static void loadConfig() {
     EEPROM.begin(256);
     ConfigRecord record{};
     EEPROM.get(0, record);
-    if (!readConfigRecord(record, g_config)) {
+    if (!readConfigRecord(record, g_config, g_configMigratedFromV1)) {
         configDefaults(g_config, DEFAULT_BINDING_PHRASE);
+#if LORA_TX_ROLE
+        generateHardwarePairUid(g_config.linkUid);
+#endif
         g_configFault = true;
         saveConfig();
     }
-    deriveUid(g_config.bindingPhrase, g_uid);
-    g_uidCheck = uidCheck(g_uid);
+#if LORA_TX_ROLE
+    if (g_configMigratedFromV1) {
+        generateHardwarePairUid(g_config.linkUid);
+        saveConfig();
+    }
+#endif
+    copyActiveUidFromConfig();
     g_bindingRequiresReboot = false;
 }
 
@@ -297,6 +346,15 @@ static void copyBindingPhrase(const char* phrase) {
 
 static void restoreDefaultBindingPhrase() {
     copyBindingPhrase(DEFAULT_BINDING_PHRASE);
+}
+
+static void refreshIdentityAfterLocalBindingChange() {
+#if LORA_TX_ROLE
+    generateHardwarePairUid(g_config.linkUid);
+#else
+    deriveUid(g_config.bindingPhrase, g_config.linkUid);
+#endif
+    copyActiveUidFromConfig();
 }
 
 static bool sx1280WaitBusy(uint32_t timeoutUs = 10000) {
@@ -443,7 +501,8 @@ static void finishTransmitAndReceive(float receiveFrequencyMHz) {
     g_radioOp = RadioOp::Rx;
 }
 
-static bool readOtaFrame(OtaFrame& out, uint32_t* beginProcessingUs = nullptr) {
+static bool readOtaFrameWithUidCheck(uint32_t expectedUidCheck, OtaFrame& out,
+                                     uint32_t* beginProcessingUs = nullptr) {
     if (!g_radioReady) return false;
     if (!g_dio1) return false;
     const uint32_t beginUs = micros();
@@ -458,12 +517,20 @@ static bool readOtaFrame(OtaFrame& out, uint32_t* beginProcessingUs = nullptr) {
     }
     g_lastRssi = static_cast<int16_t>(radio.getRSSI());
     g_lastSnr = static_cast<int8_t>(radio.getSNR());
-    if (!decodeOtaFrame(bytes, g_uidCheck, out)) {
+    if (!decodeOtaFrame(bytes, expectedUidCheck, out)) {
         ++g_rejectedOtaFrames;
         return false;
     }
     ++g_validOtaFrames;
     return true;
+}
+
+static bool readOtaFrame(OtaFrame& out, uint32_t* beginProcessingUs = nullptr) {
+    return readOtaFrameWithUidCheck(g_uidCheck, out, beginProcessingUs);
+}
+
+static bool readBindOtaFrame(OtaFrame& out, uint32_t* beginProcessingUs = nullptr) {
+    return readOtaFrameWithUidCheck(bindAcquisitionUidCheck(), out, beginProcessingUs);
 }
 
 static void printStatus() {
@@ -560,6 +627,8 @@ static const char* bindingOpName(BindingControlOp op) {
             return "binding_clear";
         case BindingControlOp::Verify:
             return "binding_verify";
+        case BindingControlOp::Bind:
+            return "binding_bind";
         default:
             return "unknown";
     }
@@ -704,7 +773,7 @@ static void printBindingStatusRcV1(const char* seq, const char* target, const Bi
 static BindingResult applyBindingControlRequest(const BindingControlRequest& request, BindingStatus& status) {
     switch (request.op) {
         case BindingControlOp::Get:
-            makeBindingStatus(g_config.bindingPhrase, true, g_bindingRequiresReboot, status);
+            makeBindingStatus(g_config.bindingPhrase, g_config.linkUid, true, g_bindingRequiresReboot, status);
             return BindingResult::Ok;
         case BindingControlOp::Set:
             if (!validateBindingPhrase(request.phrase)) {
@@ -712,18 +781,20 @@ static BindingResult applyBindingControlRequest(const BindingControlRequest& req
                 return BindingResult::InvalidPhrase;
             }
             copyBindingPhrase(request.phrase);
+            refreshIdentityAfterLocalBindingChange();
             {
                 const bool saved = saveConfig();
                 if (saved) g_bindingRequiresReboot = true;
-                makeBindingStatus(g_config.bindingPhrase, saved, saved, status);
+                makeBindingStatus(g_config.bindingPhrase, g_config.linkUid, saved, saved, status);
                 return saved ? BindingResult::Ok : BindingResult::PersistFailed;
             }
         case BindingControlOp::Clear:
             restoreDefaultBindingPhrase();
+            refreshIdentityAfterLocalBindingChange();
             {
                 const bool saved = saveConfig();
                 if (saved) g_bindingRequiresReboot = true;
-                makeBindingStatus(g_config.bindingPhrase, saved, saved, status);
+                makeBindingStatus(g_config.bindingPhrase, g_config.linkUid, saved, saved, status);
                 return saved ? BindingResult::Ok : BindingResult::PersistFailed;
             }
         case BindingControlOp::Verify:
@@ -734,7 +805,7 @@ static BindingResult applyBindingControlRequest(const BindingControlRequest& req
             makeBindingStatus(request.phrase, false, false, status);
             return BindingResult::Ok;
         default:
-            makeBindingStatus(g_config.bindingPhrase, true, g_bindingRequiresReboot, status);
+            makeBindingStatus(g_config.bindingPhrase, g_config.linkUid, true, g_bindingRequiresReboot, status);
             return BindingResult::InvalidCommand;
     }
 }
@@ -742,6 +813,15 @@ static BindingResult applyBindingControlRequest(const BindingControlRequest& req
 static bool startsWith(const char* value, const char* prefix) {
     return strncmp(value, prefix, strlen(prefix)) == 0;
 }
+
+#if LORA_TX_ROLE
+static void startTxBindMode() {
+    g_txBindUntilMs = millis() + kTxBindWindowMs;
+    applyBindRadioIdentity();
+    Serial.printf("[TX BIND] OTA bind transmit window open for %lu seconds.\n",
+                  static_cast<unsigned long>(kTxBindWindowMs / 1000u));
+}
+#endif
 
 static bool handleRcV1CliLine(const char* line) {
     if (strncmp(line, "rc.v1", 5) != 0) return false;
@@ -761,7 +841,7 @@ static bool handleRcV1CliLine(const char* line) {
         }
         Serial.print(" role=");
         Serial.print(roleName());
-        Serial.println(" fw=0.1 caps=binding");
+        Serial.println(" fw=0.1 caps=binding,binding_bind");
         return true;
     }
 
@@ -788,6 +868,16 @@ static bool handleRcV1CliLine(const char* line) {
             printRcV1Err(seq, "missing_required_argument", "binding_verify requires phrase");
             return true;
         }
+    } else if (rcV1ArgsForCommand(line, "binding_bind")) {
+#if LORA_TX_ROLE
+        startTxBindMode();
+        BindingStatus status{};
+        makeBindingStatus(g_config.bindingPhrase, g_config.linkUid, true, false, status);
+        printBindingStatusRcV1(seq, target, status, BindingResult::Ok, BindingControlOp::Bind);
+#else
+        printRcV1Err(seq, "unsupported_command", "binding_bind is only hosted by TX");
+#endif
+        return true;
     } else {
         return false;
     }
@@ -815,6 +905,7 @@ static void handleCliLine(char* line) {
             return;
         }
         copyBindingPhrase(phrase);
+        refreshIdentityAfterLocalBindingChange();
         if (saveConfig()) {
             g_bindingRequiresReboot = true;
             Serial.println("OK reboot required");
@@ -823,12 +914,20 @@ static void handleCliLine(char* line) {
         }
     } else if (strcmp(line, "bind clear") == 0) {
         restoreDefaultBindingPhrase();
+        refreshIdentityAfterLocalBindingChange();
         if (saveConfig()) {
             g_bindingRequiresReboot = true;
             Serial.println("OK reboot required");
         } else {
             Serial.println("ERR persist failed");
         }
+    } else if (strcmp(line, "bind start") == 0) {
+#if LORA_TX_ROLE
+        startTxBindMode();
+        Serial.println("OK bind started");
+#else
+        Serial.println("ERR bind start is only available on TX");
+#endif
     } else if (strncmp(line, "rate ", 5) == 0) {
         if (strcmp(line + 5, "L250") == 0) g_config.rate = RateId::L250;
         else if (strcmp(line + 5, "L100") == 0) g_config.rate = RateId::L100;
@@ -859,7 +958,7 @@ static void handleCliLine(char* line) {
     } else if (strcmp(line, "reboot") == 0) {
         rp2040.reboot();
     } else if (*line) {
-        Serial.println("commands: rc.v1 binding_get|binding_set <phrase>|binding_clear|binding_verify <phrase> | bind get | bind set <phrase> | bind clear | rate L250|L100 | status | channels | reboot");
+        Serial.println("commands: rc.v1 binding_get|binding_set <phrase>|binding_clear|binding_verify <phrase>|binding_bind | bind get | bind set <phrase> | bind clear | bind start | rate L250|L100 | status | channels | reboot");
     }
 }
 
@@ -898,7 +997,13 @@ static void serviceTxCrsfInput() {
         const bool gotRcFrame = parseCrsfRcFrame(byte, candidate);
         if (gotBindingControl) {
             BindingStatus status{};
-            const BindingResult result = applyBindingControlRequest(bindingRequest, status);
+            BindingResult result = BindingResult::Ok;
+            if (bindingRequest.op == BindingControlOp::Bind) {
+                startTxBindMode();
+                makeBindingStatus(g_config.bindingPhrase, g_config.linkUid, true, false, status);
+            } else {
+                result = applyBindingControlRequest(bindingRequest, status);
+            }
             uint8_t response[64];
             const size_t len = encodeCrsfBindingResponseFrame(status, result, bindingRequest.op,
                                                               response, sizeof(response));
@@ -942,9 +1047,57 @@ static void serviceHandsetTelemetry() {
     sendTelemetryToHandset(nowMs);
 }
 
+static bool txBindModeActive(uint32_t nowMs) {
+    return g_txBindUntilMs != 0 && static_cast<int32_t>(g_txBindUntilMs - nowMs) > 0;
+}
+
+static void stopTxBindModeIfExpired(uint32_t nowMs) {
+    if (g_txBindUntilMs == 0 || txBindModeActive(nowMs)) return;
+    g_txBindUntilMs = 0;
+    applyNormalRadioIdentity();
+    startReceiveOnHop();
+    Serial.println("[TX BIND] OTA bind transmit window closed.");
+}
+
+static bool serviceTxBindMode() {
+    const uint32_t nowMs = millis();
+    stopTxBindModeIfExpired(nowMs);
+    if (!txBindModeActive(nowMs)) return false;
+    if (!g_bindIdentityActive) applyBindRadioIdentity();
+
+    if (g_dio1) {
+        if (g_radioOp == RadioOp::Tx) {
+            radio.finishTransmit();
+            digitalWrite(SX128X_TXEN, LOW);
+            digitalWrite(SX128X_RXEN, HIGH);
+            g_radioOp = RadioOp::Idle;
+            g_dio1 = false;
+        } else {
+            g_dio1 = false;
+        }
+    }
+
+    const uint32_t pendingTicks = drainRfTimerEvents();
+    for (uint32_t i = 0; i < pendingTicks; ++i) {
+        if (g_radioOp == RadioOp::Tx) return true;
+        OtaFrame frame{};
+        frame.type = OtaType::Bind;
+        frame.sequence = g_sequence++;
+        frame.uidCheck = bindAcquisitionUidCheck();
+        OtaBindPayload payload{};
+        memcpy(payload.linkUid, g_config.linkUid, kUidSize);
+        payload.uidCheck = uidCheck(payload.linkUid);
+        if (!encodeOtaBindPayload(payload, frame.payload, frame.payloadLen)) continue;
+        ++g_uplinkTransmitAttempts;
+        startTransmitFrame(frame, syncChannelFrequencyMHz());
+    }
+    return true;
+}
+
 static void txLoop() {
     serviceTxCrsfInput();
     serviceHandsetTelemetry();
+    if (serviceTxBindMode()) return;
 
     if (g_dio1) {
         if (g_radioOp == RadioOp::Tx) {
@@ -1123,7 +1276,50 @@ static void sendRxTelemetryNow() {
     startTransmitFrame(tlm, syncChannelFrequencyMHz());
 }
 
+static bool shouldRxBindScan(uint32_t nowMs) {
+    if (g_rxNormalLinkSeen || isLinkFresh(nowMs, g_lastUplinkMs)) return false;
+    return (nowMs % kRxBindScanPeriodMs) < kRxBindScanWindowMs;
+}
+
+static void setRxBindScanActive(bool active) {
+    if (g_rxBindScanActive == active) return;
+    g_rxBindScanActive = active;
+    if (active) {
+        applyBindRadioIdentity();
+        radio.setFrequency(syncChannelFrequencyMHz());
+        radio.startReceive();
+        g_radioOp = RadioOp::Rx;
+        g_rxWaiting = true;
+    } else {
+        applyNormalRadioIdentity();
+        startReceiveOnHop();
+    }
+}
+
+static void serviceRxBindScanWindow() {
+    if (g_radioOp == RadioOp::Tx) return;
+    setRxBindScanActive(shouldRxBindScan(millis()));
+}
+
+static bool persistLearnedBindUid(const uint8_t uid[kUidSize]) {
+    memcpy(g_config.linkUid, uid, kUidSize);
+    copyActiveUidFromConfig();
+    if (!saveConfig()) return false;
+    g_bindingRequiresReboot = false;
+    g_rfScheduler.begin(g_uid, activeRate());
+    resetRxSequenceTracking();
+    g_lastUplinkMs = 0;
+    g_lastSyncMs = 0;
+    g_rxAcquisitionChannelUntilMs = millis() + 1500u;
+    applyNormalRadioIdentity();
+    startReceiveOnHop();
+    Serial.printf("[BIND RX] Link UID persisted: %02X%02X%02X%02X%02X%02X%02X%02X\n",
+                  g_uid[0], g_uid[1], g_uid[2], g_uid[3], g_uid[4], g_uid[5], g_uid[6], g_uid[7]);
+    return true;
+}
+
 static void rxLoop() {
+    serviceRxBindScanWindow();
     bool acceptedFrameForLq = false;
     if (g_dio1) {
         if (g_radioOp == RadioOp::Tx) {
@@ -1137,11 +1333,22 @@ static void rxLoop() {
         } else if (g_radioOp == RadioOp::Rx) {
             OtaFrame frame{};
             uint32_t beginProcessingUs = 0;
-            if (readOtaFrame(frame, &beginProcessingUs) && frame.type == OtaType::Sync) {
+            const bool gotFrame = g_rxBindScanActive
+                                      ? readBindOtaFrame(frame, &beginProcessingUs)
+                                      : readOtaFrame(frame, &beginProcessingUs);
+            if (g_rxBindScanActive) {
+                OtaBindPayload bind{};
+                if (gotFrame && decodeOtaBindPayload(frame, bind)) {
+                    persistLearnedBindUid(bind.linkUid);
+                } else {
+                    startReceiveOnHop();
+                }
+            } else if (gotFrame && frame.type == OtaType::Sync) {
                 OtaSyncPayload sync{};
                 const uint32_t nowMs = millis();
                 if (decodeOtaSyncPayload(frame, sync) && sync.nonce == frame.sequence &&
                     g_rfScheduler.onValidSyncFrame(sync, beginProcessingUs)) {
+                    g_rxNormalLinkSeen = true;
                     g_lastSyncMs = nowMs;
                     g_hop = g_rfScheduler.fhss().index();
                     g_rxAcquisitionChannelUntilMs = nowMs + 1000u;
@@ -1164,6 +1371,7 @@ static void rxLoop() {
                     return;
                 }
                 if (acquiring) alignRfTimerTock(g_rfScheduler.packetTockReferenceUs(beginProcessingUs));
+                g_rxNormalLinkSeen = true;
                 g_hop = g_rfScheduler.fhss().index();
                 if (acquiring || reacquired) g_rxAcquisitionChannelUntilMs = nowMs + 1500u;
                 unpackRcChannels11Bit(frame.payload, candidate);

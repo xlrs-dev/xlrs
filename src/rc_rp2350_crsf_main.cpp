@@ -631,7 +631,8 @@ static bool handleRcV1Command(const char* line) {
         case handset_usb::CommandType::BindingGet:
         case handset_usb::CommandType::BindingSet:
         case handset_usb::CommandType::BindingClear:
-        case handset_usb::CommandType::BindingVerify: {
+        case handset_usb::CommandType::BindingVerify:
+        case handset_usb::CommandType::BindingBind: {
             if (!command.target.empty() && command.target != "tx") {
                 Serial.print(handset_usb::formatErr(command, "unsupported_target",
                                                     "RC USB can only proxy target=tx").c_str());
@@ -642,7 +643,8 @@ static bool handleRcV1Command(const char* line) {
             if (command.type == handset_usb::CommandType::BindingGet) request.op = BindingControlOp::Get;
             else if (command.type == handset_usb::CommandType::BindingSet) request.op = BindingControlOp::Set;
             else if (command.type == handset_usb::CommandType::BindingClear) request.op = BindingControlOp::Clear;
-            else request.op = BindingControlOp::Verify;
+            else if (command.type == handset_usb::CommandType::BindingVerify) request.op = BindingControlOp::Verify;
+            else request.op = BindingControlOp::Bind;
 
             if ((request.op == BindingControlOp::Set || request.op == BindingControlOp::Verify)) {
                 if (!validateBindingPhrase(command.value.c_str())) {

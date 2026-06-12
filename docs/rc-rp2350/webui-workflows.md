@@ -75,8 +75,8 @@ bind set <phrase>
 bind clear
 ```
 
-Both TX and RX must use the same phrase unless OTA bind has already persisted the
-RX UID.
+After changing the TX binding phrase label, run OTA bind so the RX learns the
+TX Link UID.
 
 ## Calibration Workflow
 

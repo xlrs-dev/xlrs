@@ -164,7 +164,7 @@ The RX status counters answer whether the flight-controller side works:
 | TX telemetry stale or zero | Downlink telemetry slots missing, RX not transmitting telemetry | Watch TX `LQdown`, RX state, and PHY counters on both sides |
 | CRSF RC controller never discovers module | TX built for custom UART, wrong UART wiring, no CRSF `DEVICE_PING` | Confirm boot says `Controller CRSF initialized`, check TX status `ping`, probe TX UART at 420000 8N1 |
 | CRSF RC input ignored | TX controller wiring/protocol issue | In CRSF build, check TX status `rc` increments and `age` stays low; in UART build, verify custom UART ACK/PONG |
-| Status LED solid on RX before link | Config fault or hardware fault | Check RX boot log for default config write or `[HW FAULT]` |
+| RX status LED dark or never changes | Wrong LED pin/polarity or LED wiring | Confirm `rx_lora_pico` uses `STATUS_LED_PIN=10`, active high; check GP10 wiring |
 
 ---
 
@@ -418,30 +418,20 @@ Symptoms of timing sign problems:
 
 ---
 
-## 7. Status LED (TX and RX)
+## 7. Status LED (RX)
 
-Both TX and RX drive the same GPIO status LED patterns on `XLRS_STATUS_LED_PIN`
-(default GP10 / Pico pin 13, active-low by default). Patterns are implemented in
-[`lib/xlrs/app/LinkStatusLed.h`](../../lib/xlrs/app/LinkStatusLed.h).
+The active PlatformIO RX firmware drives `STATUS_LED_PIN` from
+[`src/main.cpp`](../../src/main.cpp). The `rx_lora_pico` environment defaults to
+GP10, active high.
 
-| Condition | LED |
+| RX condition | LED |
 | --- | --- |
-| Config fault or hardware fault | Solid on |
-| Bind scan open (RX) | Double flash, pause |
-| Valid bind frame received (RX) | Very fast blink until flash persistence/reboot |
-| Bind UID persisted (RX) | Five short flashes, then reboot |
-| Binding / bind transmit (TX) | Fast blink |
-| Connected (TX always; RX when CRSF output active) | Solid on |
-| Connected but CRSF output gated (RX) | Medium blink |
-| Connecting | Medium blink |
-| Failsafe | Double blink, pause |
-| Other/disconnected | Slow blink |
+| Uplink fresh / connected | Solid on |
+| Disconnected with valid binding config | 500 ms blink period |
+| Disconnected with config fault or invalid binding config | 1 s blink period |
 
-During CRSF Bind RX, periodic RX status lines also append `[BIND SCAN]` while
-the RX is open to bind packets and `[BIND RX]` after a valid bind frame has been
-received. Bind scan is active only before the RX has made a normal connection in
-the current boot. Power-cycle RX before repeating a first-time bind scan. The LED
-is only a coarse hint. Trust serial logs and counters first.
+The TX PlatformIO environments keep `STATUS_LED_PIN=25`; the current TX role
+keeps that output off.
 
 ---
 

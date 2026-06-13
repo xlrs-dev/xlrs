@@ -17,6 +17,11 @@ LiveStateSnapshot makeDefaultLiveStateSnapshot() {
     LiveStateSnapshot snapshot{};
     snapshot.appliedConfigGeneration = 0;
     snapshot.haveChannels = false;
+    snapshot.haveAdc = false;
+    for (uint8_t i = 0; i < config::kRcHandsetAxisCount; ++i) {
+        snapshot.rawAdc[i] = 0;
+        snapshot.filteredAdc[i] = 0;
+    }
     for (uint8_t i = 0; i < lora_link::kRcChannelCount; ++i) {
         snapshot.channels[i] = lora_link::kCrsfRawMid;
     }

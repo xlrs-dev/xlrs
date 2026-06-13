@@ -849,6 +849,21 @@ static void test_config_record_validation() {
     TEST_ASSERT_FALSE(readConfigRecord(record, out));
 }
 
+static void test_default_rate_has_downlink_telemetry_for_handset_metrics() {
+    DeviceConfig cfg{};
+    configDefaults(cfg, "default-phrase");
+
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RateId::L100), static_cast<uint8_t>(cfg.rate));
+
+    const RateConfig& defaultRate = kRates[static_cast<uint8_t>(cfg.rate)];
+    TEST_ASSERT_EQUAL_UINT32(40000, defaultRate.intervalUs);
+    TEST_ASSERT_EQUAL_UINT8(16, defaultRate.telemetryRatio);
+    TEST_ASSERT_EQUAL_UINT32(640, (defaultRate.intervalUs * defaultRate.telemetryRatio + 999u) / 1000u);
+    TEST_ASSERT_TRUE(shouldRequestTelemetry(defaultRate.telemetryRatio, defaultRate.telemetryRatio));
+    TEST_ASSERT_FALSE(shouldRequestTelemetry(static_cast<uint16_t>(defaultRate.telemetryRatio - 1),
+                                             defaultRate.telemetryRatio));
+}
+
 static void test_binding_phrase_validation() {
     TEST_ASSERT_TRUE(validateBindingPhrase("bench phrase 01"));
     TEST_ASSERT_TRUE(validateBindingPhrase("12345678901234567890123456789012"));
@@ -988,8 +1003,8 @@ static void test_failsafe_freshness_helper_uses_named_timeout() {
 static void test_telemetry_listen_window_is_short_and_scheduled_by_ratio() {
     TEST_ASSERT_EQUAL_UINT8(1, kTelemetryResponseListenSlots);
     TEST_ASSERT_FALSE(shouldRequestTelemetry(16, kRates[0].telemetryRatio));
-    TEST_ASSERT_TRUE(shouldRequestTelemetry(16, 16));
-    TEST_ASSERT_FALSE(shouldRequestTelemetry(17, kRates[0].telemetryRatio));
+    TEST_ASSERT_TRUE(shouldRequestTelemetry(16, kRates[1].telemetryRatio));
+    TEST_ASSERT_FALSE(shouldRequestTelemetry(17, kRates[1].telemetryRatio));
     TEST_ASSERT_FALSE(shouldRequestTelemetry(16, 0));
     TEST_ASSERT_EQUAL_UINT32(4, telemetryListenWindowMs(kRates[0]));
     TEST_ASSERT_EQUAL_UINT32(40, telemetryListenWindowMs(kRates[1]));
@@ -1050,6 +1065,9 @@ static void test_core1_live_state_snapshot_is_latest_value() {
     state.channelGuardRejects = 2;
     state.channelSpikeHolds = 3;
     state.haveChannels = true;
+    state.haveAdc = true;
+    state.rawAdc[0] = 123;
+    state.filteredAdc[0] = 125;
     state.channels[0] = kCrsfRaw1000;
     state.channels[7] = kCrsfRaw2000;
     exchange.publishLiveStateFromCore1(state);
@@ -1067,6 +1085,9 @@ static void test_core1_live_state_snapshot_is_latest_value() {
     TEST_ASSERT_EQUAL_UINT32(2, loaded.channelGuardRejects);
     TEST_ASSERT_EQUAL_UINT32(3, loaded.channelSpikeHolds);
     TEST_ASSERT_TRUE(loaded.haveChannels);
+    TEST_ASSERT_TRUE(loaded.haveAdc);
+    TEST_ASSERT_EQUAL_UINT16(123, loaded.rawAdc[0]);
+    TEST_ASSERT_EQUAL_UINT16(125, loaded.filteredAdc[0]);
     TEST_ASSERT_EQUAL_UINT16(kCrsfRawMid, loaded.channels[0]);
     TEST_ASSERT_EQUAL_UINT16(kCrsfRaw2000, loaded.channels[7]);
 }
@@ -1133,6 +1154,7 @@ static void test_handset_config_builds_input_pipeline_mapping_and_limits() {
     config.channels[5].cutoffMax = static_cast<uint16_t>(kCrsfRawMid + 200);
     config.filter.spikeJumpThreshold = 123;
     config.filter.spikeConfirmTolerance = 45;
+    config.filter.highPassPercent = 32;
 
     const InputPipelineConfig pipeline = inputPipelineConfigFromHandsetConfig(config);
 
@@ -1149,6 +1171,7 @@ static void test_handset_config_builds_input_pipeline_mapping_and_limits() {
     TEST_ASSERT_EQUAL_UINT16(static_cast<uint16_t>(kCrsfRawMid + 200), pipeline.analog[0].cutoff.high);
     TEST_ASSERT_EQUAL_UINT16(123, pipeline.spikeJumpThreshold);
     TEST_ASSERT_EQUAL_UINT16(45, pipeline.spikeConfirmTolerance);
+    TEST_ASSERT_EQUAL_UINT8(32, config.filter.highPassPercent);
 }
 
 static void test_handset_three_position_toggle_trim_and_cutoff() {
@@ -1199,6 +1222,7 @@ static void test_rc_handset_config_defaults_are_valid() {
     TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(handset_config::ChannelFunction::Throttle),
                             static_cast<uint8_t>(cfg.axes[3].function));
     TEST_ASSERT_EQUAL_UINT8(8, cfg.filter.adcSamples);
+    TEST_ASSERT_EQUAL_UINT8(0, cfg.filter.highPassPercent);
     TEST_ASSERT_EQUAL_UINT8(80, cfg.display.brightnessPercent);
     TEST_ASSERT_EQUAL_UINT16(3300, cfg.power.lowBatteryMv);
 }
@@ -1218,6 +1242,10 @@ static void test_rc_handset_config_validation_rejects_invalid_fields() {
 
     cfg = handset_config::defaultRcHandsetConfig();
     cfg.filter.smoothingPercent = 101;
+    TEST_ASSERT_FALSE(handset_config::validateRcHandsetConfig(cfg));
+
+    cfg = handset_config::defaultRcHandsetConfig();
+    cfg.filter.highPassPercent = 101;
     TEST_ASSERT_FALSE(handset_config::validateRcHandsetConfig(cfg));
 }
 
@@ -1257,6 +1285,7 @@ static void assert_rc_handset_config_equal(const handset_config::RcHandsetConfig
     }
     TEST_ASSERT_EQUAL_UINT8(expected.filter.adcSamples, actual.filter.adcSamples);
     TEST_ASSERT_EQUAL_UINT8(expected.filter.smoothingPercent, actual.filter.smoothingPercent);
+    TEST_ASSERT_EQUAL_UINT8(expected.filter.highPassPercent, actual.filter.highPassPercent);
     TEST_ASSERT_EQUAL_UINT16(expected.filter.spikeJumpThreshold, actual.filter.spikeJumpThreshold);
     TEST_ASSERT_EQUAL_UINT16(expected.filter.spikeConfirmTolerance, actual.filter.spikeConfirmTolerance);
     TEST_ASSERT_EQUAL_UINT16(expected.filter.slewLimit, actual.filter.slewLimit);
@@ -1277,6 +1306,7 @@ static void test_rc_handset_config_record_round_trips() {
     cfg.channels[4].cutoffMin = 250;
     cfg.channels[4].cutoffMax = 1700;
     cfg.filter.smoothingPercent = 40;
+    cfg.filter.highPassPercent = 35;
     cfg.display.inverted = true;
     cfg.power.skipPowerOnSequence = true;
 
@@ -1808,6 +1838,7 @@ int main(int argc, char** argv) {
     RUN_TEST(test_spike_gate_accepts_fast_continuous_ramp);
     RUN_TEST(test_radio_transmitter_address_frame_is_accepted_as_crsf_raw);
     RUN_TEST(test_config_record_validation);
+    RUN_TEST(test_default_rate_has_downlink_telemetry_for_handset_metrics);
     RUN_TEST(test_binding_phrase_validation);
     RUN_TEST(test_binding_status_derives_uid_check);
     RUN_TEST(test_crsf_binding_request_and_response_frames);

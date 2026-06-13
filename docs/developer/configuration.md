@@ -38,11 +38,11 @@ Exactly one role must be set; it picks the code path in `src/main.cpp`.
 | `SX128X_SPI_RST` | 22 | Reset |
 | `SX128X_RXEN` | 14 | RX front-end enable |
 | `SX128X_TXEN` | 15 | TX front-end enable |
-| `STATUS_LED_PIN` | 25 | Status LED |
+| `STATUS_LED_PIN` | TX: 25, RX: 10 | Status LED, active high |
 
-On the RX, the GPIO status LED is solid when connected, blinks with a 500 ms
-period while bound but waiting for uplink, and blinks with a 1 s period when the
-RX is disconnected after falling back to default/unbound config.
+On the RX, the active-high GPIO status LED is solid when connected, blinks with a
+500 ms period while bound but waiting for uplink, and blinks with a 1 s period
+when the RX is disconnected after falling back to default/unbound config.
 
 ### CRSF UART
 
@@ -96,8 +96,8 @@ Two rates, defined in the `kRates` table in `src/protocol.cpp`:
 
 | Rate | Packet period | Modulation | Bandwidth | Telemetry |
 | --- | --- | --- | --- | --- |
-| `L250` | 4000 µs (≈250 Hz) | LoRa SF6 | 812.5 kHz | none |
-| `L100` | 10000 µs (≈100 Hz) | LoRa SF5 | 812.5 kHz | every 64th slot (downlink) |
+| `L250` | 4000 µs (≈250 Hz) | LoRa SF5 | 812.5 kHz | none |
+| `L100` | 40000 µs (≈25 Hz) | LoRa SF6 | 812.5 kHz | every 16th slot (downlink, ≈640 ms) |
 
 Both use coding rate 5 and a FHSS hop interval of 4 ticks. Switch at runtime:
 

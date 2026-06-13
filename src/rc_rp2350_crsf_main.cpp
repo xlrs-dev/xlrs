@@ -200,7 +200,8 @@ static std::string configChannelCutoffMaxString(const handset_config::RcHandsetC
 
 static std::string configFilterString(const handset_config::RcHandsetConfig& cfg) {
     return std::to_string(cfg.filter.adcSamples) + "," +
-           std::to_string(cfg.filter.smoothingPercent) + ",0,0";
+           std::to_string(cfg.filter.smoothingPercent) + ",0," +
+           std::to_string(cfg.filter.highPassPercent);
 }
 
 static std::vector<handset_usb::ResponseField> configResponseFields(const handset_config::RcHandsetConfig& cfg) {
@@ -217,7 +218,7 @@ static std::vector<handset_usb::ResponseField> configResponseFields(const handse
         {"cutoff_max", configChannelCutoffMaxString(cfg)},
         {"filter", configFilterString(cfg)},
         {"filter.low_pass", std::to_string(cfg.filter.smoothingPercent)},
-        {"filter.high_pass", "0"},
+        {"filter.high_pass", std::to_string(cfg.filter.highPassPercent)},
     };
 }
 
@@ -258,6 +259,7 @@ static bool applyPendingConfigField(const std::string& field, const std::string&
         }
         cfg.filter.adcSamples = static_cast<uint8_t>(values[0]);
         cfg.filter.smoothingPercent = static_cast<uint8_t>(values[1]);
+        cfg.filter.highPassPercent = static_cast<uint8_t>(values[3]);
         return handset_config::validateRcHandsetConfig(cfg);
     }
 
@@ -284,7 +286,7 @@ static bool applyPendingConfigField(const std::string& field, const std::string&
     } else if (field == "filter.low_pass") {
         cfg.filter.smoothingPercent = static_cast<uint8_t>(parsed);
     } else if (field == "filter.high_pass") {
-        return true;
+        cfg.filter.highPassPercent = static_cast<uint8_t>(parsed);
     } else {
         return false;
     }
@@ -328,13 +330,34 @@ static void publishConfigWithSafetyHold() {
     rc_handset::core1::releaseCrsfOutputSafetyHoldWhenInputsSafe();
 }
 
+static void refreshLiveState();
+
 static void collectCurrentAdc(uint16_t out[handset_config::kRcHandsetAxisCount]) {
-    for (uint8_t axis = 0; axis < handset_config::kRcHandsetAxisCount; ++axis) out[axis] = readAxisAdc(axis);
+    refreshLiveState();
+    if (g_liveState.haveAdc) {
+        for (uint8_t axis = 0; axis < handset_config::kRcHandsetAxisCount; ++axis) {
+            out[axis] = g_liveState.rawAdc[axis];
+        }
+        return;
+    }
+    for (uint8_t axis = 0; axis < handset_config::kRcHandsetAxisCount; ++axis) {
+        out[axis] = readAxisAdc(axis);
+    }
 }
 
 static std::string currentAdcString() {
     uint16_t values[handset_config::kRcHandsetAxisCount];
-    collectCurrentAdc(values);
+    for (uint8_t axis = 0; axis < handset_config::kRcHandsetAxisCount; ++axis) {
+        values[axis] = g_liveState.haveAdc ? g_liveState.rawAdc[axis] : 0;
+    }
+    return joinU16(values, handset_config::kRcHandsetAxisCount);
+}
+
+static std::string currentFilteredAdcString() {
+    uint16_t values[handset_config::kRcHandsetAxisCount];
+    for (uint8_t axis = 0; axis < handset_config::kRcHandsetAxisCount; ++axis) {
+        values[axis] = g_liveState.haveAdc ? g_liveState.filteredAdc[axis] : 0;
+    }
     return joinU16(values, handset_config::kRcHandsetAxisCount);
 }
 
@@ -567,6 +590,7 @@ static std::vector<handset_usb::ResponseField> stateResponseFields() {
     const rc_handset::display::BatteryState txBattery = readTxBattery();
     std::vector<handset_usb::ResponseField> fields = {
         {"adc", currentAdcString()},
+        {"adc_filtered", currentFilteredAdcString()},
         {"ch", joinU16(g_liveState.channels, lora_link::kRcChannelCount)},
         {"toggles", joinU16(toggles, 4)},
         {"lq", std::to_string(telemetry.linkQuality)},

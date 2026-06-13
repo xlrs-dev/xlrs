@@ -1,5 +1,5 @@
 import "./style.css";
-import { RcMessage, RcSerialTransport, TransportStatus } from "./rcTransport";
+import { parseRcLine, RcMessage, RcSerialTransport, TransportStatus } from "./rcTransport";
 
 type DeviceKey = "rc" | "rx";
 type BindingTarget = "tx" | "rx";
@@ -23,11 +23,12 @@ interface FilterConfig {
   oversample: number;
   lowPass: number;
   temporalBlend: boolean;
-  highPass: boolean;
+  highPass: number;
 }
 
 interface LiveState {
   adc: number[];
+  adcFiltered: number[];
   ch: number[];
   toggles: number[];
   lq: string;
@@ -80,6 +81,9 @@ const AXES = ["Aileron", "Elevator", "Rudder", "Throttle"];
 const CHANNELS = ["CH1", "CH2", "CH3", "CH4", "CH5", "CH6", "CH7", "CH8"];
 const FUNCTION_OPTIONS = ["Aileron", "Elevator", "Rudder", "Throttle"];
 const MAX_LOG_LINES = 80;
+const CRSF_RAW_MIN = 172;
+const CRSF_RAW_MID = 992;
+const CRSF_RAW_MAX = 1811;
 
 const defaultConfig: RcConfig = {
   version: 0,
@@ -96,7 +100,7 @@ const defaultConfig: RcConfig = {
     oversample: 4,
     lowPass: 0,
     temporalBlend: false,
-    highPass: false,
+    highPass: 0,
   },
 };
 
@@ -111,6 +115,8 @@ const ui: UiState = {
 
 const appRoot = document.querySelector<HTMLDivElement>("#app")!;
 let renderTimer = 0;
+let liveStateFrame = 0;
+const liveStateDirty = new Set<DeviceKey>();
 
 if (!navigator.serial) {
   ui.statusText = "Use Chrome or Edge over localhost/HTTPS to enable Web Serial.";
@@ -203,13 +209,17 @@ function createSession(key: DeviceKey, label: string): DeviceSession {
     appendLog(session, `> ${line}`);
   });
   transport.on("line", ({ line }) => {
-    if (line.startsWith("rc.v1 state ")) return;
+    if (isLiveStateMessage(parseRcLine(line))) return;
     appendLog(session, line);
   });
   transport.on("message", ({ message }) => {
+    if (isLiveStateMessage(message)) {
+      session.state = normalizeState(message.fields);
+      queueLiveStateUpdate(session);
+      return;
+    }
     applyMessage(session, message);
-    if (message.kind === "state") updateLiveStatePanel(session);
-    else render();
+    render();
   });
   transport.on("error", ({ error }) => {
     appendLog(session, `! ${errorToString(error)}`);

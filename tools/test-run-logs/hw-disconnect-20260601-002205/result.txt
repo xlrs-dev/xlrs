@@ -1,0 +1,17 @@
+tx_port: /dev/cu.usbmodem1101
+rx_port: /dev/cu.usbmodem2
+tx_boot_at_s: 15.0
+capture_total_s: 75.0
+picotool_exit: 0
+
+# RX pre-boot (t < 15s): 15 samples, all State 3
+pre_states: {3: 15}
+# RX post-boot (t >= 15s): 60 samples, all State 3 — never Failsafe (State 4)
+post_states: {3: 60}
+post_out1_count: 0
+post_out0_seen_at_s: 18.2
+post_crsf_rc_frozen: 274821
+post_max_rc_age_ms: 14082
+post_lq_decay: 99% -> 53%
+
+verdict: PARTIAL — CRSF stops (~3s after TX BOOTSEL, out:0) but RX stays Connected (State 3), lock:1 sync:1 stale for full 60s post-boot

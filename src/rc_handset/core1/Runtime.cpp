@@ -79,6 +79,8 @@ namespace {
 
 InputPipelineConfig g_inputConfig = defaultInputPipelineConfig();
 InputPipelineState g_inputState = defaultInputPipelineState();
+InputSnapshot g_lastInputSnapshot = {};
+bool g_haveInputSnapshot = false;
 ArduinoInputSampler g_inputSampler;
 ArduinoInputSamplerConfig g_inputSamplerConfig = defaultArduinoInputSamplerConfig();
 uint32_t g_framesSent = 0;
@@ -120,6 +122,7 @@ void refreshConfig() {
         g_inputConfig = inputPipelineConfigFromHandsetConfig(g_config.handsetConfig);
         g_inputSamplerConfig.adcSamples = g_config.handsetConfig.filter.adcSamples;
         g_inputSamplerConfig.smoothingPercent = g_config.handsetConfig.filter.smoothingPercent;
+        g_inputSamplerConfig.highPassPercent = g_config.handsetConfig.filter.highPassPercent;
         g_inputSampler.configure(g_inputSamplerConfig);
         g_exchange.ackConfigFromCore1(g_config.generation);
     }
@@ -127,6 +130,8 @@ void refreshConfig() {
 
 void updateChannels() {
     const InputSnapshot snapshot = g_inputSampler.read();
+    g_lastInputSnapshot = snapshot;
+    g_haveInputSnapshot = true;
     const ProcessResult result = processInputSnapshot(g_inputConfig, snapshot, g_inputState);
     if (result == ProcessResult::RejectedBySanitizer) {
         ++g_channelGuardRejects;
@@ -181,6 +186,13 @@ void publishLiveState(uint32_t nowUs) {
     snapshot.channelSpikeHolds = g_channelSpikeHolds;
     snapshot.lastFrameUs = nowUs;
     snapshot.haveChannels = g_inputState.haveChannels;
+    snapshot.haveAdc = g_haveInputSnapshot;
+    if (g_haveInputSnapshot) {
+        for (uint8_t i = 0; i < config::kRcHandsetAxisCount; ++i) {
+            snapshot.rawAdc[i] = g_lastInputSnapshot.rawAnalog[i];
+            snapshot.filteredAdc[i] = g_lastInputSnapshot.analog[i];
+        }
+    }
     if (g_crsfOutputSafetyHold.load(std::memory_order_acquire)) {
         fillSafeDisarmedChannels(snapshot.channels);
         snapshot.haveChannels = true;

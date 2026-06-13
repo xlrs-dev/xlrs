@@ -1,0 +1,5 @@
+tx_boot_at_s: 15.0
+command: picotool reboot --ser E4654C16432C3B22 -f -u
+boot_elapsed_s: 15.2
+exit_code: 0
+stdout: The device was asked to reboot into BOOTSEL mode.

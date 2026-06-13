@@ -1,0 +1,76 @@
+[    0.2s] [RX] [RX STATUS] State: 3 LQ: 100% RSSI: -103 dBm | PHY timeouts: 0 C
+[    1.2s] [RX] [RX STATUS] State: 3 LQ: 100% RSSI: -103 dBm | PHY timeouts: 0 CRC: 483 Phase: StartRx/begin LastOp: 0x8C LastOk: 0x86 LastFailO
+[    2.2s] [RX] [RX STATUS] State: 3 LQ: 99% RSSI: -92 dBm | PHY timeouts: 0 CRC
+[    3.2s] [RX] [RX STATUS] State: 3 LQ: 98% RSSI: -96 dBm | PHY timeouts: 0 CRC
+[    4.2s] [RX] [RX STATUS] State: 3 LQ: 98% RSSI: -104 dBm | PHY timeouts: 0 CR
+[    5.2s] [RX] [RX STATUS] State: 3 LQ: 99% RSSI: -92 dBm | PHY timeouts: 0 CRC
+[    6.2s] [RX] [RX STATUS] State: 3 LQ: 100% RSSI: -93 dBm | PHY timeouts: 0 CR
+[    7.2s] [RX] [RX STATUS] State: 3 LQ: 100% RSSI: -98 dBm | PHY timeouts: 0 CR
+[    8.2s] [RX] [RX STATUS] State: 3 LQ: 100% RSSI: -99 dBm | PHY timeouts: 0 CR
+[    9.2s] [RX] [RX STATUS] State: 3 LQ: 100% RSSI: -93 dBm | PHY timeouts: 0 CR
+[   10.2s] [RX] [RX STATUS] State: 3 LQ: 100% RSSI: -93 dBm | PHY timeouts: 0 CR
+[   11.2s] [RX] [RX STATUS] State: 3 LQ: 100% RSSI: -98 dBm | PHY timeouts: 0 CR
+[   12.2s] [RX] [RX STATUS] State: 3 LQ: 100% RSSI: 0 dBm | PHY timeouts: 0 CRC:
+[   13.2s] [RX] [RX STATUS] State: 3 LQ: 99% RSSI: -103 dBm | PHY timeouts: 0 CR
+[   14.2s] [RX] [RX STATUS] State: 3 LQ: 99% RSSI: -101 dBm | PHY timeouts: 0 CRC: 489 Phase: StartRx/ok LastOp: 0x82 LastOk: 0x82 LastFailOp: 0
+[   15.2s] [RX] [RX STATUS] State: 3 LQ: 99% RSSI: -93 dBm | PHY timeouts: 0 CRC
+[   16.2s] [RX] [RX STATUS] State: 3 LQ: 98% RSSI: -93 dBm | PHY timeouts: 0 CRC: 489 Phase: StartRx/ok LastOp: 0x82 LastOk: 0x82 LastFailOp: 0x
+[   17.2s] [RX] [RX STATUS] State: 3 LQ: 97% RSSI: -93 dBm | PHY timeouts: 0 CRC
+[   18.2s] [RX] [RX STATUS] State: 3 LQ: 96% RSSI: -93 dBm | PHY timeouts: 0 CRC: 490 Phase: StartRx/ok LastOp: 0x82 LastOk: 0x82 LastFailOp: 0x00 | lock:1 sync:1 tick:209955 fhss:2 exp:2 skew:0 pfd:980us adj:250us n:34335 tmr:4000/4000 | out:0 crsf_rc:274821 age:3082ms stats:28357 fc:43815 fcq:5 fcdrop:43810 fcage:114ms qdrop:0
+[   19.2s] [RX] [RX STATUS] State: 3 LQ: 96% RSSI: -93 dBm | PHY timeouts: 0 CRC
+[   20.2s] [RX] [RX STATUS] State: 3 LQ: 95% RSSI: -93 dBm | PHY timeouts: 0 CRC
+[   21.2s] [RX] [RX STATUS] State: 3 LQ: 94% RSSI: -93 dBm | PHY timeouts: 0 CRC
+[   22.2s] [RX] [RX STATUS] State: 3 LQ: 93% RSSI: -93 dBm | PHY timeouts: 0 CRC: 490 Phase: StartRx/ok LastOp: 0x82 LastOk: 0x82 LastFailOp: 0x
+[   23.2s] [RX] [RX STATUS] State: 3 LQ: 93% RSSI: -93 dBm | PHY timeouts: 0 CRC
+[   24.2s] [RX] [RX STATUS] State: 3 LQ: 92% RSSI: -93 dBm | PHY timeouts: 0 CRC
+[   25.2s] [RX] [RX STATUS] State: 3 LQ: 91% RSSI: -93 dBm | PHY timeouts: 0 CRC
+[   26.2s] [RX] [RX STATUS] State: 3 LQ: 90% RSSI: -93 dBm | PHY timeouts: 0 CRC
+[   27.2s] [RX] [RX STATUS] State: 3 LQ: 89% RSSI: -93 dBm | PHY timeouts: 0 CRC
+[   28.2s] [RX] [RX STATUS] State: 3 LQ: 89% RSSI: -93 dBm | PHY timeouts: 0 CRC: 491 Phase: StartRx/ok LastOp: 0x82 LastOk: 0x82 LastFailOp: 0x00 | lock:1 sync:1 tick:212454 fhss:67 exp:67 skew:0 pfd:980us a
+[   29.2s] [RX] [RX STATUS] State: 3 LQ: 88% RSSI: -93 dBm | PHY timeouts: 0 CRC: 491 Phase: StartRx/begin LastOp: 0x86 LastOk: 0x80 LastFailOp: 0x00 | lock:1 sync:1 tick:212703 fhss:49 exp:49 skew:0 pfd:980us adj:250us n:34335 tmr:4000/4000 | out:0 crsf_rc:274821 age:14082ms stats:28357 fc:43859 fcq:5 fcdrop:43854 fcage:26ms qdrop:0
+[   30.2s] [RX] [RX STATUS] State: 3 LQ: 87% RSSI: -93 dBm | PHY timeouts: 0 CRC
+[   31.2s] [RX] [RX STATUS] State: 3 LQ: 86% RSSI: -93 dBm | PHY timeouts: 0 CRC: 491 Phase: StartRx/ok LastOp: 0x82 LastOk: 0x82 LastFailOp: 0x
+[   32.2s] [RX] [RX STATUS] State: 3 LQ: 86% RSSI: -93 dBm | PHY timeouts: 0 CRC: 491 Phase: StartRx/ok LastOp: 0x82 LastOk: 0x82 LastFailOp: 0x
+[   33.2s] [RX] [RX STATUS] State: 3 LQ: 85% RSSI: -93 dBm | PHY timeouts: 0 CRC
+[   34.2s] [RX] [RX STATUS] State: 3 LQ: 84% RSSI: -93 dBm | PHY timeouts: 0 CRC
+[   35.2s] [RX] [RX STATUS] State: 3 LQ: 83% RSSI: -93 dBm | PHY timeouts: 0 CRC: 491 Phase: StartRx/begin LastOp: 0x86 LastOk: 0x80 LastFailOp:
+[   36.2s] [RX] [RX STATUS] State: 3 LQ: 82% RSSI: -93 dBm | PHY timeouts: 0 CRC
+[   37.2s] [RX] [RX STATUS] State: 3 LQ: 82% RSSI: -93 dBm | PHY timeouts: 0 CRC: 491 Phase: StartRx/ok LastOp: 0x82 LastOk: 0x82 LastFailOp: 0x
+[   38.2s] [RX] [RX STATUS] State: 3 LQ: 81% RSSI: -93 dBm | PHY timeouts: 0 CRC: 491 Phase: StartRx/ok LastOp: 0x82 LastOk: 0x82 LastFailOp: 0x
+[   39.2s] [RX] [RX STATUS] State: 3 LQ: 80% RSSI: -93 dBm | PHY timeouts: 0 CRC
+[   40.2s] [RX] [RX STATUS] State: 3 LQ: 79% RSSI: -93 dBm | PHY timeouts: 0 CRC: 491 Phase: StartRx/ok LastOp: 0x82 LastOk: 0x82 LastFailOp: 0x
+[   41.2s] [RX] [RX STATUS] State: 3 LQ: 79% RSSI: -93 dBm | PHY timeouts: 0 CRC: 491 Phase: StartRx/begin LastOp: 0x86 LastOk: 0x80 LastFailOp:
+[   42.2s] [RX] [RX STATUS] State: 3 LQ: 78% RSSI: -93 dBm | PHY timeouts: 0 CRC
+[   43.2s] [RX] [RX STATUS] State: 3 LQ: 77% RSSI: -93 dBm | PHY timeouts: 0 CRC: 491 Phase: StartRx/ok LastOp: 0x82 LastOk: 0x82 LastFailOp: 0x
+[   44.2s] [RX] [RX STATUS] State: 3 LQ: 76% RSSI: -93 dBm | PHY timeouts: 0 CRC: 491 Phase: StartRx/ok LastOp: 0x82 LastOk: 0x82 LastFailOp: 0x
+[   45.2s] [RX] [RX STATUS] State: 3 LQ: 75% RSSI: -93 dBm | PHY timeouts: 0 CRC: 491 Phase: StartRx/ok LastOp: 0x82 LastOk: 0x82 LastFailOp: 0x
+[   46.2s] [RX] [RX STATUS] State: 3 LQ: 75% RSSI: -93 dBm | PHY timeouts: 0 CRC
+[   47.2s] [RX] [RX STATUS] State: 3 LQ: 74% RSSI: -93 dBm | PHY timeouts: 0 CRC
+[   48.2s] [RX] [RX STATUS] State: 3 LQ: 73% RSSI: -93 dBm | PHY timeouts: 0 CRC
+[   49.2s] [RX] [RX STATUS] State: 3 LQ: 73% RSSI: -93 dBm | PHY timeouts: 0 CRC: 491 Phase: StartRx/ok LastOp: 0x82 LastOk: 0x82 LastFailOp: 0x
+[   50.2s] [RX] [RX STATUS] State: 3 LQ: 72% RSSI: -93 dBm | PHY timeouts: 0 CRC
+[   51.2s] [RX] [RX STATUS] State: 3 LQ: 72% RSSI: -93 dBm | PHY timeouts: 0 CRC: 491 Phase: StartRx/ok LastOp: 0x82 LastOk: 0x82 LastFailOp: 0x
+[   52.2s] [RX] [RX STATUS] State: 3 LQ: 71% RSSI: -93 dBm | PHY timeouts: 0 CRC: 491 Phase: StartRx/ok LastOp: 0x82 LastOk: 0x82 LastFailOp: 0x
+[   53.2s] [RX] [RX STATUS] State: 3 LQ: 70% RSSI: -93 dBm | PHY timeouts: 0 CRC
+[   54.2s] [RX] [RX STATUS] State: 3 LQ: 69% RSSI: -93 dBm | PHY timeouts: 0 CRC
+[   55.2s] [RX] [RX STATUS] State: 3 LQ: 69% RSSI: -93 dBm | PHY timeouts: 0 CRC: 491 Phase: StartRx/ok LastOp: 0x82 LastOk: 0x82 LastFailOp: 0x
+[   56.2s] [RX] [RX STATUS] State: 3 LQ: 68% RSSI: -93 dBm | PHY timeouts: 0 CRC: 491 Phase: StartRx/ok LastOp: 0x82 LastOk: 0x82 LastFailOp: 0x
+[   57.2s] [RX] [RX STATUS] State: 3 LQ: 67% RSSI: -93 dBm | PHY timeouts: 0 CRC
+[   58.2s] [RX] [RX STATUS] State: 3 LQ: 66% RSSI: -93 dBm | PHY timeouts: 0 CRC
+[   59.2s] [RX] [RX STATUS] State: 3 LQ: 65% RSSI: -93 dBm | PHY timeouts: 0 CRC
+[   60.2s] [RX] [RX STATUS] State: 3 LQ: 65% RSSI: -93 dBm | PHY timeouts: 0 CRC
+[   61.2s] [RX] [RX STATUS] State: 3 LQ: 64% RSSI: -93 dBm | PHY timeouts: 0 CRC
+[   62.2s] [RX] [RX STATUS] State: 3 LQ: 63% RSSI: -93 dBm | PHY timeouts: 0 CRC
+[   63.2s] [RX] [RX STATUS] State: 3 LQ: 62% RSSI: -93 dBm | PHY timeouts: 0 CRC
+[   64.2s] [RX] [RX STATUS] State: 3 LQ: 62% RSSI: -93 dBm | PHY timeouts: 0 CRC
+[   65.2s] [RX] [RX STATUS] State: 3 LQ: 61% RSSI: -93 dBm | PHY timeouts: 0 CRC
+[   66.2s] [RX] [RX STATUS] State: 3 LQ: 60% RSSI: -93 dBm | PHY timeouts: 0 CRC
+[   67.2s] [RX] [RX STATUS] State: 3 LQ: 59% RSSI: -93 dBm | PHY timeouts: 0 CRC
+[   68.2s] [RX] [RX STATUS] State: 3 LQ: 58% RSSI: -93 dBm | PHY timeouts: 0 CRC: 495 Phase: StartRx/ok LastOp: 0x82 LastOk: 0x82 LastFailOp: 0x
+[   69.2s] [RX] [RX STATUS] State: 3 LQ: 58% RSSI: -93 dBm | PHY timeouts: 0 CRC
+[   70.2s] [RX] [RX STATUS] State: 3 LQ: 57% RSSI: -93 dBm | PHY timeouts: 0 CRC
+[   71.2s] [RX] [RX STATUS] State: 3 LQ: 56% RSSI: -93 dBm | PHY timeouts: 0 CRC
+[   72.2s] [RX] [RX STATUS] State: 3 LQ: 55% RSSI: -93 dBm | PHY timeouts: 0 CRC: 495 Phase: StartRx/ok LastOp: 0x82 LastOk: 0x82 LastFailOp: 0x
+[   73.2s] [RX] [RX STATUS] State: 3 LQ: 55% RSSI: -93 dBm | PHY timeouts: 0 CRC
+[   74.2s] [RX] [RX STATUS] State: 3 LQ: 54% RSSI: -93 dBm | PHY timeouts: 0 CRC: 495 Phase: StartTx/ok LastOp: 0x83 LastOk: 0x83 LastFailOp: 0x
+[   75.2s] [RX] [RX STATUS] State: 3 LQ: 53% RSSI: -93 dBm | PHY timeouts: 0 CRC

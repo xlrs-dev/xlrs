@@ -29,6 +29,9 @@ struct LiveStateSnapshot {
     uint32_t channelSpikeHolds;
     uint32_t lastFrameUs;
     bool haveChannels;
+    bool haveAdc;
+    uint16_t rawAdc[config::kRcHandsetAxisCount];
+    uint16_t filteredAdc[config::kRcHandsetAxisCount];
     uint16_t channels[lora_link::kRcChannelCount];
 };
 

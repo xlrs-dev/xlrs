@@ -69,6 +69,7 @@ struct InputPipelineConfig {
 };
 
 struct InputSnapshot {
+    uint16_t rawAnalog[kMaxAnalogInputs];
     uint16_t analog[kMaxAnalogInputs];
     bool threePositionFirstHigh[kMaxThreePositionInputs];
     bool threePositionSecondHigh[kMaxThreePositionInputs];

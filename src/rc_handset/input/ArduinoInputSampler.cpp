@@ -31,6 +31,7 @@ ArduinoInputSamplerConfig defaultArduinoInputSamplerConfig() {
     config.pins = defaultRp2350InputPins();
     config.adcSamples = 8;
     config.smoothingPercent = 25;
+    config.highPassPercent = 0;
     return config;
 }
 
@@ -50,12 +51,17 @@ void ArduinoInputSampler::configure(const ArduinoInputSamplerConfig& config) {
     if (config_.smoothingPercent > 100) {
         config_.smoothingPercent = 100;
     }
+    if (config_.highPassPercent > 100) {
+        config_.highPassPercent = 100;
+    }
 }
 
 InputSnapshot ArduinoInputSampler::read() {
     InputSnapshot snapshot{};
     for (uint8_t i = 0; i < kMaxAnalogInputs; ++i) {
-        snapshot.analog[i] = smoothAdc(i, readAveragedAdc(config_.pins.analog[i]));
+        const uint16_t raw = readAveragedAdc(config_.pins.analog[i]);
+        snapshot.rawAnalog[i] = raw;
+        snapshot.analog[i] = smoothAdc(i, raw);
         snapshot.threePositionFirstHigh[i] = digitalRead(config_.pins.threePosition[i * 2]) == HIGH;
         snapshot.threePositionSecondHigh[i] = digitalRead(config_.pins.threePosition[i * 2 + 1]) == HIGH;
     }
@@ -78,12 +84,20 @@ uint16_t ArduinoInputSampler::smoothAdc(uint8_t index, uint16_t raw) {
         }
         return raw;
     }
+    const uint16_t previous = filteredAdc_[index];
     const uint32_t keepPercent = 100u - config_.smoothingPercent;
     filteredAdc_[index] = static_cast<uint16_t>(
-        ((static_cast<uint32_t>(filteredAdc_[index]) * keepPercent) +
+        ((static_cast<uint32_t>(previous) * keepPercent) +
          (static_cast<uint32_t>(raw) * config_.smoothingPercent) + 50u) /
         100u);
-    return filteredAdc_[index];
+    if (config_.highPassPercent == 0) return filteredAdc_[index];
+
+    const int32_t delta = static_cast<int32_t>(filteredAdc_[index]) - static_cast<int32_t>(previous);
+    int32_t boosted = static_cast<int32_t>(filteredAdc_[index]) +
+                      ((delta * static_cast<int32_t>(config_.highPassPercent)) / 100);
+    if (boosted < 0) boosted = 0;
+    if (boosted > kAdc12BitMax) boosted = kAdc12BitMax;
+    return static_cast<uint16_t>(boosted);
 }
 
 } // namespace input

@@ -16,6 +16,7 @@ struct ArduinoInputSamplerConfig {
     ArduinoInputPins pins;
     uint8_t adcSamples;
     uint8_t smoothingPercent;
+    uint8_t highPassPercent;
 };
 
 class ArduinoInputSampler {

@@ -13,7 +13,7 @@ constexpr uint16_t kRcHandsetCrsfRawMin = 172;
 constexpr uint16_t kRcHandsetCrsfRawMid = 992;
 constexpr uint16_t kRcHandsetCrsfRawMax = 1811;
 constexpr uint16_t kRcHandsetCalibrationMinSpan = 256;
-constexpr size_t kRcHandsetConfigPayloadSize = 105;
+constexpr size_t kRcHandsetConfigPayloadSize = 106;
 constexpr size_t kRcHandsetConfigRecordSize = 4 + 1 + 2 + kRcHandsetConfigPayloadSize + 2;
 
 enum class ChannelFunction : uint8_t {
@@ -49,6 +49,7 @@ struct ChannelLimits {
 struct FilterSettings {
     uint8_t adcSamples;
     uint8_t smoothingPercent;
+    uint8_t highPassPercent;
     uint16_t spikeJumpThreshold;
     uint16_t spikeConfirmTolerance;
     uint16_t slewLimit;

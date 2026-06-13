@@ -1,0 +1,22 @@
+Exception in thread Thread-1:
+Traceback (most recent call last):
+  File "/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/threading.py", line 973, in _bootstrap_inner
+    self.run()
+  File "/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/threading.py", line 910, in run
+    self._target(*self._args, **self._kwargs)
+  File "/Users/ishan/dev/quoppo/dsi/rp2040-ppm-tx-rx/tools/tx-disconnect-capture.py", line 69, in capture
+    data = os.read(fd, 8192).decode("utf-8", "replace")
+OSError: [Errno 6] Device not configured
+TX: /dev/cu.usbmodem1101  RX: /dev/cu.usbmodem2
+Output: /Users/ishan/dev/quoppo/dsi/rp2040-ppm-tx-rx/tools/test-run-logs/hw-disconnect-20260601-002205
+Waiting 15.0s for stable link...
+Putting TX into BOOTSEL at t=15.0s...
+Observing RX for 60s more...
+
+=== TX disconnect test ===
+picotool exit: 0
+RX pre-boot states:  {}
+RX post-boot states: {}
+RX post-boot out:1 count: 0/0
+RX post-boot crsf delta: 0
+Wrote /Users/ishan/dev/quoppo/dsi/rp2040-ppm-tx-rx/tools/test-run-logs/hw-disconnect-20260601-002205/result.txt

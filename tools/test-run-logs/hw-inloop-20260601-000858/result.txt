@@ -1,0 +1,8 @@
+branch: main
+commit: 52279f1
+capture_secs: 120
+tx_port: /dev/cu.usbmodem1101
+rx_port: /dev/cu.usbmodem2
+TX: {'samples': 120, 'avg': 100.0, 'max': 100, 'ge70': 120, 'ge90': 120, 'states': {'3': 120}, 'drops_34': 0, 'rec_43': 0}
+RX: {'samples': 120, 'avg': 99.5, 'max': 100, 'ge70': 120, 'ge90': 120, 'states': {'3': 120}, 'drops_34': 0, 'rec_43': 0}
+pass_90pct: True

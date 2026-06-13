@@ -1,0 +1,187 @@
+-- Configuring done
+-- Generating done
+-- Build files have been written to: /Users/ishan/dev/quoppo/dsi/rp2040-ppm-tx-rx/build-tests
+Consolidate compiler generated dependencies of target unity
+[  3%] Built target unity
+Consolidate compiler generated dependencies of target xlrs_core_tests
+[  4%] Building CXX object CMakeFiles/xlrs_core_tests.dir/core_tests.cpp.o
+[  6%] Building CXX object CMakeFiles/xlrs_core_tests.dir/Users/ishan/dev/quoppo/dsi/rp2040-ppm-tx-rx/lib/xlrs/link/Link.cpp.o
+/Users/ishan/dev/quoppo/dsi/rp2040-ppm-tx-rx/lib/xlrs/link/Link.cpp:520:32: warning: unused variable 'seqPeriod' [-Wunused-variable]
+  520 |                 const uint32_t seqPeriod = syncEveryNTicks();
+      |                                ^~~~~~~~~
+/Users/ishan/dev/quoppo/dsi/rp2040-ppm-tx-rx/lib/xlrs/link/Link.cpp:410:64: warning: unused parameter 'rxPacketStartUs' [-Wunused-parameter]
+  410 |                             int16_t rssi, int8_t snr, uint32_t rxPacketStartUs) {
+      |                                                                ^
+/Users/ishan/dev/quoppo/dsi/rp2040-ppm-tx-rx/lib/xlrs/link/Link.cpp:634:36: warning: unused parameter 'recoveringFromFailsafe' [-Wunused-parameter]
+  634 | void Link::onRxEnterConnected(bool recoveringFromFailsafe) {
+      |                                    ^
+3 warnings generated.
+[  7%] Building CXX object CMakeFiles/xlrs_core_tests.dir/Users/ishan/dev/quoppo/dsi/rp2040-ppm-tx-rx/lib/xlrs/link/RfScheduler.cpp.o
+[  9%] Linking CXX executable xlrs_core_tests
+[ 12%] Built target xlrs_core_tests
+Consolidate compiler generated dependencies of target xlrs_timing_tests
+[ 14%] Building CXX object CMakeFiles/xlrs_timing_tests.dir/timing_tests.cpp.o
+[ 15%] Building CXX object CMakeFiles/xlrs_timing_tests.dir/Users/ishan/dev/quoppo/dsi/rp2040-ppm-tx-rx/lib/xlrs/link/Link.cpp.o
+/Users/ishan/dev/quoppo/dsi/rp2040-ppm-tx-rx/lib/xlrs/link/Link.cpp:520:32: warning: unused variable 'seqPeriod' [-Wunused-variable]
+  520 |                 const uint32_t seqPeriod = syncEveryNTicks();
+      |                                ^~~~~~~~~
+/Users/ishan/dev/quoppo/dsi/rp2040-ppm-tx-rx/lib/xlrs/link/Link.cpp:410:64: warning: unused parameter 'rxPacketStartUs' [-Wunused-parameter]
+  410 |                             int16_t rssi, int8_t snr, uint32_t rxPacketStartUs) {
+      |                                                                ^
+/Users/ishan/dev/quoppo/dsi/rp2040-ppm-tx-rx/lib/xlrs/link/Link.cpp:634:36: warning: unused parameter 'recoveringFromFailsafe' [-Wunused-parameter]
+  634 | void Link::onRxEnterConnected(bool recoveringFromFailsafe) {
+      |                                    ^
+3 warnings generated.
+[ 17%] Building CXX object CMakeFiles/xlrs_timing_tests.dir/Users/ishan/dev/quoppo/dsi/rp2040-ppm-tx-rx/lib/xlrs/link/RfScheduler.cpp.o
+[ 18%] Linking CXX executable xlrs_timing_tests
+[ 21%] Built target xlrs_timing_tests
+Consolidate compiler generated dependencies of target xlrs_scheduler_tests
+[ 23%] Building CXX object CMakeFiles/xlrs_scheduler_tests.dir/scheduler_tests.cpp.o
+[ 25%] Building CXX object CMakeFiles/xlrs_scheduler_tests.dir/Users/ishan/dev/quoppo/dsi/rp2040-ppm-tx-rx/lib/xlrs/link/Link.cpp.o
+/Users/ishan/dev/quoppo/dsi/rp2040-ppm-tx-rx/lib/xlrs/link/Link.cpp:520:32: warning: unused variable 'seqPeriod' [-Wunused-variable]
+  520 |                 const uint32_t seqPeriod = syncEveryNTicks();
+      |                                ^~~~~~~~~
+/Users/ishan/dev/quoppo/dsi/rp2040-ppm-tx-rx/lib/xlrs/link/Link.cpp:410:64: warning: unused parameter 'rxPacketStartUs' [-Wunused-parameter]
+  410 |                             int16_t rssi, int8_t snr, uint32_t rxPacketStartUs) {
+      |                                                                ^
+/Users/ishan/dev/quoppo/dsi/rp2040-ppm-tx-rx/lib/xlrs/link/Link.cpp:634:36: warning: unused parameter 'recoveringFromFailsafe' [-Wunused-parameter]
+  634 | void Link::onRxEnterConnected(bool recoveringFromFailsafe) {
+      |                                    ^
+3 warnings generated.
+[ 26%] Building CXX object CMakeFiles/xlrs_scheduler_tests.dir/Users/ishan/dev/quoppo/dsi/rp2040-ppm-tx-rx/lib/xlrs/link/RfScheduler.cpp.o
+[ 28%] Linking CXX executable xlrs_scheduler_tests
+[ 31%] Built target xlrs_scheduler_tests
+Consolidate compiler generated dependencies of target xlrs_link_tests
+[ 32%] Building CXX object CMakeFiles/xlrs_link_tests.dir/link_tests.cpp.o
+[ 34%] Building CXX object CMakeFiles/xlrs_link_tests.dir/Users/ishan/dev/quoppo/dsi/rp2040-ppm-tx-rx/lib/xlrs/link/Link.cpp.o
+/Users/ishan/dev/quoppo/dsi/rp2040-ppm-tx-rx/lib/xlrs/link/Link.cpp:520:32: warning: unused variable 'seqPeriod' [-Wunused-variable]
+  520 |                 const uint32_t seqPeriod = syncEveryNTicks();
+      |                                ^~~~~~~~~
+/Users/ishan/dev/quoppo/dsi/rp2040-ppm-tx-rx/lib/xlrs/link/Link.cpp:410:64: warning: unused parameter 'rxPacketStartUs' [-Wunused-parameter]
+  410 |                             int16_t rssi, int8_t snr, uint32_t rxPacketStartUs) {
+      |                                                                ^
+/Users/ishan/dev/quoppo/dsi/rp2040-ppm-tx-rx/lib/xlrs/link/Link.cpp:634:36: warning: unused parameter 'recoveringFromFailsafe' [-Wunused-parameter]
+  634 | void Link::onRxEnterConnected(bool recoveringFromFailsafe) {
+      |                                    ^
+3 warnings generated.
+[ 35%] Building CXX object CMakeFiles/xlrs_link_tests.dir/Users/ishan/dev/quoppo/dsi/rp2040-ppm-tx-rx/lib/xlrs/link/RfScheduler.cpp.o
+[ 37%] Linking CXX executable xlrs_link_tests
+[ 40%] Built target xlrs_link_tests
+Consolidate compiler generated dependencies of target xlrs_telemetry_tests
+[ 42%] Building CXX object CMakeFiles/xlrs_telemetry_tests.dir/telemetry_tests.cpp.o
+[ 43%] Building CXX object CMakeFiles/xlrs_telemetry_tests.dir/Users/ishan/dev/quoppo/dsi/rp2040-ppm-tx-rx/lib/xlrs/link/Link.cpp.o
+/Users/ishan/dev/quoppo/dsi/rp2040-ppm-tx-rx/lib/xlrs/link/Link.cpp:520:32: warning: unused variable 'seqPeriod' [-Wunused-variable]
+  520 |                 const uint32_t seqPeriod = syncEveryNTicks();
+      |                                ^~~~~~~~~
+/Users/ishan/dev/quoppo/dsi/rp2040-ppm-tx-rx/lib/xlrs/link/Link.cpp:410:64: warning: unused parameter 'rxPacketStartUs' [-Wunused-parameter]
+  410 |                             int16_t rssi, int8_t snr, uint32_t rxPacketStartUs) {
+      |                                                                ^
+/Users/ishan/dev/quoppo/dsi/rp2040-ppm-tx-rx/lib/xlrs/link/Link.cpp:634:36: warning: unused parameter 'recoveringFromFailsafe' [-Wunused-parameter]
+  634 | void Link::onRxEnterConnected(bool recoveringFromFailsafe) {
+      |                                    ^
+3 warnings generated.
+[ 45%] Building CXX object CMakeFiles/xlrs_telemetry_tests.dir/Users/ishan/dev/quoppo/dsi/rp2040-ppm-tx-rx/lib/xlrs/link/RfScheduler.cpp.o
+[ 46%] Linking CXX executable xlrs_telemetry_tests
+[ 50%] Built target xlrs_telemetry_tests
+Consolidate compiler generated dependencies of target xlrs_power_tests
+[ 51%] Building CXX object CMakeFiles/xlrs_power_tests.dir/Users/ishan/dev/quoppo/dsi/rp2040-ppm-tx-rx/lib/xlrs/link/Link.cpp.o
+/Users/ishan/dev/quoppo/dsi/rp2040-ppm-tx-rx/lib/xlrs/link/Link.cpp:520:32: warning: unused variable 'seqPeriod' [-Wunused-variable]
+  520 |                 const uint32_t seqPeriod = syncEveryNTicks();
+      |                                ^~~~~~~~~
+/Users/ishan/dev/quoppo/dsi/rp2040-ppm-tx-rx/lib/xlrs/link/Link.cpp:410:64: warning: unused parameter 'rxPacketStartUs' [-Wunused-parameter]
+  410 |                             int16_t rssi, int8_t snr, uint32_t rxPacketStartUs) {
+      |                                                                ^
+/Users/ishan/dev/quoppo/dsi/rp2040-ppm-tx-rx/lib/xlrs/link/Link.cpp:634:36: warning: unused parameter 'recoveringFromFailsafe' [-Wunused-parameter]
+  634 | void Link::onRxEnterConnected(bool recoveringFromFailsafe) {
+      |                                    ^
+3 warnings generated.
+[ 53%] Building CXX object CMakeFiles/xlrs_power_tests.dir/Users/ishan/dev/quoppo/dsi/rp2040-ppm-tx-rx/lib/xlrs/link/RfScheduler.cpp.o
+[ 54%] Linking CXX executable xlrs_power_tests
+[ 59%] Built target xlrs_power_tests
+Consolidate compiler generated dependencies of target xlrs_crypto_tests
+[ 60%] Building CXX object CMakeFiles/xlrs_crypto_tests.dir/Users/ishan/dev/quoppo/dsi/rp2040-ppm-tx-rx/lib/xlrs/link/Link.cpp.o
+/Users/ishan/dev/quoppo/dsi/rp2040-ppm-tx-rx/lib/xlrs/link/Link.cpp:520:32: warning: unused variable 'seqPeriod' [-Wunused-variable]
+  520 |                 const uint32_t seqPeriod = syncEveryNTicks();
+      |                                ^~~~~~~~~
+/Users/ishan/dev/quoppo/dsi/rp2040-ppm-tx-rx/lib/xlrs/link/Link.cpp:410:64: warning: unused parameter 'rxPacketStartUs' [-Wunused-parameter]
+  410 |                             int16_t rssi, int8_t snr, uint32_t rxPacketStartUs) {
+      |                                                                ^
+/Users/ishan/dev/quoppo/dsi/rp2040-ppm-tx-rx/lib/xlrs/link/Link.cpp:634:36: warning: unused parameter 'recoveringFromFailsafe' [-Wunused-parameter]
+  634 | void Link::onRxEnterConnected(bool recoveringFromFailsafe) {
+      |                                    ^
+3 warnings generated.
+[ 62%] Building CXX object CMakeFiles/xlrs_crypto_tests.dir/Users/ishan/dev/quoppo/dsi/rp2040-ppm-tx-rx/lib/xlrs/link/RfScheduler.cpp.o
+[ 64%] Linking CXX executable xlrs_crypto_tests
+[ 68%] Built target xlrs_crypto_tests
+Consolidate compiler generated dependencies of target xlrs_app_tests
+[ 70%] Building CXX object CMakeFiles/xlrs_app_tests.dir/app_tests.cpp.o
+[ 71%] Building CXX object CMakeFiles/xlrs_app_tests.dir/Users/ishan/dev/quoppo/dsi/rp2040-ppm-tx-rx/lib/xlrs/link/Link.cpp.o
+/Users/ishan/dev/quoppo/dsi/rp2040-ppm-tx-rx/lib/xlrs/link/Link.cpp:520:32: warning: unused variable 'seqPeriod' [-Wunused-variable]
+  520 |                 const uint32_t seqPeriod = syncEveryNTicks();
+      |                                ^~~~~~~~~
+/Users/ishan/dev/quoppo/dsi/rp2040-ppm-tx-rx/lib/xlrs/link/Link.cpp:410:64: warning: unused parameter 'rxPacketStartUs' [-Wunused-parameter]
+  410 |                             int16_t rssi, int8_t snr, uint32_t rxPacketStartUs) {
+      |                                                                ^
+/Users/ishan/dev/quoppo/dsi/rp2040-ppm-tx-rx/lib/xlrs/link/Link.cpp:634:36: warning: unused parameter 'recoveringFromFailsafe' [-Wunused-parameter]
+  634 | void Link::onRxEnterConnected(bool recoveringFromFailsafe) {
+      |                                    ^
+3 warnings generated.
+[ 73%] Building CXX object CMakeFiles/xlrs_app_tests.dir/Users/ishan/dev/quoppo/dsi/rp2040-ppm-tx-rx/lib/xlrs/link/RfScheduler.cpp.o
+[ 75%] Linking CXX executable xlrs_app_tests
+[ 78%] Built target xlrs_app_tests
+Consolidate compiler generated dependencies of target xlrs_flash_tests
+[ 79%] Building CXX object CMakeFiles/xlrs_flash_tests.dir/Users/ishan/dev/quoppo/dsi/rp2040-ppm-tx-rx/lib/xlrs/link/Link.cpp.o
+/Users/ishan/dev/quoppo/dsi/rp2040-ppm-tx-rx/lib/xlrs/link/Link.cpp:520:32: warning: unused variable 'seqPeriod' [-Wunused-variable]
+  520 |                 const uint32_t seqPeriod = syncEveryNTicks();
+      |                                ^~~~~~~~~
+/Users/ishan/dev/quoppo/dsi/rp2040-ppm-tx-rx/lib/xlrs/link/Link.cpp:410:64: warning: unused parameter 'rxPacketStartUs' [-Wunused-parameter]
+  410 |                             int16_t rssi, int8_t snr, uint32_t rxPacketStartUs) {
+      |                                                                ^
+/Users/ishan/dev/quoppo/dsi/rp2040-ppm-tx-rx/lib/xlrs/link/Link.cpp:634:36: warning: unused parameter 'recoveringFromFailsafe' [-Wunused-parameter]
+  634 | void Link::onRxEnterConnected(bool recoveringFromFailsafe) {
+      |                                    ^
+3 warnings generated.
+[ 81%] Building CXX object CMakeFiles/xlrs_flash_tests.dir/Users/ishan/dev/quoppo/dsi/rp2040-ppm-tx-rx/lib/xlrs/link/RfScheduler.cpp.o
+[ 82%] Linking CXX executable xlrs_flash_tests
+[ 87%] Built target xlrs_flash_tests
+Consolidate compiler generated dependencies of target xlrs_crsf_tests
+[ 89%] Building CXX object CMakeFiles/xlrs_crsf_tests.dir/Users/ishan/dev/quoppo/dsi/rp2040-ppm-tx-rx/lib/xlrs/link/Link.cpp.o
+/Users/ishan/dev/quoppo/dsi/rp2040-ppm-tx-rx/lib/xlrs/link/Link.cpp:520:32: warning: unused variable 'seqPeriod' [-Wunused-variable]
+  520 |                 const uint32_t seqPeriod = syncEveryNTicks();
+      |                                ^~~~~~~~~
+/Users/ishan/dev/quoppo/dsi/rp2040-ppm-tx-rx/lib/xlrs/link/Link.cpp:410:64: warning: unused parameter 'rxPacketStartUs' [-Wunused-parameter]
+  410 |                             int16_t rssi, int8_t snr, uint32_t rxPacketStartUs) {
+      |                                                                ^
+/Users/ishan/dev/quoppo/dsi/rp2040-ppm-tx-rx/lib/xlrs/link/Link.cpp:634:36: warning: unused parameter 'recoveringFromFailsafe' [-Wunused-parameter]
+  634 | void Link::onRxEnterConnected(bool recoveringFromFailsafe) {
+      |                                    ^
+3 warnings generated.
+[ 90%] Building CXX object CMakeFiles/xlrs_crsf_tests.dir/Users/ishan/dev/quoppo/dsi/rp2040-ppm-tx-rx/lib/xlrs/link/RfScheduler.cpp.o
+[ 92%] Linking CXX executable xlrs_crsf_tests
+[100%] Built target xlrs_crsf_tests
+Internal ctest changing into directory: /Users/ishan/dev/quoppo/dsi/rp2040-ppm-tx-rx/build-tests
+Test project /Users/ishan/dev/quoppo/dsi/rp2040-ppm-tx-rx/build-tests
+      Start  1: xlrs_core_tests
+ 1/10 Test  #1: xlrs_core_tests ..................   Passed    0.88 sec
+      Start  2: xlrs_timing_tests
+ 2/10 Test  #2: xlrs_timing_tests ................   Passed    0.46 sec
+      Start  3: xlrs_scheduler_tests
+ 3/10 Test  #3: xlrs_scheduler_tests .............   Passed    0.44 sec
+      Start  4: xlrs_link_tests
+ 4/10 Test  #4: xlrs_link_tests ..................   Passed    0.47 sec
+      Start  5: xlrs_telemetry_tests
+ 5/10 Test  #5: xlrs_telemetry_tests .............   Passed    0.44 sec
+      Start  6: xlrs_power_tests
+ 6/10 Test  #6: xlrs_power_tests .................   Passed    0.47 sec
+      Start  7: xlrs_crypto_tests
+ 7/10 Test  #7: xlrs_crypto_tests ................   Passed    0.44 sec
+      Start  8: xlrs_app_tests
+ 8/10 Test  #8: xlrs_app_tests ...................   Passed    0.53 sec
+      Start  9: xlrs_flash_tests
+ 9/10 Test  #9: xlrs_flash_tests .................   Passed    0.45 sec
+      Start 10: xlrs_crsf_tests
+10/10 Test #10: xlrs_crsf_tests ..................   Passed    0.45 sec
+
+100% tests passed, 0 tests failed out of 10
+
+Total Test time (real) =   5.05 sec

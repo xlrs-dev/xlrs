@@ -11,6 +11,6 @@
 | Failsafe too early during telemetry | Uplink-slot accounting bug or poor uplink RF | Check RX LQ and telemetry ratio; native tests cover uplink-slot accounting |
 | TX telemetry stale or zero | Downlink telemetry slots missing, RX not transmitting telemetry | Watch TX `LQdown`, RX state, and PHY counters on both sides |
 | Controller input ignored | TX UART wiring/protocol issue | Verify controller UART at 420000 8N1 and TX app ACK/PONG behavior |
-| Status LED solid on RX before link | Config fault or hardware fault | Check RX boot log for default config write or `[HW FAULT]` |
+| RX status LED dark or never changes | Wrong LED pin/polarity or LED wiring | Confirm `rx_lora_pico` uses `STATUS_LED_PIN=10`, active high; check GP10 wiring |
 
 See [index.md](index.md) for the full troubleshooting flow.

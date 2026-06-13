@@ -8,8 +8,10 @@ namespace config {
 namespace {
 
 constexpr uint32_t kRecordMagic = 0x31484352u; // RCH1, little-endian in EEPROM bytes.
-constexpr uint8_t kRecordVersion = 1;
+constexpr uint8_t kRecordVersion = 2;
+constexpr uint8_t kLegacyRecordVersion = 1;
 constexpr size_t kHeaderSize = 7;
+constexpr size_t kLegacyPayloadSize = 105;
 constexpr int16_t kMaxTrim = 500;
 
 uint16_t crc16Ccitt(const uint8_t* data, size_t len) {
@@ -94,6 +96,7 @@ void encodePayload(const RcHandsetConfig& cfg, uint8_t* out) {
     }
     *cursor++ = cfg.filter.adcSamples;
     *cursor++ = cfg.filter.smoothingPercent;
+    *cursor++ = cfg.filter.highPassPercent;
     writeU16(cursor, cfg.filter.spikeJumpThreshold);
     writeU16(cursor, cfg.filter.spikeConfirmTolerance);
     writeU16(cursor, cfg.filter.slewLimit);
@@ -105,7 +108,7 @@ void encodePayload(const RcHandsetConfig& cfg, uint8_t* out) {
     *cursor++ = cfg.power.skipPowerOnSequence ? 1 : 0;
 }
 
-bool decodePayload(const uint8_t* data, RcHandsetConfig& out) {
+bool decodePayload(const uint8_t* data, size_t payloadLen, RcHandsetConfig& out) {
     const uint8_t* cursor = data;
     RcHandsetConfig cfg{};
     for (uint8_t i = 0; i < kRcHandsetAxisCount; ++i) {
@@ -123,6 +126,7 @@ bool decodePayload(const uint8_t* data, RcHandsetConfig& out) {
     }
     cfg.filter.adcSamples = *cursor++;
     cfg.filter.smoothingPercent = *cursor++;
+    cfg.filter.highPassPercent = payloadLen >= kRcHandsetConfigPayloadSize ? *cursor++ : 0;
     cfg.filter.spikeJumpThreshold = readU16(cursor);
     cfg.filter.spikeConfirmTolerance = readU16(cursor);
     cfg.filter.slewLimit = readU16(cursor);
@@ -162,6 +166,7 @@ RcHandsetConfig defaultRcHandsetConfig() {
     }
     cfg.filter.adcSamples = 8;
     cfg.filter.smoothingPercent = 25;
+    cfg.filter.highPassPercent = 0;
     cfg.filter.spikeJumpThreshold = 160;
     cfg.filter.spikeConfirmTolerance = 80;
     cfg.filter.slewLimit = 64;
@@ -188,6 +193,7 @@ bool validateRcHandsetConfig(const RcHandsetConfig& cfg) {
     }
     if (cfg.filter.adcSamples < 1 || cfg.filter.adcSamples > 32) return false;
     if (cfg.filter.smoothingPercent > 100) return false;
+    if (cfg.filter.highPassPercent > 100) return false;
     if (cfg.filter.spikeJumpThreshold == 0) return false;
     if (cfg.filter.spikeConfirmTolerance > cfg.filter.spikeJumpThreshold) return false;
     if (cfg.filter.slewLimit == 0 || cfg.filter.slewLimit > 512) return false;
@@ -239,7 +245,9 @@ bool decodeRcHandsetConfigRecord(const uint8_t* data,
     const uint32_t magic = readU32(cursor);
     const uint8_t version = *cursor++;
     const uint16_t payloadLen = readU16(cursor);
-    if (magic != kRecordMagic || version != kRecordVersion || payloadLen != kRcHandsetConfigPayloadSize) {
+    const bool currentRecord = version == kRecordVersion && payloadLen == kRcHandsetConfigPayloadSize;
+    const bool legacyRecord = version == kLegacyRecordVersion && payloadLen == kLegacyPayloadSize;
+    if (magic != kRecordMagic || (!currentRecord && !legacyRecord)) {
         return false;
     }
     const uint16_t expectedCrc = static_cast<uint16_t>(data[kHeaderSize + payloadLen]) |
@@ -247,7 +255,7 @@ bool decodeRcHandsetConfigRecord(const uint8_t* data,
                                     static_cast<uint16_t>(data[kHeaderSize + payloadLen + 1]) << 8);
     const uint16_t actualCrc = crc16Ccitt(data, kHeaderSize + payloadLen);
     if (expectedCrc != actualCrc) return false;
-    return decodePayload(cursor, out);
+    return decodePayload(cursor, payloadLen, out);
 }
 
 } // namespace config

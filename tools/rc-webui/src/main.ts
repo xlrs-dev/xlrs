@@ -261,7 +261,10 @@ function render(): void {
           <h1>RC Web Serial UI</h1>
           <p class="lede">Calibration, config, filters, and binding workflows for the <code>rc.v1</code> protocol.</p>
         </div>
-        <span class="tag ${navigator.serial ? "ok" : "bad"}">${navigator.serial ? "Web Serial ready" : "Web Serial unavailable"}</span>
+        <div class="hero-actions">
+          <span class="tag ${navigator.serial ? "ok" : "bad"}">${navigator.serial ? "Web Serial ready" : "Web Serial unavailable"}</span>
+          <button data-action="save-config" ${disabled(!isConnected(ui.rc))}>Save to EEPROM</button>
+        </div>
       </section>
 
       <section class="device-grid">

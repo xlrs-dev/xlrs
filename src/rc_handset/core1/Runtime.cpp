@@ -225,6 +225,8 @@ void timingCoreLoopOnce() {
 
 #if defined(RC_HANDSET_ENABLE_CORE1)
 void core1Main() {
+    rp2040.begin(1);
+    rp2040.fifo.registerCore();
     configureTimingCoreHardware();
     for (;;) {
         timingCoreLoopOnce();
@@ -236,6 +238,8 @@ void core1Main() {
 
 void begin() {
 #if defined(RC_HANDSET_ENABLE_CORE1)
+    rp2040.fifo.begin(2);
+    rp2040.fifo.registerCore();
     multicore_launch_core1(core1Main);
     g_core1Started = true;
 #else

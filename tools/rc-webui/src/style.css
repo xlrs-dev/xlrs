@@ -120,6 +120,7 @@ h3 {
 .hero,
 .panel-title,
 .actions,
+.hero-actions,
 .send-row,
 .apply-panel,
 .wizard li {
@@ -132,6 +133,11 @@ h3 {
 .panel-title.split,
 .apply-panel {
   justify-content: space-between;
+}
+
+.hero-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .panel-title {

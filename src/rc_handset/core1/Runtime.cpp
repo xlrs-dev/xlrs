@@ -18,6 +18,8 @@ namespace {
 
 SnapshotExchange g_exchange;
 bool g_core1Started = false;
+std::atomic<bool> g_crsfOutputSafetyHold{false};
+std::atomic<bool> g_releaseSafetyHoldWhenInputsSafe{false};
 
 } // namespace
 
@@ -39,6 +41,21 @@ uint32_t ackedConfigGeneration() {
 
 bool readLiveState(LiveStateSnapshot& out) {
     return g_exchange.readLiveStateFromCore0(out);
+}
+
+void setCrsfOutputSafetyHold(bool enabled) {
+    g_crsfOutputSafetyHold.store(enabled, std::memory_order_release);
+    if (enabled) {
+        g_releaseSafetyHoldWhenInputsSafe.store(false, std::memory_order_release);
+    }
+}
+
+void releaseCrsfOutputSafetyHoldWhenInputsSafe() {
+    g_releaseSafetyHoldWhenInputsSafe.store(true, std::memory_order_release);
+}
+
+bool crsfOutputSafetyHoldEnabled() {
+    return g_crsfOutputSafetyHold.load(std::memory_order_acquire);
 }
 
 bool isCore1Started() {
@@ -71,6 +88,27 @@ uint32_t g_lastFrameUs = 0;
 uint32_t g_liveStateGeneration = 0;
 uint32_t g_configMailboxSequence = 0;
 ConfigSnapshot g_config = makeDefaultConfigSnapshot();
+uint8_t g_safetyResumeStableFrames = 0;
+
+void fillSafeDisarmedChannels(uint16_t channels[kRcChannelCount]) {
+    for (uint8_t i = 0; i < kRcChannelCount; ++i) channels[i] = kCrsfRawMid;
+    channels[2] = kCrsfRaw1000;
+    const uint8_t throttleIndex = channelIndexForFunction(ChannelFunction::Throttle);
+    if (throttleIndex < kRcChannelCount) channels[throttleIndex] = kCrsfRaw1000;
+    for (uint8_t i = 4; i < kRcChannelCount; ++i) channels[i] = kCrsfRaw1000;
+}
+
+bool channelsSafeForResume(const uint16_t channels[kRcChannelCount]) {
+    static constexpr uint16_t kSafeLowThreshold = kCrsfRaw1000 + 80u;
+    const uint8_t throttleIndex = channelIndexForFunction(ChannelFunction::Throttle);
+    if (throttleIndex >= kRcChannelCount || channels[throttleIndex] > kSafeLowThreshold) {
+        return false;
+    }
+    for (uint8_t i = 4; i < kRcChannelCount; ++i) {
+        if (channels[i] > kSafeLowThreshold) return false;
+    }
+    return true;
+}
 
 void refreshConfig() {
     ConfigSnapshot next{};
@@ -99,9 +137,35 @@ void updateChannels() {
     }
 }
 
+void serviceOutputSafetyHold() {
+    if (!g_crsfOutputSafetyHold.load(std::memory_order_acquire)) {
+        g_safetyResumeStableFrames = 0;
+        return;
+    }
+    if (!g_releaseSafetyHoldWhenInputsSafe.load(std::memory_order_acquire) ||
+        !g_inputState.haveChannels ||
+        !channelsSafeForResume(g_inputState.channels)) {
+        g_safetyResumeStableFrames = 0;
+        return;
+    }
+    ++g_safetyResumeStableFrames;
+    if (g_safetyResumeStableFrames >= 3u) {
+        g_inputState.spikeGate.havePending = false;
+        g_safetyResumeStableFrames = 0;
+        g_releaseSafetyHoldWhenInputsSafe.store(false, std::memory_order_release);
+        g_crsfOutputSafetyHold.store(false, std::memory_order_release);
+    }
+}
+
 void sendCrsfChannels() {
     uint8_t frame[32];
-    const size_t len = encodeCrsfRcFrame(g_inputState.channels, frame, sizeof(frame));
+    uint16_t channels[kRcChannelCount];
+    const uint16_t* channelsToSend = g_inputState.channels;
+    if (g_crsfOutputSafetyHold.load(std::memory_order_acquire)) {
+        fillSafeDisarmedChannels(channels);
+        channelsToSend = channels;
+    }
+    const size_t len = encodeCrsfRcFrame(channelsToSend, frame, sizeof(frame));
     if (len) {
         Serial2.write(frame, len);
         ++g_framesSent;
@@ -117,7 +181,12 @@ void publishLiveState(uint32_t nowUs) {
     snapshot.channelSpikeHolds = g_channelSpikeHolds;
     snapshot.lastFrameUs = nowUs;
     snapshot.haveChannels = g_inputState.haveChannels;
-    memcpy(snapshot.channels, g_inputState.channels, sizeof(snapshot.channels));
+    if (g_crsfOutputSafetyHold.load(std::memory_order_acquire)) {
+        fillSafeDisarmedChannels(snapshot.channels);
+        snapshot.haveChannels = true;
+    } else {
+        memcpy(snapshot.channels, g_inputState.channels, sizeof(snapshot.channels));
+    }
     g_exchange.publishLiveStateFromCore1(snapshot);
 }
 
@@ -138,7 +207,8 @@ void timingCoreLoopOnce() {
     if (static_cast<uint32_t>(nowUs - g_lastFrameUs) >= intervalUs) {
         g_lastFrameUs = nowUs;
         updateChannels();
-        if (g_inputState.haveChannels) {
+        serviceOutputSafetyHold();
+        if (g_inputState.haveChannels || g_crsfOutputSafetyHold.load(std::memory_order_acquire)) {
             sendCrsfChannels();
         }
         publishLiveState(nowUs);

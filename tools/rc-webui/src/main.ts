@@ -63,6 +63,7 @@ interface DeviceSession {
   pollTimer: number;
   polling: boolean;
   dirty: boolean;
+  dirtyFields: Set<string>;
   logLines: string[];
 }
 
@@ -75,9 +76,9 @@ interface UiState {
   rx: DeviceSession;
 }
 
-const AXES = ["Aileron", "Elevator", "Throttle", "Rudder"];
+const AXES = ["Aileron", "Elevator", "Rudder", "Throttle"];
 const CHANNELS = ["CH1", "CH2", "CH3", "CH4", "CH5", "CH6", "CH7", "CH8"];
-const FUNCTION_OPTIONS = ["Aileron", "Elevator", "Throttle", "Rudder"];
+const FUNCTION_OPTIONS = ["Aileron", "Elevator", "Rudder", "Throttle"];
 const MAX_LOG_LINES = 80;
 
 const defaultConfig: RcConfig = {
@@ -152,6 +153,7 @@ document.addEventListener("change", (event) => {
   if (configPath) {
     updateConfig(configPath, readInputValue(target));
     ui.rc.dirty = true;
+    ui.rc.dirtyFields.add(configPath);
     render();
     return;
   }
@@ -160,6 +162,7 @@ document.addEventListener("change", (event) => {
   if (filterKey) {
     updateFilter(filterKey, readInputValue(target));
     ui.rc.dirty = true;
+    markDirtyFilterFields(filterKey);
     render();
   }
 });
@@ -184,6 +187,7 @@ function createSession(key: DeviceKey, label: string): DeviceSession {
     pollTimer: 0,
     polling: false,
     dirty: false,
+    dirtyFields: new Set(),
     logLines: [],
   };
 
@@ -694,15 +698,22 @@ async function loadConfig(): Promise<void> {
   const response = await ui.rc.transport.getConfig();
   ui.rc.config = normalizeConfig(response.fields);
   ui.rc.dirty = false;
+  ui.rc.dirtyFields.clear();
   setStatus("Loaded RC handset config.", "ok");
 }
 
 async function applyConfig(): Promise<void> {
-  for (const [field, value] of collectConfigFields(ui.rc.config)) {
+  const fields = collectConfigFields(ui.rc.config, ui.rc.dirtyFields);
+  if (!fields.length) {
+    setStatus("No local RC config edits to apply.", "info");
+    return;
+  }
+  for (const [field, value] of fields) {
     await ui.rc.transport.setConfig(field, value);
   }
   await ui.rc.transport.apply();
   ui.rc.dirty = false;
+  ui.rc.dirtyFields.clear();
   setStatus("Applied edited config. Use Save to persist.", "ok");
 }
 
@@ -763,6 +774,7 @@ function applyMessage(session: DeviceSession, message: RcMessage): void {
   if (message.kind === "config") {
     session.config = normalizeConfig(message.fields);
     session.dirty = false;
+    session.dirtyFields.clear();
   }
   if (message.kind === "binding") session.binding = normalizeBinding(message.fields);
 }
@@ -814,28 +826,46 @@ function normalizeBinding(fields: Record<string, string>): BindingInfo {
   };
 }
 
-function collectConfigFields(config: RcConfig): Array<[string, string | number]> {
+function collectConfigFields(config: RcConfig, onlyFields?: Set<string>): Array<[string, string | number]> {
   const fields: Array<[string, string | number]> = [];
+  const include = (field: string) => !onlyFields || onlyFields.has(field);
   for (let index = 0; index < 4; index += 1) {
-    fields.push([`cal.min.${index}`, config.calMin[index] ?? defaultConfig.calMin[index]]);
-    fields.push([`cal.center.${index}`, config.calCenter[index] ?? defaultConfig.calCenter[index]]);
-    fields.push([`cal.max.${index}`, config.calMax[index] ?? defaultConfig.calMax[index]]);
-    fields.push([`axis.invert.${index}`, config.invert[index] ? 1 : 0]);
-    fields.push([`axis.deadzone.${index}`, config.deadzone[index] ?? 0]);
-    fields.push([`axis.function.${index}`, config.functions[index] ?? index]);
+    pushConfigField(fields, include, `cal.min.${index}`, config.calMin[index] ?? defaultConfig.calMin[index]);
+    pushConfigField(fields, include, `cal.center.${index}`, config.calCenter[index] ?? defaultConfig.calCenter[index]);
+    pushConfigField(fields, include, `cal.max.${index}`, config.calMax[index] ?? defaultConfig.calMax[index]);
+    pushConfigField(fields, include, `axis.invert.${index}`, config.invert[index] ? 1 : 0);
+    pushConfigField(fields, include, `axis.deadzone.${index}`, config.deadzone[index] ?? 0);
+    pushConfigField(fields, include, `axis.function.${index}`, config.functions[index] ?? index);
   }
   for (let index = 0; index < 8; index += 1) {
-    fields.push([`channel.trim.${index}`, config.trim[index] ?? 0]);
-    fields.push([`channel.cutoff_min.${index}`, config.cutoffMin[index] ?? 172]);
-    fields.push([`channel.cutoff_max.${index}`, config.cutoffMax[index] ?? 1811]);
+    pushConfigField(fields, include, `channel.trim.${index}`, config.trim[index] ?? 0);
+    pushConfigField(fields, include, `channel.cutoff_min.${index}`, config.cutoffMin[index] ?? 172);
+    pushConfigField(fields, include, `channel.cutoff_max.${index}`, config.cutoffMax[index] ?? 1811);
   }
-  fields.push(["filter.low_pass", config.filter.lowPass]);
-  fields.push(["filter.high_pass", config.filter.highPass ? 1 : 0]);
-  fields.push([
-    "filter",
-    [config.filter.oversample, config.filter.lowPass, config.filter.temporalBlend ? 1 : 0, config.filter.highPass ? 1 : 0].join(","),
-  ]);
+  if (include("filter.low_pass")) fields.push(["filter.low_pass", config.filter.lowPass]);
+  if (include("filter.high_pass")) fields.push(["filter.high_pass", config.filter.highPass ? 1 : 0]);
+  if (include("filter")) {
+    fields.push([
+      "filter",
+      [config.filter.oversample, config.filter.lowPass, config.filter.temporalBlend ? 1 : 0, config.filter.highPass ? 1 : 0].join(","),
+    ]);
+  }
   return fields;
+}
+
+function pushConfigField(
+  fields: Array<[string, string | number]>,
+  include: (field: string) => boolean,
+  field: string,
+  value: string | number,
+): void {
+  if (include(field)) fields.push([field, value]);
+}
+
+function markDirtyFilterFields(key: keyof FilterConfig): void {
+  ui.rc.dirtyFields.add("filter");
+  if (key === "lowPass") ui.rc.dirtyFields.add("filter.low_pass");
+  if (key === "highPass") ui.rc.dirtyFields.add("filter.high_pass");
 }
 
 function bindingComparison(): { level: StatusLevel; label: string; title: string; message: string } {

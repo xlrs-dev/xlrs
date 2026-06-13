@@ -11,6 +11,9 @@ uint32_t publishConfig(const ConfigSnapshot& config);
 uint32_t publishDefaultConfig();
 uint32_t ackedConfigGeneration();
 bool readLiveState(LiveStateSnapshot& out);
+void setCrsfOutputSafetyHold(bool enabled);
+void releaseCrsfOutputSafetyHoldWhenInputsSafe();
+bool crsfOutputSafetyHoldEnabled();
 
 void begin();
 void loopOnceFallback();

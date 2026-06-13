@@ -87,8 +87,12 @@ runtime handlers:
 Before accepting a calibration write:
 
 - Every primary axis has a usable min/max span.
-- Centered sticks map near CRSF midpoint.
+- WebUI calibration derives each center from the accepted min/max endpoints.
+- ADC min/max endpoints map to CRSF 1000/2000, with the derived midpoint mapping
+  near CRSF midpoint.
 - Throttle low maps near CRSF low endpoint.
+- CRSF output remains in a disarmed safety hold during calibration/config apply
+  and resumes only after throttle and aux channels are low.
 - Switches report all expected positions.
 - A failed or canceled session leaves the previous calibration active.
 - Power loss during write leaves either the previous valid record or the complete

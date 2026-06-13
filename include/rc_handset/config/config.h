@@ -12,6 +12,7 @@ constexpr uint16_t kRcHandsetAdcMax = 4095;
 constexpr uint16_t kRcHandsetCrsfRawMin = 172;
 constexpr uint16_t kRcHandsetCrsfRawMid = 992;
 constexpr uint16_t kRcHandsetCrsfRawMax = 1811;
+constexpr uint16_t kRcHandsetCalibrationMinSpan = 256;
 constexpr size_t kRcHandsetConfigPayloadSize = 105;
 constexpr size_t kRcHandsetConfigRecordSize = 4 + 1 + 2 + kRcHandsetConfigPayloadSize + 2;
 
@@ -75,6 +76,7 @@ struct RcHandsetConfig {
 
 RcHandsetConfig defaultRcHandsetConfig();
 bool validateRcHandsetConfig(const RcHandsetConfig& cfg);
+bool makeAxisCalibrationFromEndpoints(uint16_t min, uint16_t max, AxisCalibration& out);
 
 bool encodeRcHandsetConfigRecord(const RcHandsetConfig& cfg,
                                  uint8_t* out,

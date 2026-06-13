@@ -75,5 +75,6 @@ rc.v1 binding_verify target=tx phrase=<1..32 byte phrase>
 ```
 
 The parser and WebUI also define config, calibration, streaming, save/apply, and
-bootloader commands. Those commands are protocol/UI scaffolding until the RC
-firmware runtime handlers are wired.
+bootloader commands. Config, calibration, streaming, save/apply, and TX binding
+proxy handlers are wired in the RC firmware; bootloader/special-mode handling is
+reserved for later firmware work.

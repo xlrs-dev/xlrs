@@ -30,7 +30,7 @@ Suggested WebUI pages:
 | Page | Purpose |
 | --- | --- |
 | Connection panels | Device identity, firmware version, capability discovery, raw send box, and serial log. |
-| Calibration Wizard | Center sticks, sample full travel, and apply or save calibration. |
+| Calibration Wizard | Sample full ADC travel, derive center from endpoints, and apply or save calibration. |
 | Channels | Axis mapping, inversion, deadzone, trims, cutoffs, and live channel output. |
 | Filters / Save | Filter settings, apply/save controls, and RC config default reset. |
 | Binding Wizard | TX binding through RC USB, RX binding through direct USB, UID comparison, and reboot warnings. |
@@ -80,18 +80,20 @@ RX UID.
 
 ## Calibration Workflow
 
-The WebUI collects calibration into a temporary session before committing
-anything to flash. The UI flow is present now; firmware runtime handlers for
-calibration commands are still reserved and may return `unsupported_command` on
-the integrated branch.
+The WebUI collects calibration into a temporary firmware session before
+committing anything to active config or flash.
 
 1. Connect **RC USB** and run **Load current config**.
-2. Center sticks and send `cal_start`.
+2. Send `cal_start`. The firmware starts a CRSF safety hold so live output stays
+   disarmed during calibration.
 3. Move every stick to every endpoint and press **Sample** repeatedly while the
    WebUI sends `cal_sample`.
-4. Return sticks to center.
-5. Preview raw ADC and channel output with `state`.
-6. Finish with **Apply only** or **Apply + save**.
+4. Finish with **Apply only** or **Apply + save**. The firmware derives each
+   calibration center from the collected ADC min/max endpoints, then maps min to
+   CRSF 1000 and max to CRSF 2000.
+5. Move throttle and arm/aux controls low. The CRSF safety hold releases only
+   after the runtime sees safe low throttle and aux values.
+6. Preview raw ADC and channel output with `state`.
 
 Example:
 
@@ -106,7 +108,8 @@ rc.v1 cal_finish seq=23 save=1
 Validation rules should reject:
 
 - Min/max spans that are too small.
-- Centers outside the collected endpoints.
+- Centers outside the collected endpoints; normal WebUI calibration derives the
+  center from the endpoints.
 - Throttle low value that maps above the configured low threshold.
 - Switches that did not visit all expected positions.
 - Calibration writes while a bind or previous flash write is active.

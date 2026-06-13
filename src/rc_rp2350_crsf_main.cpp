@@ -322,6 +322,12 @@ static void publishActiveConfig() {
     g_pendingConfig = g_activeConfig;
 }
 
+static void publishConfigWithSafetyHold() {
+    rc_handset::core1::setCrsfOutputSafetyHold(true);
+    publishActiveConfig();
+    rc_handset::core1::releaseCrsfOutputSafetyHoldWhenInputsSafe();
+}
+
 static void collectCurrentAdc(uint16_t out[handset_config::kRcHandsetAxisCount]) {
     for (uint8_t axis = 0; axis < handset_config::kRcHandsetAxisCount; ++axis) out[axis] = readAxisAdc(axis);
 }
@@ -685,7 +691,7 @@ static bool handleRcV1Command(const char* line) {
                 return true;
             }
             g_activeConfig.handsetConfig = g_pendingConfig.handsetConfig;
-            publishActiveConfig();
+            publishConfigWithSafetyHold();
             Serial.print(handset_usb::formatOk(command, {{"generation", std::to_string(g_activeConfig.generation)}}).c_str());
             return true;
 
@@ -706,7 +712,7 @@ static bool handleRcV1Command(const char* line) {
             }
             g_activeConfig.handsetConfig = handset_config::defaultRcHandsetConfig();
             g_pendingConfig = g_activeConfig;
-            publishActiveConfig();
+            publishConfigWithSafetyHold();
             Serial.print(handset_usb::formatOk(command, configResponseFields(g_pendingConfig.handsetConfig)).c_str());
             return true;
 
@@ -715,6 +721,7 @@ static bool handleRcV1Command(const char* line) {
             memcpy(g_calMin, g_calCenter, sizeof(g_calMin));
             memcpy(g_calMax, g_calCenter, sizeof(g_calMax));
             g_calibrating = true;
+            rc_handset::core1::setCrsfOutputSafetyHold(true);
             Serial.print(handset_usb::formatOk(command, {{"adc", joinU16(g_calCenter, handset_config::kRcHandsetAxisCount)}}).c_str());
             return true;
 
@@ -744,23 +751,27 @@ static bool handleRcV1Command(const char* line) {
                                                     "run cal_start before cal_finish").c_str());
                 return true;
             }
-            collectCurrentAdc(g_calCenter);
+            bool calibrationValid = true;
+            handset_config::RcHandsetConfig candidate = g_pendingConfig.handsetConfig;
             for (uint8_t axis = 0; axis < handset_config::kRcHandsetAxisCount; ++axis) {
-                if (g_calMin[axis] >= g_calCenter[axis]) g_calMin[axis] = g_calCenter[axis] > 10 ? g_calCenter[axis] - 10 : 0;
-                if (g_calMax[axis] <= g_calCenter[axis]) g_calMax[axis] = static_cast<uint16_t>(g_calCenter[axis] + 10);
-                if (g_calMax[axis] > handset_config::kRcHandsetAdcMax) g_calMax[axis] = handset_config::kRcHandsetAdcMax;
-                g_pendingConfig.handsetConfig.axes[axis].calibration.min = g_calMin[axis];
-                g_pendingConfig.handsetConfig.axes[axis].calibration.center = g_calCenter[axis];
-                g_pendingConfig.handsetConfig.axes[axis].calibration.max = g_calMax[axis];
+                handset_config::AxisCalibration calibration{};
+                if (!handset_config::makeAxisCalibrationFromEndpoints(g_calMin[axis], g_calMax[axis], calibration)) {
+                    calibrationValid = false;
+                    break;
+                }
+                g_calCenter[axis] = calibration.center;
+                candidate.axes[axis].calibration = calibration;
             }
             g_calibrating = false;
-            if (!handset_config::validateRcHandsetConfig(g_pendingConfig.handsetConfig)) {
+            if (!calibrationValid || !handset_config::validateRcHandsetConfig(candidate)) {
+                rc_handset::core1::releaseCrsfOutputSafetyHoldWhenInputsSafe();
                 Serial.print(handset_usb::formatErr(command, "invalid_calibration",
                                                     "sampled calibration failed validation").c_str());
                 return true;
             }
+            g_pendingConfig.handsetConfig = candidate;
             g_activeConfig.handsetConfig = g_pendingConfig.handsetConfig;
-            publishActiveConfig();
+            publishConfigWithSafetyHold();
             bool saveRequested = false;
             if (const handset_usb::Argument* saveArg = commandArg(command, "save")) {
                 saveRequested = saveArg->value == "1" || saveArg->value == "true";

@@ -1221,6 +1221,24 @@ static void test_rc_handset_config_validation_rejects_invalid_fields() {
     TEST_ASSERT_FALSE(handset_config::validateRcHandsetConfig(cfg));
 }
 
+static void test_rc_handset_axis_calibration_from_endpoints_uses_adc_span_midpoint() {
+    handset_config::AxisCalibration calibration{};
+    TEST_ASSERT_TRUE(handset_config::makeAxisCalibrationFromEndpoints(100, 4094, calibration));
+    TEST_ASSERT_EQUAL_UINT16(100, calibration.min);
+    TEST_ASSERT_EQUAL_UINT16(2097, calibration.center);
+    TEST_ASSERT_EQUAL_UINT16(4094, calibration.max);
+    handset_config::RcHandsetConfig cfg = handset_config::defaultRcHandsetConfig();
+    cfg.axes[0].calibration = calibration;
+    TEST_ASSERT_TRUE(handset_config::validateRcHandsetConfig(cfg));
+}
+
+static void test_rc_handset_axis_calibration_from_endpoints_rejects_small_or_invalid_span() {
+    handset_config::AxisCalibration calibration{};
+    TEST_ASSERT_FALSE(handset_config::makeAxisCalibrationFromEndpoints(1000, 1100, calibration));
+    TEST_ASSERT_FALSE(handset_config::makeAxisCalibrationFromEndpoints(2000, 2000, calibration));
+    TEST_ASSERT_FALSE(handset_config::makeAxisCalibrationFromEndpoints(4100, 4200, calibration));
+}
+
 static void assert_rc_handset_config_equal(const handset_config::RcHandsetConfig& expected,
                                            const handset_config::RcHandsetConfig& actual) {
     for (uint8_t i = 0; i < handset_config::kRcHandsetAxisCount; ++i) {
@@ -1809,6 +1827,8 @@ int main(int argc, char** argv) {
     RUN_TEST(test_handset_pipeline_integrates_existing_spike_gate);
     RUN_TEST(test_rc_handset_config_defaults_are_valid);
     RUN_TEST(test_rc_handset_config_validation_rejects_invalid_fields);
+    RUN_TEST(test_rc_handset_axis_calibration_from_endpoints_uses_adc_span_midpoint);
+    RUN_TEST(test_rc_handset_axis_calibration_from_endpoints_rejects_small_or_invalid_span);
     RUN_TEST(test_rc_handset_config_record_round_trips);
     RUN_TEST(test_rc_handset_config_record_rejects_crc_corruption);
     RUN_TEST(test_legacy_calibration_migration_valid_record);

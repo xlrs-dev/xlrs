@@ -128,30 +128,33 @@ rc.v1 ok seq=13 enabled=1
 
 ### cal_start
 
-Starts calibration for a field or axis.
+Starts calibration. The RC firmware samples current ADC values as the initial
+endpoint set and puts CRSF output into a disarmed safety hold.
 
 ```text
-rc.v1 cal_start seq=20 field=aileron
-rc.v1 ok seq=20 field=aileron state=collecting
+rc.v1 cal_start seq=20
+rc.v1 ok seq=20 adc=2048,2047,2049,2046
 ```
 
 ### cal_sample
 
-Adds a sample to the active calibration session. Handlers can sample live ADC
-state directly or accept an explicit `value`.
+Adds a sample to the active calibration session. The firmware samples live ADC
+state directly and updates the collected min/max endpoints.
 
 ```text
-rc.v1 cal_sample seq=21 field=aileron value=2048
-rc.v1 ok seq=21 field=aileron accepted=1
+rc.v1 cal_sample seq=21
+rc.v1 ok seq=21 adc=100,2030,3990,2040 cal_min=100,2030,2048,2040 cal_max=2048,2047,3990,2046
 ```
 
 ### cal_finish
 
-Validates and commits the active calibration for a field or axis.
+Validates and commits the active calibration. Firmware derives each ADC center
+from the collected min/max endpoints, applies the active config, optionally
+saves it, and releases CRSF output only after throttle and aux channels are low.
 
 ```text
 rc.v1 cal_finish seq=22 save=1
-rc.v1 ok seq=22 written=1
+rc.v1 ok seq=22 cal_min=100,120,130,140 cal_center=2100,2110,2120,2130 cal_max=4100,4100,4110,4120
 ```
 
 ### binding_get

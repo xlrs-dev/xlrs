@@ -198,6 +198,19 @@ bool validateRcHandsetConfig(const RcHandsetConfig& cfg) {
     return true;
 }
 
+bool makeAxisCalibrationFromEndpoints(uint16_t min, uint16_t max, AxisCalibration& out) {
+    if (max > kRcHandsetAdcMax || min >= max) return false;
+    const uint16_t span = static_cast<uint16_t>(max - min);
+    if (span < kRcHandsetCalibrationMinSpan) return false;
+    AxisCalibration calibration{};
+    calibration.min = min;
+    calibration.center = static_cast<uint16_t>(min + (span / 2u));
+    calibration.max = max;
+    if (!validAxisCalibration(calibration)) return false;
+    out = calibration;
+    return true;
+}
+
 bool encodeRcHandsetConfigRecord(const RcHandsetConfig& cfg,
                                  uint8_t* out,
                                  size_t outLen,

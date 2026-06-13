@@ -60,20 +60,21 @@ is a proxied workflow:
 - Four 3-position switches mapped to auxiliary channels.
 - Channels 9-16 held at CRSF midpoint.
 - CRSF RC frame output on `Serial2`.
-- Range clamping, deadzone, trim, cutoff, spike gate, and slew limiting helpers.
-- RC handset config records with CRC validation.
+- Range clamping, deadzone, trim, cutoff, spike gate, ADC low-pass smoothing,
+  and optional high-pass response boost.
+- RC handset config records with CRC validation and v1-to-v2 filter config
+  decode compatibility.
 - Legacy calibration migration helpers.
 - OLED display pages for boot, status, channel monitor, config, and binding.
 - BQ2562x battery/charger support and power-button handling.
 - A host-tested `rc.v1` line parser/formatter with WebUI utility commands.
-- RC USB `rc.v1` handlers for `hello`, `tx_hello`, `state`, and TX binding
-  proxy commands.
+- RC USB `rc.v1` handlers for config load/edit/autosave/defaults,
+  calibration, state streaming, `tx_hello`, and TX binding proxy commands.
 - TX/RX direct USB `rc.v1` handlers for role discovery and local binding
   get/set/clear/verify.
 - A simple bring-up console with `status`, `channels`, `power`, and `reboot`.
 
 The following are reserved for the modular handset port:
 
-- Runtime handlers for `get_config`, `set_config`, `apply`, `save`,
-  `reset_defaults`, `stream_state`, calibration commands, and `special_mode`.
 - Model memory.
+- `special_mode` runtime handling.

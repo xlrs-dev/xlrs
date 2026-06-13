@@ -240,26 +240,43 @@ static bool parseIndexField(const std::string& field, const char* prefix, uint8_
     return true;
 }
 
-static bool applyPendingConfigField(const std::string& field, const std::string& value) {
+static bool parseCsvInts(const std::string& value, int32_t* out, uint8_t count) {
+    const char* cursor = value.c_str();
+    char* end = nullptr;
+    for (uint8_t i = 0; i < count; ++i) {
+        out[i] = static_cast<int32_t>(strtol(cursor, &end, 10));
+        if (end == cursor) return false;
+        if (i < count - 1u) {
+            if (*end != ',') return false;
+            cursor = end + 1;
+        } else if (*end != '\0') {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool applyConfigField(handset_config::RcHandsetConfig& cfg,
+                             const std::string& field,
+                             const std::string& value) {
     int32_t parsed = 0;
     uint8_t index = 0;
-    handset_config::RcHandsetConfig& cfg = g_pendingConfig.handsetConfig;
 
     if (field == "filter") {
-        int values[4] = {0, 0, 0, 0};
-        const char* cursor = value.c_str();
-        char* end = nullptr;
-        for (uint8_t i = 0; i < 4; ++i) {
-            values[i] = static_cast<int>(strtol(cursor, &end, 10));
-            if (end == cursor) return false;
-            if (i < 3) {
-                if (*end != ',') return false;
-                cursor = end + 1;
-            }
-        }
+        int32_t values[4] = {0, 0, 0, 0};
+        if (!parseCsvInts(value, values, 4)) return false;
         cfg.filter.adcSamples = static_cast<uint8_t>(values[0]);
         cfg.filter.smoothingPercent = static_cast<uint8_t>(values[1]);
         cfg.filter.highPassPercent = static_cast<uint8_t>(values[3]);
+        return handset_config::validateRcHandsetConfig(cfg);
+    }
+
+    if (parseIndexField(field, "cal.axis.", handset_config::kRcHandsetAxisCount, index)) {
+        int32_t values[3] = {0, 0, 0};
+        if (!parseCsvInts(value, values, 3)) return false;
+        cfg.axes[index].calibration.min = static_cast<uint16_t>(values[0]);
+        cfg.axes[index].calibration.center = static_cast<uint16_t>(values[1]);
+        cfg.axes[index].calibration.max = static_cast<uint16_t>(values[2]);
         return handset_config::validateRcHandsetConfig(cfg);
     }
 
@@ -293,14 +310,28 @@ static bool applyPendingConfigField(const std::string& field, const std::string&
     return handset_config::validateRcHandsetConfig(cfg);
 }
 
-static bool saveRcConfig() {
+static void publishConfigForLiveEdit();
+
+static bool saveRcConfig(const handset_config::RcHandsetConfig& config) {
     uint8_t record[handset_config::kRcHandsetConfigRecordSize];
     size_t written = 0;
-    if (!handset_config::encodeRcHandsetConfigRecord(g_activeConfig.handsetConfig, record, sizeof(record), written)) {
+    if (!handset_config::encodeRcHandsetConfigRecord(config, record, sizeof(record), written)) {
         return false;
     }
     for (size_t i = 0; i < written; ++i) EEPROM.write(i, record[i]);
     return EEPROM.commit();
+}
+
+static bool applyRcConfigForLiveEdit(const handset_config::RcHandsetConfig& config) {
+    if (!handset_config::validateRcHandsetConfig(config)) return false;
+    g_activeConfig.handsetConfig = config;
+    publishConfigForLiveEdit();
+    return true;
+}
+
+static bool commitRcConfig(const handset_config::RcHandsetConfig& config) {
+    if (!applyRcConfigForLiveEdit(config)) return false;
+    return saveRcConfig(config);
 }
 
 static void loadRcConfig() {
@@ -324,10 +355,9 @@ static void publishActiveConfig() {
     g_pendingConfig = g_activeConfig;
 }
 
-static void publishConfigWithSafetyHold() {
-    rc_handset::core1::setCrsfOutputSafetyHold(true);
+static void publishConfigForLiveEdit() {
+    rc_handset::core1::setCrsfOutputSafetyHold(false);
     publishActiveConfig();
-    rc_handset::core1::releaseCrsfOutputSafetyHoldWhenInputsSafe();
 }
 
 static void refreshLiveState();
@@ -593,6 +623,8 @@ static std::vector<handset_usb::ResponseField> stateResponseFields() {
         {"adc_filtered", currentFilteredAdcString()},
         {"ch", joinU16(g_liveState.channels, lora_link::kRcChannelCount)},
         {"toggles", joinU16(toggles, 4)},
+        {"have_channels", g_liveState.haveChannels ? "1" : "0"},
+        {"safety_hold", g_liveState.safetyHold ? "1" : "0"},
         {"lq", std::to_string(telemetry.linkQuality)},
         {"rssi", std::to_string(telemetry.rssiDbm)},
         {"snr", std::to_string(telemetry.snrDb)},
@@ -696,31 +728,39 @@ static bool handleRcV1Command(const char* line) {
         }
 
         case handset_usb::CommandType::GetConfig:
-            Serial.print(handset_usb::formatOk(command, configResponseFields(g_pendingConfig.handsetConfig)).c_str());
+            Serial.print(handset_usb::formatOk(command, configResponseFields(g_activeConfig.handsetConfig)).c_str());
             return true;
 
-        case handset_usb::CommandType::SetConfig:
-            if (!applyPendingConfigField(command.field, command.value)) {
+        case handset_usb::CommandType::SetConfig: {
+            handset_config::RcHandsetConfig candidate = g_activeConfig.handsetConfig;
+            if (!applyConfigField(candidate, command.field, command.value)) {
                 Serial.print(handset_usb::formatErr(command, "invalid_config_field",
                                                     "field or value is invalid").c_str());
                 return true;
             }
-            Serial.print(handset_usb::formatOk(command, {{"field", command.field}, {"value", command.value}}).c_str());
-            return true;
-
-        case handset_usb::CommandType::Apply:
-            if (!handset_config::validateRcHandsetConfig(g_pendingConfig.handsetConfig)) {
-                Serial.print(handset_usb::formatErr(command, "invalid_config",
-                                                    "pending config failed validation").c_str());
+            if (!applyRcConfigForLiveEdit(candidate)) {
+                Serial.print(handset_usb::formatErr(command, "apply_failed",
+                                                    "validated config could not be applied").c_str());
                 return true;
             }
-            g_activeConfig.handsetConfig = g_pendingConfig.handsetConfig;
-            publishConfigWithSafetyHold();
-            Serial.print(handset_usb::formatOk(command, {{"generation", std::to_string(g_activeConfig.generation)}}).c_str());
+            Serial.print(handset_usb::formatOk(command, {
+                {"field", command.field},
+                {"value", command.value},
+                {"persisted", "0"},
+                {"generation", std::to_string(g_activeConfig.generation)},
+            }).c_str());
+            return true;
+        }
+
+        case handset_usb::CommandType::Apply:
+            Serial.print(handset_usb::formatOk(command, {
+                {"generation", std::to_string(g_activeConfig.generation)},
+                {"persisted", "0"},
+            }).c_str());
             return true;
 
         case handset_usb::CommandType::Save:
-            if (saveRcConfig()) {
+            if (saveRcConfig(g_activeConfig.handsetConfig)) {
                 Serial.print(handset_usb::formatOk(command, {{"persisted", "1"}}).c_str());
             } else {
                 Serial.print(handset_usb::formatErr(command, "persist_failed",
@@ -734,10 +774,12 @@ static bool handleRcV1Command(const char* line) {
                                                     "reset_defaults supports target=rc_config").c_str());
                 return true;
             }
-            g_activeConfig.handsetConfig = handset_config::defaultRcHandsetConfig();
-            g_pendingConfig = g_activeConfig;
-            publishConfigWithSafetyHold();
-            Serial.print(handset_usb::formatOk(command, configResponseFields(g_pendingConfig.handsetConfig)).c_str());
+            if (!commitRcConfig(handset_config::defaultRcHandsetConfig())) {
+                Serial.print(handset_usb::formatErr(command, "persist_failed",
+                                                    "default config could not be saved").c_str());
+                return true;
+            }
+            Serial.print(handset_usb::formatOk(command, configResponseFields(g_activeConfig.handsetConfig)).c_str());
             return true;
 
         case handset_usb::CommandType::CalStart:
@@ -746,7 +788,10 @@ static bool handleRcV1Command(const char* line) {
             memcpy(g_calMax, g_calCenter, sizeof(g_calMax));
             g_calibrating = true;
             rc_handset::core1::setCrsfOutputSafetyHold(true);
-            Serial.print(handset_usb::formatOk(command, {{"adc", joinU16(g_calCenter, handset_config::kRcHandsetAxisCount)}}).c_str());
+            Serial.print(handset_usb::formatOk(command, {
+                {"adc", joinU16(g_calCenter, handset_config::kRcHandsetAxisCount)},
+                {"safety_hold", "1"},
+            }).c_str());
             return true;
 
         case handset_usb::CommandType::CalSample: {
@@ -776,7 +821,7 @@ static bool handleRcV1Command(const char* line) {
                 return true;
             }
             bool calibrationValid = true;
-            handset_config::RcHandsetConfig candidate = g_pendingConfig.handsetConfig;
+            handset_config::RcHandsetConfig candidate = g_activeConfig.handsetConfig;
             for (uint8_t axis = 0; axis < handset_config::kRcHandsetAxisCount; ++axis) {
                 handset_config::AxisCalibration calibration{};
                 if (!handset_config::makeAxisCalibrationFromEndpoints(g_calMin[axis], g_calMax[axis], calibration)) {
@@ -788,24 +833,17 @@ static bool handleRcV1Command(const char* line) {
             }
             g_calibrating = false;
             if (!calibrationValid || !handset_config::validateRcHandsetConfig(candidate)) {
-                rc_handset::core1::releaseCrsfOutputSafetyHoldWhenInputsSafe();
+                rc_handset::core1::setCrsfOutputSafetyHold(false);
                 Serial.print(handset_usb::formatErr(command, "invalid_calibration",
                                                     "sampled calibration failed validation").c_str());
                 return true;
             }
-            g_pendingConfig.handsetConfig = candidate;
-            g_activeConfig.handsetConfig = g_pendingConfig.handsetConfig;
-            publishConfigWithSafetyHold();
-            bool saveRequested = false;
-            if (const handset_usb::Argument* saveArg = commandArg(command, "save")) {
-                saveRequested = saveArg->value == "1" || saveArg->value == "true";
-            }
-            if (saveRequested && !saveRcConfig()) {
+            if (!commitRcConfig(candidate)) {
                 Serial.print(handset_usb::formatErr(command, "persist_failed",
-                                                    "calibration applied but save failed").c_str());
+                                                    "calibration could not be saved").c_str());
                 return true;
             }
-            Serial.print(handset_usb::formatOk(command, configResponseFields(g_pendingConfig.handsetConfig)).c_str());
+            Serial.print(handset_usb::formatOk(command, configResponseFields(g_activeConfig.handsetConfig)).c_str());
             return true;
         }
 

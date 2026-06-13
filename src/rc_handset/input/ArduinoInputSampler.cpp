@@ -10,6 +10,7 @@ namespace input {
 ArduinoInputSampler::ArduinoInputSampler()
     : config_(defaultArduinoInputSamplerConfig()),
       filteredAdc_{},
+      filteredAdcState_{},
       filterReady_(false) {
 }
 
@@ -81,15 +82,14 @@ uint16_t ArduinoInputSampler::smoothAdc(uint8_t index, uint16_t raw) {
     if (index >= kMaxAnalogInputs || !filterReady_) {
         if (index < kMaxAnalogInputs) {
             filteredAdc_[index] = raw;
+            filteredAdcState_[index] = adcToFilterState(raw);
         }
         return raw;
     }
-    const uint16_t previous = filteredAdc_[index];
-    const uint32_t keepPercent = 100u - config_.smoothingPercent;
-    filteredAdc_[index] = static_cast<uint16_t>(
-        ((static_cast<uint32_t>(previous) * keepPercent) +
-         (static_cast<uint32_t>(raw) * config_.smoothingPercent) + 50u) /
-        100u);
+    const uint16_t previous = adcFromFilterState(filteredAdcState_[index]);
+    filteredAdcState_[index] =
+        lowPassAdcFilterStep(filteredAdcState_[index], raw, config_.smoothingPercent);
+    filteredAdc_[index] = adcFromFilterState(filteredAdcState_[index]);
     if (config_.highPassPercent == 0) return filteredAdc_[index];
 
     const int32_t delta = static_cast<int32_t>(filteredAdc_[index]) - static_cast<int32_t>(previous);

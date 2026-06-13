@@ -12,6 +12,7 @@ constexpr uint8_t kRecordVersion = 2;
 constexpr uint8_t kLegacyRecordVersion = 1;
 constexpr size_t kHeaderSize = 7;
 constexpr size_t kLegacyPayloadSize = 105;
+constexpr size_t kLegacyRecordSize = kHeaderSize + kLegacyPayloadSize + 2;
 constexpr int16_t kMaxTrim = 500;
 
 uint16_t crc16Ccitt(const uint8_t* data, size_t len) {
@@ -240,7 +241,7 @@ bool encodeRcHandsetConfigRecord(const RcHandsetConfig& cfg,
 bool decodeRcHandsetConfigRecord(const uint8_t* data,
                                  size_t len,
                                  RcHandsetConfig& out) {
-    if (!data || len < kRcHandsetConfigRecordSize) return false;
+    if (!data || len < kLegacyRecordSize) return false;
     const uint8_t* cursor = data;
     const uint32_t magic = readU32(cursor);
     const uint8_t version = *cursor++;
@@ -250,6 +251,8 @@ bool decodeRcHandsetConfigRecord(const uint8_t* data,
     if (magic != kRecordMagic || (!currentRecord && !legacyRecord)) {
         return false;
     }
+    if (currentRecord && len < kRcHandsetConfigRecordSize) return false;
+    if (legacyRecord && len < kLegacyRecordSize) return false;
     const uint16_t expectedCrc = static_cast<uint16_t>(data[kHeaderSize + payloadLen]) |
                                 static_cast<uint16_t>(
                                     static_cast<uint16_t>(data[kHeaderSize + payloadLen + 1]) << 8);

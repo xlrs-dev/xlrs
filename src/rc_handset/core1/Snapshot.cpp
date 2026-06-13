@@ -18,6 +18,7 @@ LiveStateSnapshot makeDefaultLiveStateSnapshot() {
     snapshot.appliedConfigGeneration = 0;
     snapshot.haveChannels = false;
     snapshot.haveAdc = false;
+    snapshot.safetyHold = false;
     for (uint8_t i = 0; i < config::kRcHandsetAxisCount; ++i) {
         snapshot.rawAdc[i] = 0;
         snapshot.filteredAdc[i] = 0;
@@ -29,9 +30,9 @@ LiveStateSnapshot makeDefaultLiveStateSnapshot() {
 }
 
 SnapshotExchange::SnapshotExchange()
-    : _configSequence(0),
+    : _configLock(false),
       _config(makeDefaultConfigSnapshot()),
-      _liveStateSequence(0),
+      _liveStateLock(false),
       _liveState(makeDefaultLiveStateSnapshot()),
       _nextConfigGeneration(0),
       _ackedConfigGeneration(0) {
@@ -42,12 +43,9 @@ uint32_t SnapshotExchange::publishConfigFromCore0(ConfigSnapshot config) {
     if (config.crsfFrameIntervalUs == 0) {
         config.crsfFrameIntervalUs = kDefaultCrsfFrameIntervalUs;
     }
-    const uint32_t sequence = _configSequence.load(std::memory_order_relaxed);
-    _configSequence.store(sequence + 1u, std::memory_order_relaxed);
-    std::atomic_thread_fence(std::memory_order_release);
+    lock(_configLock);
     _config = config;
-    std::atomic_thread_fence(std::memory_order_release);
-    _configSequence.store(sequence + 2u, std::memory_order_relaxed);
+    unlock(_configLock);
     return config.generation;
 }
 
@@ -64,56 +62,45 @@ uint32_t SnapshotExchange::ackedConfigGeneration() const {
 }
 
 void SnapshotExchange::publishLiveStateFromCore1(const LiveStateSnapshot& state) {
-    const uint32_t sequence = _liveStateSequence.load(std::memory_order_relaxed);
-    _liveStateSequence.store(sequence + 1u, std::memory_order_relaxed);
-    std::atomic_thread_fence(std::memory_order_release);
+    lock(_liveStateLock);
     _liveState = state;
-    std::atomic_thread_fence(std::memory_order_release);
-    _liveStateSequence.store(sequence + 2u, std::memory_order_relaxed);
+    unlock(_liveStateLock);
 }
 
 bool SnapshotExchange::readLiveStateFromCore0(LiveStateSnapshot& out) const {
     return loadLiveState(out);
 }
 
-bool SnapshotExchange::loadConfig(ConfigSnapshot& out, uint32_t& sequence) const {
-    for (uint8_t tries = 0; tries < 8; ++tries) {
-        const uint32_t before = _configSequence.load(std::memory_order_relaxed);
-        if (before & 1u) {
-            continue;
-        }
-        if (before == sequence) {
-            return false;
-        }
-        std::atomic_thread_fence(std::memory_order_acquire);
-        const ConfigSnapshot snapshot = _config;
-        std::atomic_thread_fence(std::memory_order_acquire);
-        const uint32_t after = _configSequence.load(std::memory_order_relaxed);
-        if (before == after) {
-            out = snapshot;
-            sequence = before;
-            return true;
-        }
+void SnapshotExchange::lock(std::atomic<bool>& flag) {
+    bool expected = false;
+    while (!flag.compare_exchange_weak(expected, true,
+                                       std::memory_order_acquire,
+                                       std::memory_order_relaxed)) {
+        expected = false;
     }
-    return false;
+}
+
+void SnapshotExchange::unlock(std::atomic<bool>& flag) {
+    flag.store(false, std::memory_order_release);
+}
+
+bool SnapshotExchange::loadConfig(ConfigSnapshot& out, uint32_t& generation) const {
+    lock(_configLock);
+    const ConfigSnapshot snapshot = _config;
+    unlock(_configLock);
+    if (snapshot.generation == generation) {
+        return false;
+    }
+    out = snapshot;
+    generation = snapshot.generation;
+    return true;
 }
 
 bool SnapshotExchange::loadLiveState(LiveStateSnapshot& out) const {
-    for (uint8_t tries = 0; tries < 8; ++tries) {
-        const uint32_t before = _liveStateSequence.load(std::memory_order_relaxed);
-        if (before & 1u) {
-            continue;
-        }
-        std::atomic_thread_fence(std::memory_order_acquire);
-        const LiveStateSnapshot snapshot = _liveState;
-        std::atomic_thread_fence(std::memory_order_acquire);
-        const uint32_t after = _liveStateSequence.load(std::memory_order_relaxed);
-        if (before == after) {
-            out = snapshot;
-            return true;
-        }
-    }
-    return false;
+    lock(_liveStateLock);
+    out = _liveState;
+    unlock(_liveStateLock);
+    return true;
 }
 
 } // namespace core1

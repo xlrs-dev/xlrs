@@ -30,6 +30,7 @@ struct LiveStateSnapshot {
     uint32_t lastFrameUs;
     bool haveChannels;
     bool haveAdc;
+    bool safetyHold;
     uint16_t rawAdc[config::kRcHandsetAxisCount];
     uint16_t filteredAdc[config::kRcHandsetAxisCount];
     uint16_t channels[lora_link::kRcChannelCount];
@@ -51,12 +52,14 @@ public:
     bool readLiveStateFromCore0(LiveStateSnapshot& out) const;
 
 private:
-    bool loadConfig(ConfigSnapshot& out, uint32_t& sequence) const;
+    static void lock(std::atomic<bool>& flag);
+    static void unlock(std::atomic<bool>& flag);
+    bool loadConfig(ConfigSnapshot& out, uint32_t& generation) const;
     bool loadLiveState(LiveStateSnapshot& out) const;
 
-    mutable std::atomic<uint32_t> _configSequence;
+    mutable std::atomic<bool> _configLock;
     ConfigSnapshot _config;
-    mutable std::atomic<uint32_t> _liveStateSequence;
+    mutable std::atomic<bool> _liveStateLock;
     LiveStateSnapshot _liveState;
     uint32_t _nextConfigGeneration;
     std::atomic<uint32_t> _ackedConfigGeneration;

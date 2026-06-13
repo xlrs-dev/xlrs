@@ -67,14 +67,19 @@ Current `rc.v1` commands wired in RC firmware:
 ```text
 rc.v1 hello
 rc.v1 tx_hello
+rc.v1 get_config
+rc.v1 set_config field=<name> value=<value>
+rc.v1 reset_defaults target=rc_config
 rc.v1 state
+rc.v1 stream_state interval_ms=100 enabled=1
+rc.v1 cal_start
+rc.v1 cal_sample
+rc.v1 cal_finish
 rc.v1 binding_get target=tx
 rc.v1 binding_set target=tx phrase=<1..32 byte phrase>
 rc.v1 binding_clear target=tx
 rc.v1 binding_verify target=tx phrase=<1..32 byte phrase>
 ```
 
-The parser and WebUI also define config, calibration, streaming, save/apply, and
-bootloader commands. Config, calibration, streaming, save/apply, and TX binding
-proxy handlers are wired in the RC firmware; bootloader/special-mode handling is
-reserved for later firmware work.
+The parser and WebUI also define bootloader/special-mode handling; that runtime
+handler is reserved for later firmware work.

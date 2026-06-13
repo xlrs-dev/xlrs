@@ -108,10 +108,11 @@ See [../interfaces/rx-crsf.md](../interfaces/rx-crsf.md) and
 ## Failsafe
 
 Loss-driven and FC-owned: when no valid uplink frame arrives within the failsafe
-window (`kFailsafeTimeoutMs`, default 250 ms), the RX **stops emitting
-`RC_CHANNELS_PACKED`**. Betaflight/INAV key RXLOSS on the absence of RC frames,
-so this hands failsafe policy to the flight controller rather than holding stale
-sticks. See [safety-and-failsafe.md](safety-and-failsafe.md).
+window (`kFailsafeTimeoutMs`, default 250 ms), the RX first sends a 500 ms
+disarm burst with throttle and all AUX channels at 1000 us, then **stops
+emitting `RC_CHANNELS_PACKED`**. Betaflight/INAV key RXLOSS on the absence of RC
+frames, so this hands failsafe policy to the flight controller after the ARM
+channel has been driven low. See [safety-and-failsafe.md](safety-and-failsafe.md).
 
 ## Diagnostics
 

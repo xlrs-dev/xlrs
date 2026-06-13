@@ -37,6 +37,8 @@ interface LiveState {
   txBattMv: string;
   rxBattMv: string;
   txPresent: boolean;
+  safetyHold: boolean;
+  haveChannels: boolean;
 }
 
 interface BindingInfo {
@@ -139,6 +141,19 @@ document.addEventListener("input", (event) => {
     updateBindingButtonState();
     return;
   }
+
+  const configPath = target.dataset.configPath;
+  if (configPath) {
+    updateConfig(configPath, readInputValue(target));
+    syncConfigControls(configPath, target);
+    return;
+  }
+
+  const filterKey = target.dataset.filterKey as keyof FilterConfig | undefined;
+  if (filterKey) {
+    updateFilter(filterKey, readInputValue(target));
+    syncMirroredControls(`[data-filter-key="${cssEscape(filterKey)}"]`, target);
+  }
 });
 
 document.addEventListener("submit", (event) => {
@@ -158,18 +173,22 @@ document.addEventListener("change", (event) => {
   const configPath = target.dataset.configPath;
   if (configPath) {
     updateConfig(configPath, readInputValue(target));
-    ui.rc.dirty = true;
-    ui.rc.dirtyFields.add(configPath);
-    render();
+    syncConfigControls(configPath, target);
+    void persistConfigPath(configPath).catch((error: unknown) => {
+      setStatus(errorToString(error), "bad");
+      scheduleRender();
+    });
     return;
   }
 
   const filterKey = target.dataset.filterKey as keyof FilterConfig | undefined;
   if (filterKey) {
     updateFilter(filterKey, readInputValue(target));
-    ui.rc.dirty = true;
-    markDirtyFilterFields(filterKey);
-    render();
+    syncMirroredControls(`[data-filter-key="${cssEscape(filterKey)}"]`, target);
+    void persistFilterChange(filterKey).catch((error: unknown) => {
+      setStatus(errorToString(error), "bad");
+      scheduleRender();
+    });
   }
 });
 
@@ -214,7 +233,8 @@ function createSession(key: DeviceKey, label: string): DeviceSession {
   });
   transport.on("message", ({ message }) => {
     if (isLiveStateMessage(message)) {
-      session.state = normalizeState(message.fields);
+      if (message.kind === "state") session.state = normalizeState(message.fields);
+      else mergeLiveStateFields(session, message.fields);
       queueLiveStateUpdate(session);
       return;
     }
@@ -254,7 +274,7 @@ function render(): void {
       <nav class="tabs" aria-label="WebUI screens">
         ${tabButton("calibration", "Calibration Wizard")}
         ${tabButton("channels", "Channels")}
-        ${tabButton("filters", "Filters / Save")}
+        ${tabButton("filters", "Filters")}
         ${tabButton("binding", "Binding Wizard")}
       </nav>
 
@@ -313,30 +333,45 @@ function connectionPanel(session: DeviceSession): string {
 }
 
 function liveState(session: DeviceSession): string {
-  if (!session.state) return `<p class="muted state-empty" data-live-state="${session.key}">No live state yet.</p>`;
+  const state = session.state;
   return `
     <div class="live-grid" data-live-state="${session.key}">
-      <div><span>ADC</span><strong data-live-field="adc">${escapeHtml(session.state.adc.join(", ") || "-")}</strong></div>
-      <div><span>Channels</span><strong data-live-field="ch">${escapeHtml(session.state.ch.join(", ") || "-")}</strong></div>
-      <div><span>Toggles</span><strong data-live-field="toggles">${escapeHtml(session.state.toggles.join(", ") || "-")}</strong></div>
-      <div><span>Link</span><strong data-live-field="link">${liveLinkText(session.state)}</strong></div>
-      <div><span>Battery</span><strong data-live-field="battery">${liveBatteryText(session.state)}</strong></div>
+      <div><span>ADC</span><strong data-live-field="adc">${escapeHtml(state?.adc.join(", ") || "-")}</strong></div>
+      <div><span>Filtered</span><strong data-live-field="adc_filtered">${escapeHtml(state?.adcFiltered.join(", ") || "-")}</strong></div>
+      <div><span>Channels</span><strong data-live-field="ch">${escapeHtml(state?.ch.join(", ") || "-")}</strong></div>
+      <div><span>Toggles</span><strong data-live-field="toggles">${escapeHtml(state?.toggles.join(", ") || "-")}</strong></div>
+      <div><span>Safety</span><strong data-live-field="safety">${state ? liveSafetyText(state) : "-"}</strong></div>
+      <div><span>Link</span><strong data-live-field="link">${state ? liveLinkText(state) : "-"}</strong></div>
+      <div><span>Battery</span><strong data-live-field="battery">${state ? liveBatteryText(state) : "-"}</strong></div>
     </div>
   `;
+}
+
+function queueLiveStateUpdate(session: DeviceSession): void {
+  liveStateDirty.add(session.key);
+  if (liveStateFrame !== 0) return;
+  liveStateFrame = window.requestAnimationFrame(() => {
+    liveStateFrame = 0;
+    const sessions = Array.from(liveStateDirty).map((key) => ui[key]);
+    liveStateDirty.clear();
+    sessions.forEach(updateLiveStatePanel);
+  });
 }
 
 function updateLiveStatePanel(session: DeviceSession): void {
   if (!session.state) return;
   const root = document.querySelector<HTMLElement>(`[data-live-state="${session.key}"]`);
-  if (!root || root.classList.contains("state-empty")) {
-    scheduleRender();
-    return;
+  if (root) {
+    setLiveField(root, "adc", session.state.adc.join(", ") || "-");
+    setLiveField(root, "adc_filtered", session.state.adcFiltered.join(", ") || "-");
+    setLiveField(root, "ch", session.state.ch.join(", ") || "-");
+    setLiveField(root, "toggles", session.state.toggles.join(", ") || "-");
+    setLiveField(root, "safety", liveSafetyText(session.state));
+    setLiveField(root, "link", `LQ ${session.state.lq} RSSI ${session.state.rssi} SNR ${session.state.snr}`);
+    setLiveField(root, "battery", `TX ${mv(session.state.txBattMv)} RX ${mv(session.state.rxBattMv)}`);
   }
-  setLiveField(root, "adc", session.state.adc.join(", ") || "-");
-  setLiveField(root, "ch", session.state.ch.join(", ") || "-");
-  setLiveField(root, "toggles", session.state.toggles.join(", ") || "-");
-  setLiveField(root, "link", `LQ ${session.state.lq} RSSI ${session.state.rssi} SNR ${session.state.snr}`);
-  setLiveField(root, "battery", `TX ${mv(session.state.txBattMv)} RX ${mv(session.state.rxBattMv)}`);
+  updateLiveTables(session);
+  updateStickMonitors(session);
 }
 
 function setLiveField(root: HTMLElement, field: string, value: string): void {
@@ -352,6 +387,16 @@ function liveBatteryText(state: LiveState): string {
   return escapeHtml(`TX ${mv(state.txBattMv)} RX ${mv(state.rxBattMv)}`);
 }
 
+function liveSafetyText(state: LiveState): string {
+  if (state.safetyHold) return "hold active";
+  return state.haveChannels ? "live" : "waiting";
+}
+
+function stickSafetyText(state: LiveState): string {
+  if (state.safetyHold) return "Safety hold active: preview moves, CRSF output stays disarmed";
+  return state.haveChannels ? "Mapped channels live" : "Waiting for live channels";
+}
+
 function terminalPanel(session: DeviceSession): string {
   return `
     <section class="panel terminal-panel">
@@ -359,7 +404,7 @@ function terminalPanel(session: DeviceSession): string {
         <h2>${session.label} terminal</h2>
         <button class="secondary" data-action="clear-log" data-device="${session.key}">Clear</button>
       </div>
-      <pre class="terminal">${escapeHtml(session.logLines.join("\n"))}</pre>
+      <pre class="terminal" data-terminal="${session.key}">${escapeHtml(session.logLines.join("\n"))}</pre>
       <form class="send-row" data-send-device="${session.key}">
         <input type="text" name="line" autocomplete="off" placeholder="Raw command, e.g. rc.v1 hello seq=1" ${disabled(!isConnected(session))} />
         <button type="button" class="secondary" data-action="send-raw" data-device="${session.key}" ${disabled(!isConnected(session))}>Send</button>
@@ -382,7 +427,7 @@ function calibrationScreen(): string {
       <div class="panel-title split">
         <div>
           <h2>Calibration Wizard</h2>
-          <p class="muted">Center, sample full stick travel, then finish with optional save.</p>
+          <p class="muted">Center, sample full stick travel, then finish. Manual edits persist immediately.</p>
         </div>
         <button class="secondary" data-action="load-config" ${disabled(!isConnected(ui.rc))}>Load current config</button>
       </div>
@@ -399,24 +444,27 @@ function calibrationScreen(): string {
         </li>
         <li>
           <strong>3. Finish</strong>
-          <span>Return sticks to center, then apply or apply and persist.</span>
+          <span>Return sticks to center, then finish and save calibration.</span>
           <span class="inline-actions">
-            <button data-action="cal-finish" data-save="0" ${disabled(!isConnected(ui.rc))}>Apply only</button>
-            <button data-action="cal-finish" data-save="1" ${disabled(!isConnected(ui.rc))}>Apply + save</button>
+            <button data-action="cal-finish" ${disabled(!isConnected(ui.rc))}>Finish calibration</button>
           </span>
         </li>
       </ol>
+      ${stickMonitor(ui.rc)}
+      ${filterTuningPanel("Calibration filter tuning")}
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Axis</th><th>Min</th><th>Center</th><th>Max</th><th>Live ADC</th></tr></thead>
+          <thead><tr><th>Axis</th><th>Min</th><th>Center</th><th>Max</th><th>Raw ADC</th><th>Filtered ADC</th><th>Output</th></tr></thead>
           <tbody>
             ${AXES.map((axis, index) => `
               <tr>
                 <td>${axis}</td>
-                <td>${config.calMin[index] ?? "-"}</td>
-                <td>${config.calCenter[index] ?? "-"}</td>
-                <td>${config.calMax[index] ?? "-"}</td>
-                <td>${ui.rc.state?.adc[index] ?? "-"}</td>
+                <td>${calibrationControl(`cal.min.${index}`, config.calMin[index] ?? 0)}</td>
+                <td>${calibrationControl(`cal.center.${index}`, config.calCenter[index] ?? 2048)}</td>
+                <td>${calibrationControl(`cal.max.${index}`, config.calMax[index] ?? 4095)}</td>
+                <td data-live-adc-index="${index}">${ui.rc.state?.adc[index] ?? "-"}</td>
+                <td data-live-adc-filtered-index="${index}">${ui.rc.state?.adcFiltered[index] ?? "-"}</td>
+                <td data-live-ch-index="${index}">${ui.rc.state?.ch[index] ?? "-"}</td>
               </tr>
             `).join("")}
           </tbody>
@@ -433,10 +481,12 @@ function channelsScreen(): string {
       <div class="panel-title split">
         <div>
           <h2>Channel Mapping, Invert, Deadzone, Trim, Cutoffs</h2>
-          <p class="muted">Edit locally, then apply to send <code>set_config</code> updates and <code>apply</code>.</p>
+          <p class="muted">Changes apply to runtime output immediately. Use Save after verification to persist to EEPROM.</p>
         </div>
         <button class="secondary" data-action="load-config" ${disabled(!isConnected(ui.rc))}>Reload</button>
       </div>
+
+      ${stickMonitor(ui.rc)}
 
       <h3>Axis setup</h3>
       <div class="table-wrap">
@@ -453,8 +503,6 @@ function channelsScreen(): string {
           <tbody>${CHANNELS.map((channel, index) => channelRow(channel, index, config)).join("")}</tbody>
         </table>
       </div>
-
-      ${applyPanel()}
     </section>
   `;
 }
@@ -470,7 +518,7 @@ function axisRow(axis: string, index: number, config: RcConfig): string {
       </td>
       <td><input type="checkbox" data-config-path="axis.invert.${index}" ${checked(config.invert[index] === 1)} /></td>
       <td><input type="number" min="0" max="512" data-config-path="axis.deadzone.${index}" value="${config.deadzone[index] ?? 0}" /></td>
-      <td>${ui.rc.state?.adc[index] ?? "-"}</td>
+      <td data-live-adc-index="${index}">${ui.rc.state?.adc[index] ?? "-"}</td>
     </tr>
   `;
 }
@@ -482,61 +530,112 @@ function channelRow(channel: string, index: number, config: RcConfig): string {
       <td><input type="number" min="-500" max="500" data-config-path="channel.trim.${index}" value="${config.trim[index] ?? 0}" /></td>
       <td><input type="number" min="0" max="2048" data-config-path="channel.cutoff_min.${index}" value="${config.cutoffMin[index] ?? 172}" /></td>
       <td><input type="number" min="0" max="2048" data-config-path="channel.cutoff_max.${index}" value="${config.cutoffMax[index] ?? 1811}" /></td>
-      <td>${ui.rc.state?.ch[index] ?? "-"}</td>
+      <td data-live-ch-index="${index}">${ui.rc.state?.ch[index] ?? "-"}</td>
     </tr>
   `;
 }
 
+function stickMonitor(session: DeviceSession): string {
+  return `
+    <div class="stick-monitor" data-stick-monitor="${session.key}">
+      <div class="stick-status ${session.state?.safetyHold ? "warn" : ""}" data-stick-safety>
+        ${session.state ? stickSafetyText(session.state) : "Waiting for live channels"}
+      </div>
+      <div class="stick-pair">
+        ${stickPad("left", "Left stick", "Throttle", "Rudder", session.state)}
+        ${stickPad("right", "Right stick", "Elevator", "Aileron", session.state)}
+      </div>
+      <div class="channel-bars">
+        ${[0, 1, 2, 3].map((index) => channelBar(index, session.state?.ch[index])).join("")}
+      </div>
+    </div>
+  `;
+}
+
+function stickPad(id: "left" | "right", title: string, xLabel: string, yLabel: string, state: LiveState | null): string {
+  const position = stickPosition(id, state);
+  return `
+    <div class="stick-readout">
+      <div class="stick-title">
+        <strong>${title}</strong>
+        <span>${xLabel} / ${yLabel}</span>
+      </div>
+      <div class="stick-pad">
+        <span class="stick-axis horizontal"></span>
+        <span class="stick-axis vertical"></span>
+        <span class="stick-dot" data-stick-dot="${id}" style="left: ${position.x}%; top: ${position.y}%"></span>
+      </div>
+    </div>
+  `;
+}
+
+function channelBar(index: number, value: number | undefined): string {
+  const percent = crsfPercent(value, 0);
+  return `
+    <div class="channel-bar" data-live-bar-index="${index}">
+      <span>${CHANNELS[index]}</span>
+      <div class="bar-track"><span class="bar-fill" data-live-bar-fill style="width: ${percent}%"></span></div>
+      <strong data-live-bar-value>${value ?? "-"}</strong>
+    </div>
+  `;
+}
+
 function filtersScreen(): string {
-  const filter = ui.rc.config.filter;
   return `
     <section class="panel screen-panel">
       <div class="panel-title split">
         <div>
-          <h2>Filters, Apply, Save, Defaults</h2>
-          <p class="muted">Filter controls write both named fields where available and the compact <code>filter</code> array.</p>
+          <h2>Filters and Defaults</h2>
+          <p class="muted">Filter changes apply to runtime output immediately. Use Save after verification to persist to EEPROM.</p>
         </div>
-        <span class="tag ${ui.rc.dirty ? "warn" : "ok"}">${ui.rc.dirty ? "edited locally" : "in sync"}</span>
+        <span class="tag ok">live apply</span>
       </div>
 
-      <div class="form-grid">
-        <label>Oversample level
-          <input type="number" min="0" max="64" data-filter-key="oversample" value="${filter.oversample}" />
-        </label>
-        <label>Low-pass level
-          <input type="number" min="0" max="100" data-filter-key="lowPass" value="${filter.lowPass}" />
-        </label>
-        <label class="check">
-          <input type="checkbox" data-filter-key="temporalBlend" ${checked(filter.temporalBlend)} />
-          Temporal blend
-        </label>
-        <label class="check">
-          <input type="checkbox" data-filter-key="highPass" ${checked(filter.highPass)} />
-          High-pass drift filter
-        </label>
-      </div>
-
-      ${applyPanel()}
+      ${filterTuningPanel("Filter tuning")}
 
       <div class="danger-zone">
         <h3>Defaults</h3>
-        <p class="muted">Sends <code>reset_defaults target=rc_config</code>, applies, then reloads config.</p>
+        <p class="muted">Sends <code>reset_defaults target=rc_config</code>, persists defaults, then reloads config.</p>
         <button class="danger" data-action="defaults" ${disabled(!isConnected(ui.rc))}>Reset RC config defaults</button>
       </div>
     </section>
   `;
 }
 
-function applyPanel(): string {
+function calibrationControl(path: string, value: number): string {
   return `
-    <div class="apply-panel">
-      <div>
-        <strong>${ui.rc.dirty ? "Unsaved local edits" : "No local edits"}</strong>
-        <p class="muted">Apply updates runtime config. Save persists the active config on the device.</p>
-      </div>
-      <div class="actions">
-        <button data-action="apply-config" ${disabled(!isConnected(ui.rc))}>Apply edited config</button>
-        <button class="secondary" data-action="save-config" ${disabled(!isConnected(ui.rc))}>Save</button>
+    <div class="range-control">
+      <input type="range" min="0" max="4095" step="1" data-config-path="${path}" value="${value}" />
+      <input type="number" min="0" max="4095" data-config-path="${path}" value="${value}" />
+    </div>
+  `;
+}
+
+function filterTuningPanel(title: string): string {
+  const filter = ui.rc.config.filter;
+  return `
+    <div class="filter-tuning">
+      <h3>${title}</h3>
+      <div class="form-grid">
+        <label>Oversample level
+          <input type="number" min="1" max="32" data-filter-key="oversample" value="${filter.oversample}" />
+        </label>
+        <label>Low-pass aggressiveness
+          <span class="range-control">
+            <input type="range" min="0" max="100" step="1" data-filter-key="lowPass" value="${filter.lowPass}" />
+            <input type="number" min="0" max="100" data-filter-key="lowPass" value="${filter.lowPass}" />
+          </span>
+        </label>
+        <label>High-pass aggressiveness
+          <span class="range-control">
+            <input type="range" min="0" max="100" step="1" data-filter-key="highPass" value="${filter.highPass}" />
+            <input type="number" min="0" max="100" data-filter-key="highPass" value="${filter.highPass}" />
+          </span>
+        </label>
+        <label class="check">
+          <input type="checkbox" data-filter-key="temporalBlend" ${checked(filter.temporalBlend)} />
+          Temporal blend
+        </label>
       </div>
     </div>
   `;
@@ -633,7 +732,7 @@ async function handleAction(target: HTMLElement): Promise<void> {
   if (action === "defaults") await resetDefaults();
   if (action === "cal-start") await calibrationStart();
   if (action === "cal-sample") await calibrationSample();
-  if (action === "cal-finish") await calibrationFinish(target.dataset.save === "1");
+  if (action === "cal-finish") await calibrationFinish();
   if (action === "tx-hello") await txHello();
   if (action === "binding-get") await bindingCommand(target.dataset.target as BindingTarget, "get");
   if (action === "binding-set") await bindingCommand(target.dataset.target as BindingTarget, "set");
@@ -653,19 +752,28 @@ async function discover(session: DeviceSession): Promise<void> {
   session.info = { ...response.fields };
   collectCaps(session, response.fields.caps);
   setStatus(`${session.label} discovered as ${response.fields.role ?? "unknown"}.`, "ok");
+  render();
 }
 
 async function streamState(session: DeviceSession): Promise<void> {
   const enable = !session.streamEnabled;
-  session.streamEnabled = enable;
   if (enable) {
-    await session.transport.streamState(250, false).catch(() => undefined);
-    startStatePolling(session);
+    stopStatePolling(session);
+    try {
+      await session.transport.streamState(100, true);
+      session.streamEnabled = true;
+      setStatus(`${session.label} live state streaming enabled.`, "ok");
+    } catch (error) {
+      session.streamEnabled = true;
+      startStatePolling(session);
+      setStatus(`${session.label} stream_state failed; using controlled polling fallback: ${errorToString(error)}`, "warn");
+    }
   } else {
+    session.streamEnabled = false;
     stopStatePolling(session);
     await session.transport.streamState(250, false).catch(() => undefined);
+    setStatus(`${session.label} live state stopped.`, "ok");
   }
-  setStatus(`${session.label} live state ${enable ? "polling enabled" : "polling stopped"}.`, "ok");
   render();
 }
 
@@ -677,7 +785,7 @@ function startStatePolling(session: DeviceSession): void {
     try {
       const response = await session.transport.getState();
       session.state = normalizeState(response.fields);
-      updateLiveStatePanel(session);
+      queueLiveStateUpdate(session);
     } catch (error) {
       appendLog(session, `! state poll: ${errorToString(error)}`);
     } finally {
@@ -710,57 +818,99 @@ async function loadConfig(): Promise<void> {
   ui.rc.dirty = false;
   ui.rc.dirtyFields.clear();
   setStatus("Loaded RC handset config.", "ok");
+  render();
 }
 
 async function applyConfig(): Promise<void> {
-  const fields = collectConfigFields(ui.rc.config, ui.rc.dirtyFields);
+  const fields = collectConfigFields(ui.rc.config);
   if (!fields.length) {
-    setStatus("No local RC config edits to apply.", "info");
+    setStatus("No RC config fields to save.", "info");
     return;
   }
   for (const [field, value] of fields) {
     await ui.rc.transport.setConfig(field, value);
   }
-  await ui.rc.transport.apply();
   ui.rc.dirty = false;
   ui.rc.dirtyFields.clear();
-  setStatus("Applied edited config. Use Save to persist.", "ok");
+  await refreshStateSnapshot();
+  setStatus("Applied RC config to runtime. Use Save to persist after verification.", "ok");
+  render();
 }
 
 async function saveConfig(): Promise<void> {
+  if (ui.rc.dirty) {
+    await applyConfig();
+  }
   await ui.rc.transport.save();
-  setStatus("Saved current RC config.", "ok");
+  await refreshStateSnapshot();
+  setStatus("Saved current RC config to EEPROM.", "ok");
+  render();
+}
+
+async function persistConfigPath(path: string): Promise<void> {
+  const [field, value] = configCommandForPath(path);
+  await ui.rc.transport.setConfig(field, value);
+  ui.rc.dirty = false;
+  ui.rc.dirtyFields.clear();
+  await refreshStateSnapshot();
+  setStatus("Applied RC config to runtime. Use Save to persist after verification.", "ok");
+}
+
+async function persistFilterChange(_key: keyof FilterConfig): Promise<void> {
+  await ui.rc.transport.setConfig("filter", filterConfigValue());
+  ui.rc.dirty = false;
+  ui.rc.dirtyFields.clear();
+  await refreshStateSnapshot();
+  setStatus("Applied filter config to runtime. Use Save to persist after verification.", "ok");
+}
+
+async function refreshStateSnapshot(): Promise<void> {
+  if (!isConnected(ui.rc)) return;
+  const response = await ui.rc.transport.getState();
+  ui.rc.state = normalizeState(response.fields);
+  queueLiveStateUpdate(ui.rc);
 }
 
 async function resetDefaults(): Promise<void> {
   await ui.rc.transport.resetDefaults("rc_config");
-  await ui.rc.transport.apply();
   await loadConfig();
-  setStatus("Reset defaults, applied, and reloaded RC config.", "ok");
+  await refreshStateSnapshot();
+  setStatus("Reset defaults, saved, and reloaded RC config.", "ok");
+  render();
 }
 
 async function calibrationStart(): Promise<void> {
-  await ui.rc.transport.calibrationStart();
+  const response = await ui.rc.transport.calibrationStart();
+  mergeLiveStateFields(ui.rc, response.fields);
+  queueLiveStateUpdate(ui.rc);
   setStatus("Calibration started. Move sticks through full travel.", "ok");
+  render();
 }
 
 async function calibrationSample(): Promise<void> {
-  await ui.rc.transport.calibrationSample();
+  const sample = await ui.rc.transport.calibrationSample();
+  mergeCalibrationFields(ui.rc, sample.fields);
+  mergeLiveStateFields(ui.rc, sample.fields);
   const response = await ui.rc.transport.getState();
   ui.rc.state = normalizeState(response.fields);
+  queueLiveStateUpdate(ui.rc);
   setStatus("Captured calibration sample.", "ok");
+  render();
 }
 
-async function calibrationFinish(save: boolean): Promise<void> {
-  await ui.rc.transport.calibrationFinish(save);
+async function calibrationFinish(): Promise<void> {
+  await ui.rc.transport.calibrationFinish(true);
   await loadConfig();
-  setStatus(save ? "Calibration finished and saved." : "Calibration finished and applied.", "ok");
+  await refreshStateSnapshot();
+  setStatus("Calibration finished and saved.", "ok");
+  render();
 }
 
 async function txHello(): Promise<void> {
   const response = await ui.rc.transport.txHello();
   ui.rc.txInfo = { ...response.fields };
   setStatus(response.fields.tx_present === "1" ? "Attached TX discovered through RC USB." : "TX missing behind RC USB.", response.fields.tx_present === "1" ? "ok" : "warn");
+  render();
 }
 
 async function bindingCommand(target: BindingTarget, command: "get" | "set" | "verify" | "clear"): Promise<void> {
@@ -773,6 +923,7 @@ async function bindingCommand(target: BindingTarget, command: "get" | "set" | "v
 
   session.binding = normalizeBinding(response.fields);
   setStatus(`${target.toUpperCase()} binding ${command} complete.`, "ok");
+  render();
 }
 
 function applyMessage(session: DeviceSession, message: RcMessage): void {
@@ -787,6 +938,141 @@ function applyMessage(session: DeviceSession, message: RcMessage): void {
     session.dirtyFields.clear();
   }
   if (message.kind === "binding") session.binding = normalizeBinding(message.fields);
+}
+
+function isLiveStateMessage(message: RcMessage): boolean {
+  return message.kind === "state" ||
+    message.fields.adc !== undefined ||
+    message.fields.adc_filtered !== undefined ||
+    message.fields.ch !== undefined ||
+    message.fields.toggles !== undefined ||
+    message.fields.safety_hold !== undefined;
+}
+
+function mergeLiveStateFields(session: DeviceSession, fields: Record<string, string>): void {
+  const current = session.state ?? emptyLiveState();
+  session.state = {
+    ...current,
+    adc: fields.adc ? parseNumberArray(fields.adc, current.adc) : current.adc,
+    adcFiltered: fields.adc_filtered ? parseNumberArray(fields.adc_filtered, current.adcFiltered) : current.adcFiltered,
+    ch: fields.ch ? parseNumberArray(fields.ch, current.ch) : current.ch,
+    toggles: fields.toggles ? parseNumberArray(fields.toggles, current.toggles) : current.toggles,
+    lq: fields.lq ?? current.lq,
+    rssi: fields.rssi ?? current.rssi,
+    snr: fields.snr ?? current.snr,
+    txBattMv: fields.tx_batt_mv ?? current.txBattMv,
+    rxBattMv: fields.rx_batt_mv ?? current.rxBattMv,
+    txPresent: fields.tx_present === undefined ? current.txPresent : boolField(fields.tx_present),
+    safetyHold: fields.safety_hold === undefined ? current.safetyHold : boolField(fields.safety_hold),
+    haveChannels: fields.have_channels === undefined ? current.haveChannels : boolField(fields.have_channels),
+  };
+}
+
+function mergeCalibrationFields(session: DeviceSession, fields: Record<string, string>): void {
+  if (fields.cal_min) session.config.calMin = parseNumberArray(fields.cal_min, session.config.calMin);
+  if (fields.cal_center) session.config.calCenter = parseNumberArray(fields.cal_center, session.config.calCenter);
+  if (fields.cal_max) session.config.calMax = parseNumberArray(fields.cal_max, session.config.calMax);
+}
+
+function emptyLiveState(): LiveState {
+  return {
+    adc: [],
+    adcFiltered: [],
+    ch: [],
+    toggles: [],
+    lq: "-",
+    rssi: "-",
+    snr: "-",
+    txBattMv: "",
+    rxBattMv: "",
+    txPresent: false,
+    safetyHold: false,
+    haveChannels: false,
+  };
+}
+
+function updateLiveTables(session: DeviceSession): void {
+  if (session.key !== "rc" || !session.state) return;
+  updateIndexedText("[data-live-adc-index]", session.state.adc);
+  updateIndexedText("[data-live-adc-filtered-index]", session.state.adcFiltered);
+  updateIndexedText("[data-live-ch-index]", session.state.ch);
+}
+
+function updateIndexedText(selector: string, values: number[]): void {
+  document.querySelectorAll<HTMLElement>(selector).forEach((element) => {
+    const indexText = element.dataset.liveAdcIndex ?? element.dataset.liveAdcFilteredIndex ?? element.dataset.liveChIndex;
+    const index = Number(indexText);
+    element.textContent = Number.isInteger(index) && values[index] !== undefined ? String(values[index]) : "-";
+  });
+}
+
+function syncConfigControls(path: string, source: HTMLInputElement | HTMLSelectElement): void {
+  const [group, , indexText] = path.split(".");
+  if (group === "cal") {
+    const index = Number(indexText);
+    if (Number.isInteger(index)) {
+      syncMirroredControls(`[data-config-path="cal.min.${index}"]`, source, ui.rc.config.calMin[index]);
+      syncMirroredControls(`[data-config-path="cal.center.${index}"]`, source, ui.rc.config.calCenter[index]);
+      syncMirroredControls(`[data-config-path="cal.max.${index}"]`, source, ui.rc.config.calMax[index]);
+      return;
+    }
+  }
+  syncMirroredControls(`[data-config-path="${cssEscape(path)}"]`, source);
+}
+
+function syncMirroredControls(selector: string, source: HTMLInputElement | HTMLSelectElement, value?: string | number | boolean): void {
+  const nextValue = value ?? readInputValue(source);
+  document.querySelectorAll<HTMLInputElement | HTMLSelectElement>(selector).forEach((element) => {
+    if (element === source && value === undefined) return;
+    if (element instanceof HTMLInputElement && element.type === "checkbox") {
+      element.checked = Boolean(nextValue);
+      return;
+    }
+    element.value = String(nextValue);
+  });
+}
+
+function updateStickMonitors(session: DeviceSession): void {
+  if (!session.state) return;
+  const state = session.state;
+  document.querySelectorAll<HTMLElement>(`[data-stick-monitor="${session.key}"]`).forEach((root) => {
+    const safety = root.querySelector<HTMLElement>("[data-stick-safety]");
+    if (safety) {
+      safety.textContent = stickSafetyText(state);
+      safety.classList.toggle("warn", state.safetyHold);
+    }
+    for (const stick of ["left", "right"] as const) {
+      const dot = root.querySelector<HTMLElement>(`[data-stick-dot="${stick}"]`);
+      const position = stickPosition(stick, state);
+      if (dot) {
+        dot.style.left = `${position.x}%`;
+        dot.style.top = `${position.y}%`;
+      }
+    }
+    root.querySelectorAll<HTMLElement>("[data-live-bar-index]").forEach((bar) => {
+      const index = Number(bar.dataset.liveBarIndex);
+      const value = Number.isInteger(index) ? session.state?.ch[index] : undefined;
+      const fill = bar.querySelector<HTMLElement>("[data-live-bar-fill]");
+      const label = bar.querySelector<HTMLElement>("[data-live-bar-value]");
+      if (fill) fill.style.width = `${crsfPercent(value, 0)}%`;
+      if (label) label.textContent = value === undefined ? "-" : String(value);
+    });
+  });
+}
+
+function stickPosition(id: "left" | "right", state: LiveState | null): { x: number; y: number } {
+  const xIndex = id === "left" ? 3 : 1;
+  const yIndex = id === "left" ? 2 : 0;
+  return {
+    x: crsfPercent(state?.ch[xIndex]),
+    y: 100 - crsfPercent(state?.ch[yIndex]),
+  };
+}
+
+function crsfPercent(value: number | undefined, fallback = 50): number {
+  if (!Number.isFinite(value)) return fallback;
+  const clamped = Math.min(CRSF_RAW_MAX, Math.max(CRSF_RAW_MIN, Number(value)));
+  return Math.round(((clamped - CRSF_RAW_MIN) * 10000) / (CRSF_RAW_MAX - CRSF_RAW_MIN)) / 100;
 }
 
 function normalizeConfig(fields: Record<string, string>): RcConfig {
@@ -806,7 +1092,7 @@ function normalizeConfig(fields: Record<string, string>): RcConfig {
       oversample: numberField(filter[0], defaultConfig.filter.oversample),
       lowPass: numberField(fields["filter.low_pass"] ?? fields.low_pass ?? filter[1], defaultConfig.filter.lowPass),
       temporalBlend: boolField(filter[2]),
-      highPass: boolField(fields["filter.high_pass"] ?? fields.high_pass ?? filter[3]),
+      highPass: numberField(fields["filter.high_pass"] ?? fields.high_pass ?? filter[3], defaultConfig.filter.highPass),
     },
   };
 }
@@ -814,6 +1100,7 @@ function normalizeConfig(fields: Record<string, string>): RcConfig {
 function normalizeState(fields: Record<string, string>): LiveState {
   return {
     adc: parseNumberArray(fields.adc, []),
+    adcFiltered: parseNumberArray(fields.adc_filtered, []),
     ch: parseNumberArray(fields.ch, []),
     toggles: parseNumberArray(fields.toggles, []),
     lq: fields.lq ?? "-",
@@ -822,6 +1109,8 @@ function normalizeState(fields: Record<string, string>): LiveState {
     txBattMv: fields.tx_batt_mv ?? "",
     rxBattMv: fields.rx_batt_mv ?? "",
     txPresent: boolField(fields.tx_present),
+    safetyHold: boolField(fields.safety_hold),
+    haveChannels: fields.have_channels === undefined ? fields.ch !== undefined : boolField(fields.have_channels),
   };
 }
 
@@ -840,9 +1129,11 @@ function collectConfigFields(config: RcConfig, onlyFields?: Set<string>): Array<
   const fields: Array<[string, string | number]> = [];
   const include = (field: string) => !onlyFields || onlyFields.has(field);
   for (let index = 0; index < 4; index += 1) {
-    pushConfigField(fields, include, `cal.min.${index}`, config.calMin[index] ?? defaultConfig.calMin[index]);
-    pushConfigField(fields, include, `cal.center.${index}`, config.calCenter[index] ?? defaultConfig.calCenter[index]);
-    pushConfigField(fields, include, `cal.max.${index}`, config.calMax[index] ?? defaultConfig.calMax[index]);
+    pushConfigField(fields, include, `cal.axis.${index}`, [
+      config.calMin[index] ?? defaultConfig.calMin[index],
+      config.calCenter[index] ?? defaultConfig.calCenter[index],
+      config.calMax[index] ?? defaultConfig.calMax[index],
+    ].join(","));
     pushConfigField(fields, include, `axis.invert.${index}`, config.invert[index] ? 1 : 0);
     pushConfigField(fields, include, `axis.deadzone.${index}`, config.deadzone[index] ?? 0);
     pushConfigField(fields, include, `axis.function.${index}`, config.functions[index] ?? index);
@@ -852,15 +1143,39 @@ function collectConfigFields(config: RcConfig, onlyFields?: Set<string>): Array<
     pushConfigField(fields, include, `channel.cutoff_min.${index}`, config.cutoffMin[index] ?? 172);
     pushConfigField(fields, include, `channel.cutoff_max.${index}`, config.cutoffMax[index] ?? 1811);
   }
-  if (include("filter.low_pass")) fields.push(["filter.low_pass", config.filter.lowPass]);
-  if (include("filter.high_pass")) fields.push(["filter.high_pass", config.filter.highPass ? 1 : 0]);
-  if (include("filter")) {
-    fields.push([
-      "filter",
-      [config.filter.oversample, config.filter.lowPass, config.filter.temporalBlend ? 1 : 0, config.filter.highPass ? 1 : 0].join(","),
-    ]);
-  }
+  if (include("filter")) fields.push(["filter", filterConfigValue()]);
   return fields;
+}
+
+function configCommandForPath(path: string): [string, string | number] {
+  const [group, key, indexText] = path.split(".");
+  const index = Number(indexText);
+  if (group === "cal" && Number.isInteger(index)) {
+    return [
+      `cal.axis.${index}`,
+      [
+        ui.rc.config.calMin[index] ?? defaultConfig.calMin[index],
+        ui.rc.config.calCenter[index] ?? defaultConfig.calCenter[index],
+        ui.rc.config.calMax[index] ?? defaultConfig.calMax[index],
+      ].join(","),
+    ];
+  }
+  if (group === "axis" && Number.isInteger(index)) {
+    if (key === "function") return [path, ui.rc.config.functions[index] ?? index];
+    if (key === "invert") return [path, ui.rc.config.invert[index] ? 1 : 0];
+    if (key === "deadzone") return [path, ui.rc.config.deadzone[index] ?? 0];
+  }
+  if (group === "channel" && Number.isInteger(index)) {
+    if (key === "trim") return [path, ui.rc.config.trim[index] ?? 0];
+    if (key === "cutoff_min") return [path, ui.rc.config.cutoffMin[index] ?? 172];
+    if (key === "cutoff_max") return [path, ui.rc.config.cutoffMax[index] ?? 1811];
+  }
+  throw new Error(`Unsupported config field: ${path}`);
+}
+
+function filterConfigValue(): string {
+  const filter = ui.rc.config.filter;
+  return [filter.oversample, filter.lowPass, filter.temporalBlend ? 1 : 0, filter.highPass].join(",");
 }
 
 function pushConfigField(
@@ -903,6 +1218,12 @@ function updateConfig(path: string, value: string | number | boolean): void {
   const [group, key, indexText] = path.split(".");
   const index = Number(indexText);
   if (!Number.isInteger(index)) return;
+  if (group === "cal") {
+    if (key === "min") ui.rc.config.calMin[index] = clampInt(Number(value), 0, 4095);
+    if (key === "center") ui.rc.config.calCenter[index] = clampInt(Number(value), 0, 4095);
+    if (key === "max") ui.rc.config.calMax[index] = clampInt(Number(value), 0, 4095);
+    normalizeCalibrationAxis(index, key);
+  }
   if (group === "axis") {
     if (key === "function") ui.rc.config.functions[index] = Number(value);
     if (key === "invert") ui.rc.config.invert[index] = value ? 1 : 0;
@@ -916,11 +1237,43 @@ function updateConfig(path: string, value: string | number | boolean): void {
 }
 
 function updateFilter(key: keyof FilterConfig, value: string | number | boolean): void {
-  if (key === "temporalBlend" || key === "highPass") {
+  if (key === "temporalBlend") {
     ui.rc.config.filter[key] = Boolean(value);
   } else {
-    ui.rc.config.filter[key] = Number(value);
+    const max = key === "oversample" ? 32 : 100;
+    const min = key === "oversample" ? 1 : 0;
+    ui.rc.config.filter[key] = clampInt(Number(value), min, max);
   }
+}
+
+function normalizeCalibrationAxis(index: number, changedKey: string): void {
+  let min = ui.rc.config.calMin[index] ?? 0;
+  let center = ui.rc.config.calCenter[index] ?? 2048;
+  let max = ui.rc.config.calMax[index] ?? 4095;
+
+  min = clampInt(min, 0, 4093);
+  max = clampInt(max, 2, 4095);
+  center = clampInt(center, 1, 4094);
+
+  if (changedKey === "min") {
+    if (min >= max - 1) min = max - 2;
+    if (center <= min) center = min + 1;
+  } else if (changedKey === "max") {
+    if (max <= min + 1) max = min + 2;
+    if (center >= max) center = max - 1;
+  } else {
+    if (center <= min) center = min + 1;
+    if (center >= max) center = max - 1;
+  }
+
+  if (min < 0) min = 0;
+  if (max > 4095) max = 4095;
+  if (center <= min) center = min + 1;
+  if (center >= max) center = max - 1;
+
+  ui.rc.config.calMin[index] = min;
+  ui.rc.config.calCenter[index] = center;
+  ui.rc.config.calMax[index] = max;
 }
 
 function parseNumberArray(value: string | undefined, fallback: number[]): number[] {
@@ -956,7 +1309,17 @@ function appendLog(session: DeviceSession, line: string): void {
   if (session.logLines.length > MAX_LOG_LINES) {
     session.logLines.splice(0, session.logLines.length - MAX_LOG_LINES);
   }
-  render();
+  updateTerminalPanel(session);
+}
+
+function updateTerminalPanel(session: DeviceSession): void {
+  const terminal = document.querySelector<HTMLPreElement>(`[data-terminal="${session.key}"]`);
+  if (!terminal) {
+    scheduleRender();
+    return;
+  }
+  terminal.textContent = session.logLines.join("\n");
+  terminal.scrollTop = terminal.scrollHeight;
 }
 
 function tabButton(screen: UiState["activeScreen"], label: string): string {
@@ -970,6 +1333,11 @@ function isConnected(session: DeviceSession): boolean {
 function setStatus(message: string, level: StatusLevel): void {
   ui.statusText = message;
   ui.statusLevel = level;
+  const banner = document.querySelector<HTMLElement>(".status-banner");
+  if (banner) {
+    banner.className = `status-banner ${level}`;
+    banner.textContent = message;
+  }
 }
 
 function updateBindingButtonState(): void {
@@ -982,9 +1350,18 @@ function updateBindingButtonState(): void {
 
 function readInputValue(input: HTMLInputElement | HTMLSelectElement): string | number | boolean {
   if (input instanceof HTMLInputElement && input.type === "checkbox") return input.checked;
-  if (input instanceof HTMLInputElement && input.type === "number") return Number(input.value);
+  if (input instanceof HTMLInputElement && (input.type === "number" || input.type === "range")) return Number(input.value);
   if (input instanceof HTMLSelectElement) return Number(input.value);
   return input.value;
+}
+
+function clampInt(value: number, min: number, max: number): number {
+  if (!Number.isFinite(value)) return min;
+  return Math.round(Math.min(max, Math.max(min, value)));
+}
+
+function cssEscape(value: string): string {
+  return globalThis.CSS?.escape ? globalThis.CSS.escape(value) : value.replace(/["\\]/g, "\\$&");
 }
 
 function cloneConfig(config: RcConfig): RcConfig {

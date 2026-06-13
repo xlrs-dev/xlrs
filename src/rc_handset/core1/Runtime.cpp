@@ -93,11 +93,9 @@ ConfigSnapshot g_config = makeDefaultConfigSnapshot();
 uint8_t g_safetyResumeStableFrames = 0;
 
 void fillSafeDisarmedChannels(uint16_t channels[kRcChannelCount]) {
-    for (uint8_t i = 0; i < kRcChannelCount; ++i) channels[i] = kCrsfRawMid;
-    channels[2] = kCrsfRaw1000;
+    lora_link::fillFailsafeRcChannels(channels);
     const uint8_t throttleIndex = channelIndexForFunction(ChannelFunction::Throttle);
     if (throttleIndex < kRcChannelCount) channels[throttleIndex] = kCrsfRaw1000;
-    for (uint8_t i = 4; i < kRcChannelCount; ++i) channels[i] = kCrsfRaw1000;
 }
 
 bool channelsSafeForResume(const uint16_t channels[kRcChannelCount]) {
@@ -124,6 +122,8 @@ void refreshConfig() {
         g_inputSamplerConfig.smoothingPercent = g_config.handsetConfig.filter.smoothingPercent;
         g_inputSamplerConfig.highPassPercent = g_config.handsetConfig.filter.highPassPercent;
         g_inputSampler.configure(g_inputSamplerConfig);
+        g_inputState.haveChannels = false;
+        g_inputState.spikeGate.havePending = false;
         g_exchange.ackConfigFromCore1(g_config.generation);
     }
 }
@@ -187,18 +187,14 @@ void publishLiveState(uint32_t nowUs) {
     snapshot.lastFrameUs = nowUs;
     snapshot.haveChannels = g_inputState.haveChannels;
     snapshot.haveAdc = g_haveInputSnapshot;
+    snapshot.safetyHold = g_crsfOutputSafetyHold.load(std::memory_order_acquire);
     if (g_haveInputSnapshot) {
         for (uint8_t i = 0; i < config::kRcHandsetAxisCount; ++i) {
             snapshot.rawAdc[i] = g_lastInputSnapshot.rawAnalog[i];
             snapshot.filteredAdc[i] = g_lastInputSnapshot.analog[i];
         }
     }
-    if (g_crsfOutputSafetyHold.load(std::memory_order_acquire)) {
-        fillSafeDisarmedChannels(snapshot.channels);
-        snapshot.haveChannels = true;
-    } else {
-        memcpy(snapshot.channels, g_inputState.channels, sizeof(snapshot.channels));
-    }
+    memcpy(snapshot.channels, g_inputState.channels, sizeof(snapshot.channels));
     g_exchange.publishLiveStateFromCore1(snapshot);
 }
 

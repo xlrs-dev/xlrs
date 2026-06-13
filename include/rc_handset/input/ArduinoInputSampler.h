@@ -33,6 +33,7 @@ private:
 
     ArduinoInputSamplerConfig config_;
     uint16_t filteredAdc_[kMaxAnalogInputs];
+    uint32_t filteredAdcState_[kMaxAnalogInputs];
     bool filterReady_;
 };
 

@@ -66,14 +66,14 @@ runtime handlers:
 | --- | --- |
 | `rc.v1 hello seq=42` | Parses and echoes `seq=42`. |
 | `rc.v1 tx_hello seq=3` | Parses attached-TX discovery. |
-| `rc.v1 set_config seq=7 field=binding_phrase value=Bench%20Rig` | Decodes percent-encoded value. |
+| `rc.v1 set_config seq=7 field=cal.axis.0 value=120,2048,3900` | Parses an atomic calibration-axis update. |
 | `rc.v1 get_config field=rate` | Accepts field selector. |
-| `rc.v1 apply` | Parses runtime apply command. |
-| `rc.v1 save` | Parses persistent save command. |
+| `rc.v1 apply` | Parses compatibility apply command. |
+| `rc.v1 save` | Parses compatibility save command. |
 | `rc.v1 reset_defaults target=rc_config` | Parses target selector. |
 | `rc.v1 cal_start seq=1 field=aileron` | Parses calibration start. |
 | `rc.v1 cal_sample seq=2 field=aileron value=2048` | Parses calibration sample. |
-| `rc.v1 cal_finish seq=3 save=1` | Parses calibration finish with save flag. |
+| `rc.v1 cal_finish seq=3` | Parses calibration finish. |
 | `rc.v1 binding_set target=tx phrase=Field%20Radio` | Parses target and phrase alias. |
 | `rc.v1 binding_verify target=rx value=Field%20Radio` | Parses direct RX verification request. |
 | `rc.v2 hello` | `bad_protocol`. |
@@ -91,8 +91,11 @@ Before accepting a calibration write:
 - ADC min/max endpoints map to CRSF 1000/2000, with the derived midpoint mapping
   near CRSF midpoint.
 - Throttle low maps near CRSF low endpoint.
-- CRSF output remains in a disarmed safety hold during calibration/config apply
-  and resumes only after throttle and aux channels are low.
+- CRSF output remains in a disarmed safety hold during active calibration
+  sampling, then `cal_finish` clears the hold and applies the new mapping live.
+- Ordinary config edits/defaults save to EEPROM, publish runtime config, and do
+  not enter safety hold; channel output should continue from the newly applied
+  config without requiring an RC restart.
 - Switches report all expected positions.
 - A failed or canceled session leaves the previous calibration active.
 - Power loss during write leaves either the previous valid record or the complete

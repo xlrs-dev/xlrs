@@ -115,8 +115,9 @@ hopping for the bench with `RF_FIXED_CHANNEL` (build-time).
 
 ### Failsafe
 
-The RX stops emitting CRSF RC frames when the uplink is stale (no valid frame
-within `kFailsafeTimeoutMs`, default 250 ms), so the flight controller enters
+When the uplink is stale (no valid frame within `kFailsafeTimeoutMs`, default
+250 ms), the RX sends a 500 ms disarm burst with throttle and all AUX channels at
+1000 us, then stops emitting CRSF RC frames so the flight controller enters
 RXLOSS and owns failsafe policy. See [safety-and-failsafe.md](safety-and-failsafe.md).
 
 ## See also

@@ -101,6 +101,9 @@ uint16_t applyInvert(uint16_t value, bool invert);
 uint16_t applyTrim(uint16_t value, int16_t trim);
 uint16_t applyCutoff(uint16_t value, const ChannelCutoff& cutoff);
 uint16_t processAnalogChannel(uint16_t raw, const AnalogInputConfig& config);
+uint32_t adcToFilterState(uint16_t value);
+uint16_t adcFromFilterState(uint32_t state);
+uint32_t lowPassAdcFilterStep(uint32_t previousState, uint16_t raw, uint8_t aggressivenessPercent);
 
 uint16_t decodeDualPinThreePosition(bool firstHigh, bool secondHigh);
 uint16_t processThreePositionChannel(bool firstHigh, bool secondHigh,

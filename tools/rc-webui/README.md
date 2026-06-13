@@ -21,19 +21,20 @@ npm run dev
 Open the printed local URL, connect the relevant USB device, and use the screens:
 
 - **Calibration Wizard** sends `cal_start`, repeated `cal_sample`, and
-  `cal_finish save=<0|1>`.
+  `cal_finish`; it also has min/center/max sliders for direct EEPROM-backed
+  tuning.
 - **Channels** edits axis mapping, invert, deadzone, channel trim, and cutoffs,
-  then sends `set_config` fields followed by `apply`.
-- **Filters / Save** edits oversampling/low-pass/high-pass options, applies,
-  saves, or resets `target=rc_config` defaults.
+  saving each change to EEPROM and runtime immediately; it includes live stick
+  pads and channel bars for the two physical joysticks.
+- **Filters** edits oversampling, low-pass aggressiveness, and high-pass
+  aggressiveness with immediate EEPROM-backed runtime updates.
 - **Binding Wizard** writes TX through RC USB (`target=tx`), writes RX through
   direct RX USB (`target=rx`), and compares `uid_check` values with warnings for
   partial updates, missing checks, mismatches, and required reboot.
 
-Current firmware support: discovery, RC state, TX binding through RC USB, and
-TX/RX direct-USB binding are wired. Config editing, calibration, apply/save, and
-defaults are UI/protocol scaffolding until the corresponding firmware handlers
-are added; current firmware may reply with `unsupported_command`.
+Current firmware support: discovery, live state streaming, immediate RC config
+editing/defaults, calibration, TX binding through RC USB, and TX/RX direct-USB
+binding are wired.
 
 ## Scripts
 
@@ -69,8 +70,8 @@ Example inbound lines:
 
 ```text
 rc.v1 ok seq=1 role=rc_handset fw=0.1 caps=state,config,binding
-rc.v1 state adc=2048,2049,2001,2050 ch=992,992,172,992 lq=98 rssi=-47
-rc.v1 config cal_center=2048,2048,2048,2048 filter=4,0,0,0
+rc.v1 state adc=2048,2049,2001,2050 adc_filtered=2048,2049,2001,2050 ch=992,992,172,992 lq=98 rssi=-47
+rc.v1 config cal_center=2048,2048,2048,2048 filter=8,25,0,0
 rc.v1 binding target=tx uid=0011223344556677 uid_check=89ab persisted=1
 rc.v1 err seq=7 code=busy message=bind%20already%20active
 ```

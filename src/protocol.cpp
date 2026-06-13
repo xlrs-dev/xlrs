@@ -246,6 +246,13 @@ uint16_t clampCrsfRaw(uint16_t value) {
     return value;
 }
 
+void fillFailsafeRcChannels(uint16_t channels[kRcChannelCount]) {
+    for (uint8_t i = 0; i < kRcChannelCount; ++i) channels[i] = kCrsfRaw1000;
+    channels[0] = kCrsfRawMid;
+    channels[1] = kCrsfRawMid;
+    channels[3] = kCrsfRawMid;
+}
+
 bool sanitizeRcChannels(const uint16_t previous[kRcChannelCount], bool havePrevious,
                         uint16_t channels[kRcChannelCount]) {
     uint8_t largeJumpsToHigh = 0;

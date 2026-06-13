@@ -254,9 +254,11 @@ XLRS RX module CRSF RX: GP9
 CRSF baud: 420000
 ```
 
-If `FailsafeMode::NoPulses` is active, RX stops emitting RC channel frames after
-failsafe. This is expected and is how Betaflight/iNav-style RXLOSS is triggered.
-Link statistics may still be emitted by the app path.
+After an active uplink times out, RX sends a 500 ms disarm burst with throttle
+and all AUX channels at 1000 us, then stops emitting RC channel frames. This is
+expected and is how Betaflight/iNav-style RXLOSS is triggered after the ARM
+channel has been driven low. Link statistics may still be emitted by the app
+path.
 
 ### SX1280 Radio Wiring
 

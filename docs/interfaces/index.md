@@ -249,17 +249,9 @@ flight controller. `fc` proves the flight controller is sending telemetry back t
 the RX CRSF UART, and `fcq`/`fcdrop` show whether those frames entered XLRS
 downlink telemetry.
 
-Failsafe behavior is controlled by RF config:
-
-| Mode | Value | Behavior |
-| --- | ---: | --- |
-| `NoPulses` | `0` | Stop CRSF RC output when link is not valid |
-| `Hold` | `1` | Continue CRSF output during failsafe using the app's preset failsafe channel values |
-
-Default mode is `NoPulses`.
-
-The current RX app's failsafe preset is roll/pitch/yaw centered, throttle low,
-and channels 5-8 centered.
+After an active uplink times out, the current RX app sends a 500 ms disarm burst
+before stopping CRSF RC output. The failsafe preset is roll/pitch/yaw centered,
+throttle low, and all AUX channels at 1000 us.
 
 ## Over-the-Air Cycle
 

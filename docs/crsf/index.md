@@ -76,8 +76,8 @@ Supported RX-side CRSF features:
 | Packed RC output | Supported for OTA `rc_channel` 1-8 |
 | CRSF channels 9-16 | Emitted at midpoint |
 | Link statistics to flight controller | Supported about every 500 ms |
-| Failsafe `NoPulses` | Supported; stops RC output when link is invalid |
-| Failsafe `Hold` | Supported; continues RC output with preset failsafe channels |
+| Failsafe disarm burst | Sends roll/pitch/yaw center, throttle low, and all AUX channels at 1000 us for 500 ms after active uplink loss |
+| Post-burst RXLOSS | Stops RC output after the disarm burst |
 | Flight-controller telemetry ingestion | Supported for valid non-RC, non-link-stat CRSF frames |
 
 RX CRSF status is visible in USB serial logs:

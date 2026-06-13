@@ -208,6 +208,31 @@ uint16_t processAnalogChannel(uint16_t raw, const AnalogInputConfig& config) {
     return value;
 }
 
+uint32_t adcToFilterState(uint16_t value) {
+    static constexpr uint32_t kFilterScale = 256u;
+    if (value > kAdc12BitMax) value = kAdc12BitMax;
+    return static_cast<uint32_t>(value) * kFilterScale;
+}
+
+uint16_t adcFromFilterState(uint32_t state) {
+    static constexpr uint32_t kFilterScale = 256u;
+    uint32_t value = (state + (kFilterScale / 2u)) / kFilterScale;
+    if (value > kAdc12BitMax) value = kAdc12BitMax;
+    return static_cast<uint16_t>(value);
+}
+
+uint32_t lowPassAdcFilterStep(uint32_t previousState, uint16_t raw, uint8_t aggressivenessPercent) {
+    if (raw > kAdc12BitMax) raw = kAdc12BitMax;
+    if (aggressivenessPercent == 0) return adcToFilterState(raw);
+    if (aggressivenessPercent > 100) aggressivenessPercent = 100;
+
+    uint32_t rawWeight = 100u - static_cast<uint32_t>(aggressivenessPercent);
+    if (rawWeight == 0) rawWeight = 1u;
+    const uint32_t previousWeight = 100u - rawWeight;
+    const uint32_t rawState = adcToFilterState(raw);
+    return ((previousState * previousWeight) + (rawState * rawWeight) + 50u) / 100u;
+}
+
 uint16_t decodeDualPinThreePosition(bool firstHigh, bool secondHigh) {
     if (firstHigh && !secondHigh) return lora_link::kCrsfRaw1000;
     if (!firstHigh && secondHigh) return lora_link::kCrsfRaw2000;

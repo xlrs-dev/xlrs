@@ -742,6 +742,20 @@ static void test_channel_sanitizer_rejects_simultaneous_high_endpoint_spike() {
     TEST_ASSERT_EQUAL_UINT16(kCrsfRaw2000, channels[3]);
 }
 
+static void test_channel_sanitizer_allows_recovery_frame_without_previous() {
+    uint16_t previous[kRcChannelCount];
+    uint16_t channels[kRcChannelCount];
+    fillFailsafeRcChannels(previous);
+    fillFailsafeRcChannels(channels);
+    channels[4] = kCrsfRaw2000;
+    channels[5] = kCrsfRaw2000;
+    channels[6] = kCrsfRaw2000;
+    channels[7] = kCrsfRaw2000;
+
+    TEST_ASSERT_FALSE(sanitizeRcChannels(previous, true, channels));
+    TEST_ASSERT_TRUE(sanitizeRcChannels(previous, false, channels));
+}
+
 static void test_channel_sanitizer_accepts_single_fast_channel_move() {
     uint16_t previous[kRcChannelCount];
     uint16_t channels[kRcChannelCount];
@@ -1000,6 +1014,21 @@ static void test_failsafe_freshness_helper_uses_named_timeout() {
     TEST_ASSERT_TRUE(isLinkFresh(20u, 0xFFFFFFF0u));
 }
 
+static void test_failsafe_rc_channels_drop_throttle_and_aux_low() {
+    uint16_t channels[kRcChannelCount];
+    for (uint8_t i = 0; i < kRcChannelCount; ++i) channels[i] = kCrsfRaw2000;
+
+    fillFailsafeRcChannels(channels);
+
+    TEST_ASSERT_EQUAL_UINT16(kCrsfRawMid, channels[0]);
+    TEST_ASSERT_EQUAL_UINT16(kCrsfRawMid, channels[1]);
+    TEST_ASSERT_EQUAL_UINT16(kCrsfRaw1000, channels[2]);
+    TEST_ASSERT_EQUAL_UINT16(kCrsfRawMid, channels[3]);
+    for (uint8_t i = 4; i < kRcChannelCount; ++i) {
+        TEST_ASSERT_EQUAL_UINT16(kCrsfRaw1000, channels[i]);
+    }
+}
+
 static void test_telemetry_listen_window_is_short_and_scheduled_by_ratio() {
     TEST_ASSERT_EQUAL_UINT8(1, kTelemetryResponseListenSlots);
     TEST_ASSERT_FALSE(shouldRequestTelemetry(16, kRates[0].telemetryRatio));
@@ -1066,6 +1095,7 @@ static void test_core1_live_state_snapshot_is_latest_value() {
     state.channelSpikeHolds = 3;
     state.haveChannels = true;
     state.haveAdc = true;
+    state.safetyHold = true;
     state.rawAdc[0] = 123;
     state.filteredAdc[0] = 125;
     state.channels[0] = kCrsfRaw1000;
@@ -1086,6 +1116,7 @@ static void test_core1_live_state_snapshot_is_latest_value() {
     TEST_ASSERT_EQUAL_UINT32(3, loaded.channelSpikeHolds);
     TEST_ASSERT_TRUE(loaded.haveChannels);
     TEST_ASSERT_TRUE(loaded.haveAdc);
+    TEST_ASSERT_TRUE(loaded.safetyHold);
     TEST_ASSERT_EQUAL_UINT16(123, loaded.rawAdc[0]);
     TEST_ASSERT_EQUAL_UINT16(125, loaded.filteredAdc[0]);
     TEST_ASSERT_EQUAL_UINT16(kCrsfRawMid, loaded.channels[0]);
@@ -1186,6 +1217,30 @@ static void test_handset_three_position_toggle_trim_and_cutoff() {
                              processThreePositionChannel(false, false, config));
     TEST_ASSERT_EQUAL_UINT16(static_cast<uint16_t>(kCrsfRawMid + 100),
                              processThreePositionChannel(false, true, config));
+}
+
+static void test_handset_low_pass_zero_passes_raw_adc() {
+    uint32_t state = adcToFilterState(1000);
+
+    state = lowPassAdcFilterStep(state, 3000, 0);
+
+    TEST_ASSERT_EQUAL_UINT16(3000, adcFromFilterState(state));
+}
+
+static void test_handset_low_pass_low_aggressiveness_tracks_adc_motion() {
+    uint32_t state = adcToFilterState(1000);
+
+    state = lowPassAdcFilterStep(state, 3000, 3);
+
+    TEST_ASSERT_UINT16_WITHIN(2, 2940, adcFromFilterState(state));
+}
+
+static void test_handset_low_pass_max_aggressiveness_still_moves_adc() {
+    uint32_t state = adcToFilterState(1000);
+
+    state = lowPassAdcFilterStep(state, 3000, 100);
+
+    TEST_ASSERT_UINT16_WITHIN(1, 1020, adcFromFilterState(state));
 }
 
 static void test_handset_pipeline_integrates_existing_spike_gate() {
@@ -1317,6 +1372,52 @@ static void test_rc_handset_config_record_round_trips() {
 
     handset_config::RcHandsetConfig out{};
     TEST_ASSERT_TRUE(handset_config::decodeRcHandsetConfigRecord(record, written, out));
+    assert_rc_handset_config_equal(cfg, out);
+}
+
+static uint16_t testCrc16Ccitt(const uint8_t* data, size_t len) {
+    uint16_t crc = 0xFFFF;
+    for (size_t i = 0; i < len; ++i) {
+        crc ^= static_cast<uint16_t>(data[i]) << 8;
+        for (uint8_t bit = 0; bit < 8; ++bit) {
+            crc = (crc & 0x8000) ? static_cast<uint16_t>((crc << 1) ^ 0x1021)
+                                 : static_cast<uint16_t>(crc << 1);
+        }
+    }
+    return crc;
+}
+
+static void test_rc_handset_config_record_decodes_legacy_v1_without_high_pass() {
+    static constexpr size_t kHeaderSize = 7;
+    static constexpr size_t kLegacyPayloadSize = 105;
+    static constexpr size_t kLegacyRecordSize = kHeaderSize + kLegacyPayloadSize + 2;
+    static constexpr size_t kHighPassPayloadOffset = 90;
+
+    handset_config::RcHandsetConfig cfg = handset_config::defaultRcHandsetConfig();
+    cfg.axes[1].calibration.center = 2000;
+    cfg.channels[2].trim = 55;
+    cfg.filter.smoothingPercent = 30;
+    cfg.filter.highPassPercent = 70;
+
+    uint8_t current[handset_config::kRcHandsetConfigRecordSize];
+    size_t written = 0;
+    TEST_ASSERT_TRUE(handset_config::encodeRcHandsetConfigRecord(cfg, current, sizeof(current), written));
+
+    uint8_t legacy[kLegacyRecordSize] = {};
+    memcpy(legacy, current, kHeaderSize + kHighPassPayloadOffset);
+    legacy[4] = 1;
+    legacy[5] = static_cast<uint8_t>(kLegacyPayloadSize);
+    legacy[6] = static_cast<uint8_t>(kLegacyPayloadSize >> 8);
+    memcpy(&legacy[kHeaderSize + kHighPassPayloadOffset],
+           &current[kHeaderSize + kHighPassPayloadOffset + 1],
+           kLegacyPayloadSize - kHighPassPayloadOffset);
+    const uint16_t crc = testCrc16Ccitt(legacy, kHeaderSize + kLegacyPayloadSize);
+    legacy[kHeaderSize + kLegacyPayloadSize] = static_cast<uint8_t>(crc);
+    legacy[kHeaderSize + kLegacyPayloadSize + 1] = static_cast<uint8_t>(crc >> 8);
+
+    handset_config::RcHandsetConfig out{};
+    TEST_ASSERT_TRUE(handset_config::decodeRcHandsetConfigRecord(legacy, sizeof(legacy), out));
+    cfg.filter.highPassPercent = 0;
     assert_rc_handset_config_equal(cfg, out);
 }
 
@@ -1832,6 +1933,7 @@ int main(int argc, char** argv) {
     RUN_TEST(test_crsf_channel_round_trip);
     RUN_TEST(test_channel_sanitizer_clamps_without_rejecting_normal_frame);
     RUN_TEST(test_channel_sanitizer_rejects_simultaneous_high_endpoint_spike);
+    RUN_TEST(test_channel_sanitizer_allows_recovery_frame_without_previous);
     RUN_TEST(test_channel_sanitizer_accepts_single_fast_channel_move);
     RUN_TEST(test_spike_gate_holds_one_frame_channel_outlier);
     RUN_TEST(test_spike_gate_accepts_confirmed_large_channel_step);
@@ -1844,6 +1946,7 @@ int main(int argc, char** argv) {
     RUN_TEST(test_crsf_binding_request_and_response_frames);
     RUN_TEST(test_crsf_binding_request_encoder_and_response_parser);
     RUN_TEST(test_failsafe_freshness_helper_uses_named_timeout);
+    RUN_TEST(test_failsafe_rc_channels_drop_throttle_and_aux_low);
     RUN_TEST(test_telemetry_listen_window_is_short_and_scheduled_by_ratio);
     RUN_TEST(test_crsf_link_stats_puts_rate_in_rf_mode_not_power);
     RUN_TEST(test_core1_config_snapshot_generation_and_ack);
@@ -1855,12 +1958,16 @@ int main(int argc, char** argv) {
     RUN_TEST(test_handset_dual_pin_three_position_toggle_decoding);
     RUN_TEST(test_handset_config_builds_input_pipeline_mapping_and_limits);
     RUN_TEST(test_handset_three_position_toggle_trim_and_cutoff);
+    RUN_TEST(test_handset_low_pass_zero_passes_raw_adc);
+    RUN_TEST(test_handset_low_pass_low_aggressiveness_tracks_adc_motion);
+    RUN_TEST(test_handset_low_pass_max_aggressiveness_still_moves_adc);
     RUN_TEST(test_handset_pipeline_integrates_existing_spike_gate);
     RUN_TEST(test_rc_handset_config_defaults_are_valid);
     RUN_TEST(test_rc_handset_config_validation_rejects_invalid_fields);
     RUN_TEST(test_rc_handset_axis_calibration_from_endpoints_uses_adc_span_midpoint);
     RUN_TEST(test_rc_handset_axis_calibration_from_endpoints_rejects_small_or_invalid_span);
     RUN_TEST(test_rc_handset_config_record_round_trips);
+    RUN_TEST(test_rc_handset_config_record_decodes_legacy_v1_without_high_pass);
     RUN_TEST(test_rc_handset_config_record_rejects_crc_corruption);
     RUN_TEST(test_legacy_calibration_migration_valid_record);
     RUN_TEST(test_legacy_calibration_migration_missing_magic);

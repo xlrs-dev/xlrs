@@ -48,6 +48,9 @@ static constexpr uint32_t kDownlinkTelemetryFreshMs = 2000;
 static constexpr uint32_t kTelemetryReplyGuardUs = 1500;
 static constexpr uint8_t kAcquisitionSyncIntervalFrames = 4;
 static constexpr uint8_t kStartupCliGraceLoops = 3;
+#if LORA_RX_ROLE
+static constexpr uint32_t kRxFailsafeDisarmBurstMs = 500;
+#endif
 static constexpr int8_t kBenchTxPowerDbm = 0;
 static constexpr bool kBenchSingleFrequency = true;
 static constexpr uint8_t kSx1280OpWriteRegister = 0x18;
@@ -132,6 +135,9 @@ static uint32_t g_rxTelemetryTransmitAttempts = 0;
 static uint32_t g_rxTelemetryTransmitDone = 0;
 static uint16_t g_lastTelemetryTransmitHop = 0;
 static uint32_t g_rxAcquisitionChannelUntilMs = 0;
+static uint32_t g_rxFailsafeDisarmUntilMs = 0;
+static bool g_rxFailsafeDisarmActive = false;
+static bool g_rxFailsafeDisarmSentForLoss = false;
 static RcSpikeGate g_rxOutputSpikeGate{};
 #endif
 
@@ -266,8 +272,7 @@ static bool popRfTimerEvent(RfTimerIsrEvent& out) {
 #endif
 
 static void setDefaultChannels() {
-    for (uint8_t i = 0; i < kRcChannelCount; ++i) g_channels[i] = 992;
-    g_channels[2] = 172; // throttle low in CRSF 11-bit units
+    fillFailsafeRcChannels(g_channels);
 }
 
 static bool saveConfig() {
@@ -1041,6 +1046,23 @@ static void writeFcChannels() {
     }
 }
 
+static bool rxFailsafeDisarmBurstActive(uint32_t nowMs) {
+    if (!g_rxFailsafeDisarmActive) return false;
+    if (static_cast<int32_t>(nowMs - g_rxFailsafeDisarmUntilMs) < 0) return true;
+    g_rxFailsafeDisarmActive = false;
+    return false;
+}
+
+static void maybeStartRxFailsafeDisarmBurst(uint32_t nowMs, bool uplinkFresh) {
+    if (uplinkFresh || g_lastUplinkMs == 0 || g_rxFailsafeDisarmSentForLoss) return;
+    fillFailsafeRcChannels(g_channels);
+    g_rxOutputSpikeGate.havePending = false;
+    g_rxFailsafeDisarmActive = true;
+    g_rxFailsafeDisarmSentForLoss = true;
+    g_rxFailsafeDisarmUntilMs = nowMs + kRxFailsafeDisarmBurstMs;
+    writeFcChannels();
+}
+
 static bool acceptRxOutputCandidate(const uint16_t candidate[kRcChannelCount], bool reacquiredLink) {
     if (reacquiredLink) {
         g_rxOutputSpikeGate.havePending = false;
@@ -1170,9 +1192,12 @@ static void rxLoop() {
                 g_lastUplinkMs = nowMs;
                 updateRxSequenceStats(rxSequence);
                 acceptedFrameForLq = true;
-                if (sanitizeRcChannels(g_channels, true, candidate)) {
-                    if (acceptRxOutputCandidate(candidate, reacquired)) {
+                const bool recoveringFromFailsafe = reacquired || g_rxFailsafeDisarmSentForLoss;
+                if (sanitizeRcChannels(g_channels, !recoveringFromFailsafe, candidate)) {
+                    if (acceptRxOutputCandidate(candidate, recoveringFromFailsafe)) {
                         memcpy(g_channels, candidate, sizeof(g_channels));
+                        g_rxFailsafeDisarmActive = false;
+                        g_rxFailsafeDisarmSentForLoss = false;
                         writeFcChannels();
                     }
                 } else {
@@ -1195,10 +1220,12 @@ static void rxLoop() {
     const uint32_t nowMs = millis();
     const bool uplinkFresh = isLinkFresh(nowMs, g_lastUplinkMs);
     const bool linkFresh = uplinkFresh || isLinkFresh(nowMs, g_lastSyncMs);
+    maybeStartRxFailsafeDisarmBurst(nowMs, uplinkFresh);
+    const bool rcOutputActive = uplinkFresh || rxFailsafeDisarmBurstActive(nowMs);
     RfTimerIsrEvent timerEvent{};
     while (g_radioOp != RadioOp::Tx && popRfTimerEvent(timerEvent)) {
         if (kBenchSingleFrequency) {
-            if (timerEvent.half == static_cast<uint8_t>(rf::RxTimerHalfEvent::Tock) && uplinkFresh) {
+            if (timerEvent.half == static_cast<uint8_t>(rf::RxTimerHalfEvent::Tock) && rcOutputActive) {
                 writeFcChannels();
             }
             continue;
@@ -1207,7 +1234,7 @@ static void rxLoop() {
             static_cast<rf::RxTimerHalfEvent>(timerEvent.half), timerEvent.timestampUs, linkFresh, nowMs);
         g_hop = g_rfScheduler.fhss().index();
         applyRfTimerCorrection(timerResult);
-        if (timerEvent.half == static_cast<uint8_t>(rf::RxTimerHalfEvent::Tock) && uplinkFresh) {
+        if (timerEvent.half == static_cast<uint8_t>(rf::RxTimerHalfEvent::Tock) && rcOutputActive) {
             writeFcChannels();
         }
         if (timerResult.event == rf::RxTimerTickEvent::ReceiveFrequencyChanged) startReceiveOnHop();

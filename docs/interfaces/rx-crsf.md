@@ -27,13 +27,10 @@ USB serial diagnostics expose RX-side CRSF flow:
 | `fcage` | Age of the most recent flight-controller telemetry frame |
 | `qdrop` | RF -> RX app queue drops |
 
-Failsafe behavior is controlled by RF config:
-
-| Mode | Value | Behavior |
-| --- | ---: | --- |
-| `NoPulses` | `0` | Stop CRSF RC output when link is not valid |
-| `Hold` | `1` | Continue CRSF output during failsafe using preset failsafe channel values |
-
-Default mode is `NoPulses`.
+After at least one valid uplink, if no valid RC frame arrives within
+`kFailsafeTimeoutMs` the RX sends a 500 ms disarm burst before going silent. The
+burst uses the preset failsafe values: roll/pitch/yaw centered, throttle low, and
+all AUX channels at 1000 us. After the burst, RC output stops so the flight
+controller can enter RXLOSS.
 
 See [index.md](index.md) for the complete current interface reference.

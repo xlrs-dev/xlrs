@@ -134,6 +134,7 @@ bool isValidRateIndex(uint8_t rateIndex);
 void packRcChannels11Bit(const uint16_t channels[kRcChannelCount], uint8_t out[22]);
 void unpackRcChannels11Bit(const uint8_t in[22], uint16_t channels[kRcChannelCount]);
 uint16_t clampCrsfRaw(uint16_t value);
+void fillFailsafeRcChannels(uint16_t channels[kRcChannelCount]);
 bool sanitizeRcChannels(const uint16_t previous[kRcChannelCount], bool havePrevious,
                         uint16_t channels[kRcChannelCount]);
 bool acceptRcChannelsWithSpikeGate(const uint16_t previous[kRcChannelCount], bool havePrevious,

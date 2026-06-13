@@ -1,10 +1,12 @@
 # Safety And Failsafe
 
-Default failsafe mode is `NoPulses`.
+After an active uplink times out, the RX first emits a short CRSF RC disarm burst
+and then stops RC channel frames so the flight controller can enter RXLOSS and
+own aircraft policy.
 
-When the link is not valid and `NoPulses` is active, the RX stops emitting CRSF
-RC channel frames so the flight controller can enter RXLOSS and own aircraft
-policy. `Hold` mode is available as an explicit configuration option.
+The disarm burst lasts 500 ms. Its preset keeps roll/pitch/yaw centered, drives
+throttle low, and drives all AUX channels to 1000 us so an AUX ARM channel is not
+held high during link loss.
 
 ```mermaid
 stateDiagram-v2
@@ -24,19 +26,10 @@ stateDiagram-v2
     state FailsafeTriggered {
         [*] --> EvaluateMode
 
-        state EvaluateMode {
-            state "Default: NoPulses Mode" as NoPulses {
-                [*] --> StopRcFrame : Stop CRSF_RC_CHANNELS
-                StopRcFrame --> FC_Enters_RXLOSS : Flight Controller triggers failsafe
-                FC_Enters_RXLOSS --> GracePeriod : Emit CRSF_LINK_STATS (LQ=0) for grace window
-                GracePeriod --> StopAllOutput : Silence all CRSF output after window
-            }
-
-            state "Opt-In: Hold Mode" as Hold {
-                [*] --> UseHoldPositions : Load Preset Positions
-                UseHoldPositions --> EmitHoldRc : Emit CRSF_RC_CHANNELS with presets
-            }
-        }
+        [*] --> UseDisarmPreset : Load preset positions
+        UseDisarmPreset --> EmitDisarmBurst : Emit CRSF_RC_CHANNELS for 500 ms
+        EmitDisarmBurst --> StopRcFrame : Stop CRSF_RC_CHANNELS
+        StopRcFrame --> FC_Enters_RXLOSS : Flight Controller triggers failsafe
     }
 
     FailsafeTriggered --> Connected : Valid Uplink Frame Received (Recovery)

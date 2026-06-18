@@ -22,7 +22,8 @@ Implemented today:
 - Channels 1-8 are translated from CRSF channel units to 1000-2000 us and copied
   into the TX RF mailbox.
 - CRSF `LINK_STATISTICS` output from TX to the controller, built from internal
-  `link_stats`.
+  `link_stats`. The handset-visible frame includes RX-measured uplink RSSI/LQ/SNR
+  and TX-measured downlink RSSI/LQ/SNR when downlink telemetry is fresh.
 - CRSF device ping/device info for TX module discovery.
 - CRSF parameter read/write for critical TX RF configuration:
   - Rate.
@@ -65,6 +66,9 @@ Current limitations:
 - A dedicated XLRS CRSF RC configuration script is not implemented yet.
 - XLRS currently carries 8 OTA `rc_channel` values. CRSF channels 9-16 are parsed
   by the CRSF decoder but are not transmitted over the XLRS uplink.
+- `uplink_TX_Power` reports the active TX power as a CRSF power enum. The current
+  fixed bench power maps to the nearest supported enum; future dynamic power
+  should update the same field from the active policy.
 
 See [index.md](index.md) for the complete current interface reference.
 For the CRSF support matrix and binding flow, see

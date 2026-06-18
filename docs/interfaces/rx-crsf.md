@@ -5,7 +5,10 @@ The RX module outputs CRSF to the flight controller on the CRSF UART.
 When the RF link is connected, RX emits packed CRSF RC channels. Channels 1-8
 come from the RF link. Channels 9-16 are held at CRSF midpoint.
 
-RX also emits CRSF `LINK_STATISTICS` about every 500 ms.
+RX also emits CRSF `LINK_STATISTICS` about every 500 ms. The RX-to-FC frame
+reports RX-measured uplink RSSI/LQ/SNR and the active rate. Downlink-only fields
+are zero on the RX side because RX cannot measure TX reception of telemetry
+slots.
 
 Valid CRSF frames received from the flight controller, except RC channels and
 link statistics, are forwarded to TX over XLRS downlink telemetry. In CRSF

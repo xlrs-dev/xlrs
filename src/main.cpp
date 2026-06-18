@@ -117,6 +117,12 @@ static uint8_t g_crsfByteRing[64];
 static uint8_t g_crsfByteRingPos = 0;
 static uint8_t g_telemetryListenSlotsRemaining = 0;
 static RcSpikeGate g_txInputSpikeGate{};
+static uint8_t g_downlinkLinkQuality = 0;
+static int16_t g_downlinkRssiDbm = 0;
+static int8_t g_downlinkSnrDb = 0;
+static uint16_t g_downlinkLqWindowSlots = 0;
+static uint16_t g_downlinkLqWindowFrames = 0;
+static uint32_t g_downlinkLqWindowStartMs = 0;
 #endif
 #if LORA_RX_ROLE
 static rf::RxScheduler g_rfScheduler;
@@ -154,6 +160,17 @@ static float rfFrequencyForHop(uint16_t hop) {
 
 static float syncChannelFrequencyMHz() {
     return fhssFrequencyMHz(rf::kSyncChannelFhssIndex);
+}
+
+static uint8_t crsfPowerIndexForDbm(int8_t powerDbm) {
+    if (powerDbm <= 10) return 1; // 10 mW
+    if (powerDbm <= 14) return 2; // 25 mW
+    if (powerDbm <= 17) return 8; // 50 mW
+    if (powerDbm <= 20) return 3; // 100 mW
+    if (powerDbm <= 24) return 7; // 250 mW
+    if (powerDbm <= 27) return 4; // 500 mW
+    if (powerDbm <= 30) return 5; // 1000 mW
+    return 6;                     // 2000 mW
 }
 
 #if LORA_RX_ROLE
@@ -929,9 +946,17 @@ static void serviceTxCrsfInput() {
 
 static void sendTelemetryToHandset(uint32_t nowMs) {
     uint8_t frame[16];
-    const uint8_t linkQuality = isLinkFresh(nowMs, g_lastDownlinkTelemetryMs, kDownlinkTelemetryFreshMs) ? g_linkQuality : 0;
-    const size_t len = encodeCrsfLinkStats(g_lastRssi, g_lastSnr, linkQuality,
-                                           static_cast<uint8_t>(g_config.rate), frame, sizeof(frame));
+    const bool downlinkFresh = isLinkFresh(nowMs, g_lastDownlinkTelemetryMs, kDownlinkTelemetryFreshMs);
+    LinkStats stats{};
+    stats.uplinkRssiDbm = downlinkFresh ? g_lastRssi : 0;
+    stats.uplinkLinkQuality = downlinkFresh ? g_linkQuality : 0;
+    stats.uplinkSnrDb = downlinkFresh ? g_lastSnr : 0;
+    stats.rfMode = static_cast<uint8_t>(g_config.rate);
+    stats.uplinkTxPower = crsfPowerIndexForDbm(kBenchTxPowerDbm);
+    stats.downlinkRssiDbm = downlinkFresh ? g_downlinkRssiDbm : 0;
+    stats.downlinkLinkQuality = downlinkFresh ? g_downlinkLinkQuality : 0;
+    stats.downlinkSnrDb = downlinkFresh ? g_downlinkSnrDb : 0;
+    const size_t len = encodeCrsfLinkStats(stats, frame, sizeof(frame));
     if (len) {
         Serial2.write(frame, len);
         g_lastHandsetTelemetryMs = nowMs;
@@ -945,6 +970,31 @@ static void serviceHandsetTelemetry() {
         return;
     }
     sendTelemetryToHandset(nowMs);
+}
+
+static void updateDownlinkLinkQuality(uint32_t nowMs) {
+    if (g_downlinkLqWindowStartMs == 0) g_downlinkLqWindowStartMs = nowMs;
+    const uint32_t elapsedMs = nowMs - g_downlinkLqWindowStartMs;
+    if (elapsedMs < 1000) return;
+    uint32_t percent = g_downlinkLqWindowSlots
+                           ? (static_cast<uint32_t>(g_downlinkLqWindowFrames) * 100u) /
+                                 g_downlinkLqWindowSlots
+                           : 0;
+    if (percent > 100) percent = 100;
+    g_downlinkLinkQuality = static_cast<uint8_t>(percent);
+    g_downlinkLqWindowSlots = 0;
+    g_downlinkLqWindowFrames = 0;
+    g_downlinkLqWindowStartMs = nowMs;
+}
+
+static void noteDownlinkTelemetrySlot(uint32_t nowMs) {
+    ++g_downlinkLqWindowSlots;
+    updateDownlinkLinkQuality(nowMs);
+}
+
+static void noteDownlinkTelemetryFrame(uint32_t nowMs) {
+    ++g_downlinkLqWindowFrames;
+    updateDownlinkLinkQuality(nowMs);
 }
 
 static void txLoop() {
@@ -967,12 +1017,22 @@ static void txLoop() {
             ++g_telemetryReadAttempts;
             if (readOtaFrame(rx) && rx.type == OtaType::Telemetry) {
                 const uint32_t nowMs = millis();
-                g_linkQuality = rx.payload[0];
-                if (rx.payloadLen > 1) g_lastRssi = -static_cast<int16_t>(rx.payload[1]);
-                if (rx.payloadLen > 2) g_lastSnr = static_cast<int8_t>(rx.payload[2]);
-                g_lastDownlinkTelemetryMs = nowMs;
-                ++g_downlinkTelemetryFrames;
-                sendTelemetryToHandset(nowMs);
+                const int16_t downlinkRssiDbm = g_lastRssi;
+                const int8_t downlinkSnrDb = g_lastSnr;
+                DownlinkTelemetryPayload telemetry{};
+                if (decodeDownlinkTelemetryPayload(rx, telemetry)) {
+                    g_linkQuality = telemetry.uplinkLinkQuality;
+                    g_lastRssi = telemetry.uplinkRssiDbm;
+                    g_lastSnr = telemetry.uplinkSnrDb;
+                    g_downlinkRssiDbm = downlinkRssiDbm;
+                    g_downlinkSnrDb = downlinkSnrDb;
+                    noteDownlinkTelemetryFrame(nowMs);
+                    g_lastDownlinkTelemetryMs = nowMs;
+                    ++g_downlinkTelemetryFrames;
+                    sendTelemetryToHandset(nowMs);
+                } else {
+                    ++g_telemetryReadRejects;
+                }
             } else {
                 if (rx.type != OtaType::Telemetry) ++g_telemetryWrongTypeFrames;
                 ++g_telemetryReadRejects;
@@ -991,6 +1051,7 @@ static void txLoop() {
             g_sequence = g_rfScheduler.sequence();
             g_hop = g_rfScheduler.fhss().index();
             g_lastTelemetryListenHop = g_hop;
+            noteDownlinkTelemetrySlot(millis());
             startReceiveOnHop();
             continue;
         }
@@ -1079,8 +1140,13 @@ static bool acceptRxOutputCandidate(const uint16_t candidate[kRcChannelCount], b
 static void writeFcLinkStats() {
     uint8_t frame[16];
     const uint8_t lq = isLinkFresh(millis(), g_lastUplinkMs) ? g_linkQuality : 0;
-    const size_t len = encodeCrsfLinkStats(g_lastRssi, g_lastSnr, lq,
-                                           static_cast<uint8_t>(g_config.rate), frame, sizeof(frame));
+    LinkStats stats{};
+    stats.uplinkRssiDbm = isLinkFresh(millis(), g_lastUplinkMs) ? g_lastRssi : 0;
+    stats.uplinkLinkQuality = lq;
+    stats.uplinkSnrDb = isLinkFresh(millis(), g_lastUplinkMs) ? g_lastSnr : 0;
+    stats.rfMode = static_cast<uint8_t>(g_config.rate);
+    stats.uplinkTxPower = 0; // TX power is not yet delivered to RX in the OTA telemetry payload.
+    const size_t len = encodeCrsfLinkStats(stats, frame, sizeof(frame));
     if (len) Serial2.write(frame, len);
 }
 
@@ -1134,11 +1200,29 @@ static void sendRxTelemetryNow() {
     tlm.type = OtaType::Telemetry;
     tlm.sequence = g_sequence++;
     tlm.uidCheck = g_uidCheck;
-    tlm.payloadLen = 4;
-    tlm.payload[0] = g_linkQuality;
-    tlm.payload[1] = static_cast<uint8_t>(g_lastRssi < 0 ? -g_lastRssi : g_lastRssi);
-    tlm.payload[2] = static_cast<uint8_t>(g_lastSnr);
-    tlm.payload[3] = static_cast<uint8_t>(g_config.rate);
+    const rf::SchedulerStats rfStats = g_rfScheduler.stats();
+    DownlinkTelemetryPayload payload{};
+    payload.uplinkLinkQuality = g_linkQuality;
+    payload.uplinkRssiDbm = g_lastRssi;
+    payload.uplinkSnrDb = g_lastSnr;
+    payload.rfMode = static_cast<uint8_t>(g_config.rate);
+    payload.uplinkTxPower = 0;
+    payload.fhssIndex = static_cast<uint8_t>(rfStats.fhssIndex);
+    payload.expectedFhssIndex = static_cast<uint8_t>(rfStats.nonce / activeRate().fhssHopInterval);
+    int32_t phaseBucket = rfStats.phaseErrorUs / 10;
+    if (phaseBucket < -128) phaseBucket = -128;
+    if (phaseBucket > 127) phaseBucket = 127;
+    payload.phaseErrorBucket = static_cast<int8_t>(phaseBucket);
+    payload.lostConnectionCount = rfStats.lostConnections > 255 ? 255 : static_cast<uint8_t>(rfStats.lostConnections);
+    payload.radioRejectCount = g_rejectedOtaFrames > 255 ? 255 : static_cast<uint8_t>(g_rejectedOtaFrames);
+    if (!isLinkFresh(millis(), g_lastUplinkMs)) payload.faultFlags |= kXlrsTelemetryFaultUplinkStale;
+    if (g_configFault) payload.faultFlags |= kXlrsTelemetryFaultConfigDefaulted;
+    if (rfStats.connectionState != rf::ConnectionState::Connected) {
+        payload.faultFlags |= kXlrsTelemetryFaultFhssUnlocked;
+    }
+    if (phaseBucket <= -12 || phaseBucket >= 12) payload.faultFlags |= kXlrsTelemetryFaultTimingDrift;
+    if (g_rejectedOtaFrames != 0) payload.faultFlags |= kXlrsTelemetryFaultRadioRejects;
+    if (!encodeDownlinkTelemetryPayload(payload, tlm.payload, tlm.payloadLen)) return;
     ++g_rxTelemetryTransmitAttempts;
     g_lastTelemetryTransmitHop = g_rfScheduler.fhss().index();
     busy_wait_us(kTelemetryReplyGuardUs);

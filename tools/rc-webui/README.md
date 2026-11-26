@@ -47,6 +47,13 @@ npm run preview  # serve the production build locally
 The UI logs raw serial lines for both RC and RX sessions so firmware-side
 protocol issues can be diagnosed without a separate terminal.
 
+## Deployment
+
+Pushes to `main` that touch `tools/rc-webui/` deploy to <https://config.xlrs.dev>
+via Cloudflare Pages (project `xlrs-config`, workflow
+`.github/workflows/rc-webui.yml`). It can also be run manually from the Actions tab.
+Needs repo secrets `CLOUDFLARE_API_TOKEN` (Pages: Edit) and `CLOUDFLARE_ACCOUNT_ID`.
+
 ## rc.v1 Integration Notes
 
 When a port opens, the transport sends an unsolicited discovery line:

@@ -32,11 +32,16 @@ enum class OtaType : uint8_t {
     Rc = 1,
     Telemetry = 2,
     Sync = 3,
+    // Wireless-bind discovery frame, sent/received only while a device is
+    // temporarily parked on the shared bind identity (see bindIdentityUid()),
+    // never on a real bound link.
+    Bind = 4,
 };
 
 enum class RateId : uint8_t {
     L250 = 0,
     L100 = 1,
+    L50 = 2,
 };
 
 struct RateConfig {
@@ -68,9 +73,27 @@ struct OtaSyncPayload {
     uint32_t txTick;
 };
 
+enum class OtaBindMarker : uint8_t {
+    Offer = 0,
+    Accept = 1,
+};
+
+// Carried inside an OtaType::Bind frame while a device is parked on the
+// shared bind identity (see bindIdentityUid()). TX sends Offer with its real
+// UID; a scanning RX that captures it replies with Accept echoing that UID.
+struct OtaBindPayload {
+    OtaBindMarker marker;
+    uint8_t uid[kUidSize];
+};
+
 struct DeviceConfig {
     char bindingPhrase[33];
     RateId rate;
+    // Set only on an RX that has wirelessly bound (see WirelessBindStart):
+    // when true, learnedUid is used for g_uid instead of deriveUid(bindingPhrase).
+    // Always false on TX -- TX's identity is always phrase-derived.
+    bool hasLearnedUid;
+    uint8_t learnedUid[kUidSize];
 };
 
 enum class BindingControlOp : uint8_t {
@@ -78,6 +101,18 @@ enum class BindingControlOp : uint8_t {
     Set = 2,
     Clear = 3,
     Verify = 4,
+    // Fire-and-forget: RC sends this right before its own power-off, asking
+    // TX to put its radio in standby. Deliberately has no matching "Wake" --
+    // TX wakes itself the instant it sees a fresh CRSF RC frame again (see
+    // g_txRadioAsleep in main.cpp), so a lost/corrupted Sleep frame fails
+    // toward "TX stays awake" rather than "TX stuck asleep forever". Not
+    // reachable from either device's USB CLI -- see handleRcV1CliLine.
+    Sleep = 5,
+    // RC asks TX to park on the shared bind identity and broadcast its real
+    // UID for a fixed window, so an unbound-this-boot RX can discover it
+    // wirelessly instead of needing the same phrase typed into both devices.
+    // See docs/crsf/binding.md for the discovery protocol this drives.
+    WirelessBindStart = 6,
 };
 
 enum class BindingResult : uint8_t {
@@ -93,6 +128,11 @@ struct BindingStatus {
     uint32_t uidCheck;
     bool persisted;
     bool requiresReboot;
+    // Progress of a WirelessBindStart request, valid only as a response to
+    // that op (or a Get polled while one is in flight); unused/false for
+    // every other BindingControlOp.
+    bool wirelessBindActive;
+    bool wirelessBindAccepted;
 };
 
 struct BindingControlRequest {
@@ -105,7 +145,8 @@ struct ConfigRecord {
     uint8_t version;
     uint8_t rate;
     char bindingPhrase[33];
-    uint8_t reserved;
+    uint8_t reserved; // bit 0: hasLearnedUid
+    uint8_t learnedUid[kUidSize];
     uint16_t crc;
 };
 
@@ -114,7 +155,8 @@ struct RcSpikeGate {
     bool havePending;
 };
 
-extern const RateConfig kRates[2];
+extern const RateConfig kRates[3];
+extern const char kBindIdentityPhrase[];
 
 uint16_t crc16Ccitt(const uint8_t* data, size_t len);
 uint8_t crsfCrc8(const uint8_t* data, size_t len);
@@ -123,11 +165,16 @@ uint32_t uidCheck(const uint8_t uid[kUidSize]);
 uint8_t syncWordFromUid(const uint8_t uid[kUidSize]);
 bool validateBindingPhrase(const char* phrase);
 void makeBindingStatus(const char* phrase, bool persisted, bool requiresReboot, BindingStatus& out);
+// Derives the fixed, reserved identity both TX and RX temporarily switch to
+// for wireless-bind discovery (never used for real link traffic).
+void bindIdentityUid(uint8_t uid[kUidSize]);
 
 bool encodeOtaFrame(const OtaFrame& frame, uint8_t out[kOtaFrameSize]);
 bool decodeOtaFrame(const uint8_t in[kOtaFrameSize], uint32_t expectedUidCheck, OtaFrame& out);
 bool encodeOtaSyncPayload(const OtaSyncPayload& payload, uint8_t out[kOtaPayloadSize], uint8_t& payloadLen);
 bool decodeOtaSyncPayload(const OtaFrame& frame, OtaSyncPayload& out);
+bool encodeOtaBindPayload(const OtaBindPayload& payload, uint8_t out[kOtaPayloadSize], uint8_t& payloadLen);
+bool decodeOtaBindPayload(const OtaFrame& frame, OtaBindPayload& out);
 uint8_t rateIndexForConfig(const RateConfig& rate);
 bool isValidRateIndex(uint8_t rateIndex);
 

@@ -4,10 +4,13 @@
 
 namespace lora_link {
 
-const RateConfig kRates[2] = {
+const RateConfig kRates[3] = {
     {"L250", 4000, 0, 4, 812.5f, 5, 5},
     {"L100", 40000, 16, 4, 812.5f, 6, 5},
+    {"L50", 20000, 4, 4, 812.5f, 8, 5},
 };
+
+const char kBindIdentityPhrase[] = "XLRS-BIND-V1";
 
 static constexpr uint32_t kConfigMagic = 0x314C524Cu; // LRL1
 static constexpr uint8_t kConfigVersion = 1;
@@ -25,7 +28,8 @@ static constexpr uint8_t kBindingControlVersion = 1;
 static constexpr uint8_t kBindingControlMagic[4] = {'X', 'L', 'R', 'S'};
 static constexpr uint16_t kSpikeJumpThreshold = 450;
 static constexpr uint16_t kSpikeHighThreshold = kCrsfRaw2000 - 24;
-static constexpr uint8_t kConfigRecordCrcSize = 4 + 1 + 1 + 33 + 1;
+static constexpr uint8_t kConfigRecordCrcSize = 4 + 1 + 1 + 33 + 1 + kUidSize;
+static constexpr uint8_t kConfigFlagHasLearnedUid = 0x01;
 
 static_assert(offsetof(ConfigRecord, crc) == kConfigRecordCrcSize,
               "ConfigRecord crc offset must match explicit serialized CRC bytes");
@@ -87,6 +91,10 @@ uint8_t syncWordFromUid(const uint8_t uid[kUidSize]) {
     return word;
 }
 
+void bindIdentityUid(uint8_t uid[kUidSize]) {
+    deriveUid(kBindIdentityPhrase, uid);
+}
+
 bool validateBindingPhrase(const char* phrase) {
     if (!phrase) return false;
     size_t len = 0;
@@ -136,7 +144,10 @@ bool decodeOtaFrame(const uint8_t in[kOtaFrameSize], uint32_t expectedUidCheck, 
                             static_cast<uint32_t>(in[7]);
     if (gotUid != expectedUidCheck || in[8] > kOtaPayloadSize) return false;
     out.type = static_cast<OtaType>(in[1]);
-    if (out.type != OtaType::Rc && out.type != OtaType::Telemetry && out.type != OtaType::Sync) return false;
+    if (out.type != OtaType::Rc && out.type != OtaType::Telemetry && out.type != OtaType::Sync &&
+        out.type != OtaType::Bind) {
+        return false;
+    }
     out.sequence = static_cast<uint16_t>((in[2] << 8) | in[3]);
     out.uidCheck = gotUid;
     out.payloadLen = in[8];
@@ -199,8 +210,24 @@ bool decodeOtaSyncPayload(const OtaFrame& frame, OtaSyncPayload& out) {
            out.fhssHopInterval != 0;
 }
 
+bool encodeOtaBindPayload(const OtaBindPayload& payload, uint8_t out[kOtaPayloadSize], uint8_t& payloadLen) {
+    memset(out, 0, kOtaPayloadSize);
+    out[0] = static_cast<uint8_t>(payload.marker);
+    memcpy(&out[1], payload.uid, kUidSize);
+    payloadLen = static_cast<uint8_t>(1 + kUidSize);
+    return true;
+}
+
+bool decodeOtaBindPayload(const OtaFrame& frame, OtaBindPayload& out) {
+    if (frame.type != OtaType::Bind || frame.payloadLen != static_cast<uint8_t>(1 + kUidSize)) return false;
+    if (frame.payload[0] > static_cast<uint8_t>(OtaBindMarker::Accept)) return false;
+    out.marker = static_cast<OtaBindMarker>(frame.payload[0]);
+    memcpy(out.uid, &frame.payload[1], kUidSize);
+    return true;
+}
+
 uint8_t rateIndexForConfig(const RateConfig& rate) {
-    for (uint8_t i = 0; i < 2; ++i) {
+    for (uint8_t i = 0; i < sizeof(kRates) / sizeof(kRates[0]); ++i) {
         if (rate.intervalUs == kRates[i].intervalUs &&
             rate.telemetryRatio == kRates[i].telemetryRatio &&
             rate.fhssHopInterval == kRates[i].fhssHopInterval &&
@@ -213,7 +240,7 @@ uint8_t rateIndexForConfig(const RateConfig& rate) {
 }
 
 bool isValidRateIndex(uint8_t rateIndex) {
-    return rateIndex < 2;
+    return rateIndex < 3;
 }
 
 void packRcChannels11Bit(const uint16_t channels[kRcChannelCount], uint8_t out[22]) {
@@ -250,7 +277,7 @@ void fillFailsafeRcChannels(uint16_t channels[kRcChannelCount]) {
     for (uint8_t i = 0; i < kRcChannelCount; ++i) channels[i] = kCrsfRaw1000;
     channels[0] = kCrsfRawMid;
     channels[1] = kCrsfRawMid;
-    channels[3] = kCrsfRawMid;
+    channels[2] = kCrsfRawMid;
 }
 
 bool sanitizeRcChannels(const uint16_t previous[kRcChannelCount], bool havePrevious,
@@ -294,6 +321,47 @@ static bool rcChannelsMatchWithin(const uint16_t a[kRcChannelCount],
     return true;
 }
 
+static bool onlyThrottleHasLargeJump(const uint16_t previous[kRcChannelCount],
+                                     const uint16_t candidate[kRcChannelCount],
+                                     uint16_t threshold) {
+    bool throttleJumped = false;
+    for (uint8_t i = 0; i < kRcChannelCount; ++i) {
+        const uint16_t oldValue = clampCrsfRaw(previous[i]);
+        const uint16_t candidateValue = clampCrsfRaw(candidate[i]);
+        const uint16_t delta = oldValue > candidateValue ? oldValue - candidateValue
+                                                          : candidateValue - oldValue;
+        if (delta <= threshold) continue;
+        if (i == 3) {
+            throttleJumped = true;
+            continue;
+        }
+        // Roll/pitch/yaw (0-2) jumping alongside throttle still looks like a
+        // real spike or a corrupt frame, so keep gating those. AUX/switch
+        // channels (4+) are binary and legitimately snap every time they
+        // change -- e.g. an arm switch flipped in the same or an adjacent
+        // frame as the throttle motion it triggered -- so on their own they
+        // don't disqualify this bypass.
+        if (i < 4) return false;
+    }
+    return throttleJumped;
+}
+
+static bool previousChannelsAreNeutral(const uint16_t previous[kRcChannelCount],
+                                         uint16_t tolerance) {
+    for (uint8_t i = 0; i < kRcChannelCount; ++i) {
+        const uint16_t value = clampCrsfRaw(previous[i]);
+        if (i == 3) {
+            if (value > static_cast<uint16_t>(kCrsfRaw1000 + tolerance)) return false;
+        } else {
+            if (value < static_cast<uint16_t>(kCrsfRawMid - tolerance) ||
+                value > static_cast<uint16_t>(kCrsfRawMid + tolerance)) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 static bool rcChannelsContinuePendingMove(const uint16_t previous[kRcChannelCount],
                                           const uint16_t pending[kRcChannelCount],
                                           const uint16_t candidate[kRcChannelCount],
@@ -331,6 +399,11 @@ bool acceptRcChannelsWithSpikeGate(const uint16_t previous[kRcChannelCount], boo
         return true;
     }
     if (!hasLargeRcJump(previous, candidate, jumpThreshold)) {
+        gate.havePending = false;
+        return true;
+    }
+    if (onlyThrottleHasLargeJump(previous, candidate, jumpThreshold) ||
+        previousChannelsAreNeutral(previous, confirmTolerance)) {
         gate.havePending = false;
         return true;
     }
@@ -507,7 +580,7 @@ size_t encodeCrsfBindingRequestFrame(const BindingControlRequest& request, uint8
 size_t encodeCrsfBindingResponseFrame(const BindingStatus& status, BindingResult result,
                                       BindingControlOp op, uint8_t* out, size_t outLen) {
     const size_t phraseLen = boundedPhraseLen(status.phrase);
-    const size_t payloadLen = 4 + 1 + 1 + 1 + 1 + 1 + 4 + kUidSize + 1 + phraseLen;
+    const size_t payloadLen = 4 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 4 + kUidSize + 1 + phraseLen;
     const size_t frameLen = payloadLen + 4; // address + length + type + payload + crc
     if (!out || outLen < frameLen || payloadLen > 60) return 0;
 
@@ -522,6 +595,8 @@ size_t encodeCrsfBindingResponseFrame(const BindingStatus& status, BindingResult
     out[pos++] = static_cast<uint8_t>(result);
     out[pos++] = status.persisted ? 1 : 0;
     out[pos++] = status.requiresReboot ? 1 : 0;
+    out[pos++] = status.wirelessBindActive ? 1 : 0;
+    out[pos++] = status.wirelessBindAccepted ? 1 : 0;
     out[pos++] = static_cast<uint8_t>(status.uidCheck >> 24);
     out[pos++] = static_cast<uint8_t>(status.uidCheck >> 16);
     out[pos++] = static_cast<uint8_t>(status.uidCheck >> 8);
@@ -554,22 +629,24 @@ bool parseCrsfBindingResponseFrame(uint8_t byte, BindingStatus& status, BindingR
         const uint8_t* payload = &buf[3];
         bool parsed = false;
         if (crcOk && buf[2] == kCrsfFrameXlrsBindingControl &&
-            payloadLen >= 22 && bindingControlMagicMatches(payload, payloadLen) &&
+            payloadLen >= 24 && bindingControlMagicMatches(payload, payloadLen) &&
             payload[4] == kBindingControlVersion) {
-            const uint8_t phraseLen = payload[21];
+            const uint8_t phraseLen = payload[23];
             if (phraseLen <= kBindingPhraseMaxLength &&
-                static_cast<uint8_t>(22 + phraseLen) <= payloadLen) {
+                static_cast<uint8_t>(24 + phraseLen) <= payloadLen) {
                 memset(&status, 0, sizeof(status));
                 op = static_cast<BindingControlOp>(payload[5]);
                 result = static_cast<BindingResult>(payload[6]);
                 status.persisted = payload[7] != 0;
                 status.requiresReboot = payload[8] != 0;
-                status.uidCheck = (static_cast<uint32_t>(payload[9]) << 24) |
-                                  (static_cast<uint32_t>(payload[10]) << 16) |
-                                  (static_cast<uint32_t>(payload[11]) << 8) |
-                                  static_cast<uint32_t>(payload[12]);
-                memcpy(status.uid, &payload[13], kUidSize);
-                memcpy(status.phrase, &payload[22], phraseLen);
+                status.wirelessBindActive = payload[9] != 0;
+                status.wirelessBindAccepted = payload[10] != 0;
+                status.uidCheck = (static_cast<uint32_t>(payload[11]) << 24) |
+                                  (static_cast<uint32_t>(payload[12]) << 16) |
+                                  (static_cast<uint32_t>(payload[13]) << 8) |
+                                  static_cast<uint32_t>(payload[14]);
+                memcpy(status.uid, &payload[15], kUidSize);
+                memcpy(status.phrase, &payload[24], phraseLen);
                 status.phrase[phraseLen] = '\0';
                 parsed = true;
             }
@@ -602,6 +679,7 @@ static uint16_t configRecordCrc(const ConfigRecord& record) {
     bytes[5] = record.rate;
     memcpy(&bytes[6], record.bindingPhrase, sizeof(record.bindingPhrase));
     bytes[39] = record.reserved;
+    memcpy(&bytes[40], record.learnedUid, kUidSize);
     return crc16Ccitt(bytes, sizeof(bytes));
 }
 
@@ -611,18 +689,21 @@ ConfigRecord makeConfigRecord(const DeviceConfig& cfg) {
     record.version = kConfigVersion;
     record.rate = static_cast<uint8_t>(cfg.rate);
     strncpy(record.bindingPhrase, cfg.bindingPhrase, sizeof(record.bindingPhrase) - 1);
-    record.reserved = 0;
+    record.reserved = cfg.hasLearnedUid ? kConfigFlagHasLearnedUid : 0;
+    memcpy(record.learnedUid, cfg.learnedUid, kUidSize);
     record.crc = configRecordCrc(record);
     return record;
 }
 
 bool readConfigRecord(const ConfigRecord& record, DeviceConfig& cfg) {
-    if (record.magic != kConfigMagic || record.version != kConfigVersion || record.rate > 1) return false;
+    if (record.magic != kConfigMagic || record.version != kConfigVersion || !isValidRateIndex(record.rate)) return false;
     const uint16_t crc = configRecordCrc(record);
     if (crc != record.crc || record.bindingPhrase[0] == '\0') return false;
     memset(&cfg, 0, sizeof(cfg));
     strncpy(cfg.bindingPhrase, record.bindingPhrase, sizeof(cfg.bindingPhrase) - 1);
     cfg.rate = static_cast<RateId>(record.rate);
+    cfg.hasLearnedUid = (record.reserved & kConfigFlagHasLearnedUid) != 0;
+    memcpy(cfg.learnedUid, record.learnedUid, kUidSize);
     return true;
 }
 

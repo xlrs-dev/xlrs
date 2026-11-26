@@ -118,12 +118,14 @@ InputPipelineState defaultInputPipelineState() {
     return state;
 }
 
+// CRSF slot order is AETR (Aileron, Elevator, Throttle, Rudder) — the standard order
+// most flight controllers (e.g. Betaflight) expect on channels 1-4 by default.
 uint8_t channelIndexForFunction(ChannelFunction function) {
     switch (function) {
     case ChannelFunction::Aileron: return 0;
     case ChannelFunction::Elevator: return 1;
-    case ChannelFunction::Rudder: return 2;
-    case ChannelFunction::Throttle: return 3;
+    case ChannelFunction::Throttle: return 2;
+    case ChannelFunction::Rudder: return 3;
     case ChannelFunction::Aux1: return 4;
     case ChannelFunction::Aux2: return 5;
     case ChannelFunction::Aux3: return 6;

@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "lora_link/protocol.h"
+#include "rc_power_config.h"
 #include "rc_handset/config/config.h"
 #include "rc_handset/core1/Runtime.h"
 #include "rc_handset/display/OledDisplay.h"
@@ -16,6 +17,18 @@
 #include "rc_handset/power/Rp2350Power.h"
 #include "rc_handset/telemetry/HandsetTelemetry.h"
 #include "rc_handset/usb/protocol.h"
+
+#ifdef RC_ENABLE_HID_JOYSTICK
+// Hand-built HID joystick over Adafruit TinyUSB -- ported from a working,
+// hardware-verified (Mission Planner + Betaflight) implementation. The
+// framework's convenience Joystick library (Pico SDK USB stack) was tried
+// first and failed to enumerate at all on this RP2350 board, even using
+// the library's own unmodified example -- see git history for that
+// attempt. This build (rc-rp2350-hid) switches to the Adafruit TinyUSB
+// stack specifically for this HID descriptor; every other RC env stays on
+// the default Pico SDK stack.
+#include "rc_handset/usb/HidJoystick.h"
+#endif
 
 using namespace lora_link;
 namespace handset_config = rc_handset::config;
@@ -311,6 +324,7 @@ static bool applyConfigField(handset_config::RcHandsetConfig& cfg,
 }
 
 static void publishConfigForLiveEdit();
+static void serviceStateStream();
 
 static bool saveRcConfig(const handset_config::RcHandsetConfig& config) {
     uint8_t record[handset_config::kRcHandsetConfigRecordSize];
@@ -419,7 +433,9 @@ static bool parseCrsfTelemetryByte(uint8_t byte, uint8_t frame[64], uint8_t& fra
 }
 
 static RateId rateIdFromCrsfRfMode(uint8_t rfMode) {
-    return rfMode == static_cast<uint8_t>(RateId::L250) ? RateId::L250 : RateId::L100;
+    if (rfMode == static_cast<uint8_t>(RateId::L250)) return RateId::L250;
+    if (rfMode == static_cast<uint8_t>(RateId::L50)) return RateId::L50;
+    return RateId::L100;
 }
 
 static uint32_t defaultBindingUidCheck() {
@@ -550,6 +566,18 @@ static bool proxyTxBindingRequest(const BindingControlRequest& request, BindingS
         }
         handset_power::rcPowerService();
         rc_handset::core1::loopOnceFallback();
+        // The WebUI's live state stream is otherwise only serviced from the
+        // main loop -- without this, every binding probe (every 2s until the
+        // first reply, then every 30s) stalls the stream for up to 750ms.
+        serviceStateStream();
+#ifdef RC_ENABLE_HID_JOYSTICK
+        // Same reasoning: without this, the HID joystick report freezes for
+        // the same 750ms window every retry -- which with no TX ever
+        // attached (the sim/joystick-only use case) means every ~2s,
+        // forever. That's the "values sometimes stuck" symptom.
+        refreshLiveState();
+        handset_usb::hidJoystickService(g_liveState.channels, millis());
+#endif
         yield();
     }
     return false;
@@ -933,16 +961,126 @@ static void serviceCli() {
     }
 }
 
+#ifdef XLRS_ENABLE_WIRELESS_BIND
+// Wireless "soft bind": hold PUSH1+PUSH2 together while on the Bind screen
+// to ask TX to broadcast its UID -- see startWirelessBindFromRc() (defined
+// after the buzzer helpers it uses) and docs/crsf/binding.md.
+static bool g_wirelessBindActive = false;
+static bool g_wirelessBindAccepted = false;
+static bool g_wirelessBindTimedOut = false;
+static uint32_t g_wirelessBindStartMs = 0;
+static uint32_t g_wirelessBindLastPollMs = 0;
+
+enum class BindHoldPhase : uint8_t { Idle, Holding, ReadyToRelease };
+static BindHoldPhase g_bindHoldPhase = BindHoldPhase::Idle;
+static uint32_t g_bindHoldStartMs = 0;
+
+static void startWirelessBindFromRc();
+
+// Mirrors PowerButtonController's hold shape (Idle -> Holding ->
+// ReadyToRelease, confirm on release-after-threshold) rather than a new
+// pattern -- see include/rc_handset/power/PowerButton.h.
+static void serviceBindHoldGesture(uint32_t nowMs, bool bothPressed) {
+    switch (g_bindHoldPhase) {
+        case BindHoldPhase::Idle:
+            if (bothPressed) {
+                g_bindHoldPhase = BindHoldPhase::Holding;
+                g_bindHoldStartMs = nowMs;
+            }
+            break;
+        case BindHoldPhase::Holding:
+            if (!bothPressed) {
+                g_bindHoldPhase = BindHoldPhase::Idle;
+            } else if (static_cast<uint32_t>(nowMs - g_bindHoldStartMs) >= RC_BIND_HOLD_MS) {
+                g_bindHoldPhase = BindHoldPhase::ReadyToRelease;
+            }
+            break;
+        case BindHoldPhase::ReadyToRelease:
+            if (!bothPressed) {
+                g_bindHoldPhase = BindHoldPhase::Idle;
+                if (!g_wirelessBindActive) startWirelessBindFromRc();
+            }
+            break;
+    }
+}
+#endif  // XLRS_ENABLE_WIRELESS_BIND
+
+// PUSH1 (GPIO13) / PUSH2 (GPIO14): manual screen navigation, overriding the
+// time-based auto-rotation until RC_NAV_MANUAL_TIMEOUT_MS passes with no
+// press. Also the auto-rotation order itself (displayScreenForTime below).
+static constexpr rc_handset::display::Screen kNavScreens[] = {
+    rc_handset::display::Screen::MainStatus,
+    rc_handset::display::Screen::ChannelMonitor,
+    rc_handset::display::Screen::ConfigSummary,
+    rc_handset::display::Screen::BindingStatus,
+    rc_handset::display::Screen::BatteryStatus,
+};
+static constexpr uint8_t kNavScreenCount = sizeof(kNavScreens) / sizeof(kNavScreens[0]);
+
 static rc_handset::display::Screen displayScreenForTime(uint32_t nowMs) {
-    switch ((nowMs / kDisplayPageMs) % 4u) {
-        case 0:
-            return rc_handset::display::Screen::MainStatus;
-        case 1:
-            return rc_handset::display::Screen::ChannelMonitor;
-        case 2:
-            return rc_handset::display::Screen::ConfigSummary;
-        default:
-            return rc_handset::display::Screen::BindingStatus;
+    return kNavScreens[(nowMs / kDisplayPageMs) % kNavScreenCount];
+}
+
+struct NavButtonState {
+    bool rawPressed = false;
+    bool pressed = false;
+    uint32_t lastChangeMs = 0;
+};
+
+static NavButtonState g_push1State;
+static NavButtonState g_push2State;
+static uint8_t g_manualScreenIndex = 0;
+static bool g_manualNavActive = false;
+static uint32_t g_manualNavExpiresAtMs = 0;
+
+// Debounced falling edge -- fires once per physical press, not on release
+// and not repeatedly while held.
+static bool navButtonPressedEdge(NavButtonState& state, uint8_t pin, uint32_t nowMs) {
+    const bool raw = digitalRead(pin) == LOW;
+    if (raw != state.rawPressed) {
+        state.rawPressed = raw;
+        state.lastChangeMs = nowMs;
+    }
+    if (static_cast<uint32_t>(nowMs - state.lastChangeMs) < RC_NAV_BUTTON_DEBOUNCE_MS) return false;
+    if (state.rawPressed == state.pressed) return false;
+    state.pressed = state.rawPressed;
+    return state.pressed;
+}
+
+static rc_handset::display::Screen currentDisplayScreen(uint32_t nowMs) {
+    if (g_manualNavActive) return kNavScreens[g_manualScreenIndex];
+    return displayScreenForTime(nowMs);
+}
+
+static void serviceScreenNavButtons(uint32_t nowMs) {
+    // Debounce state must stay fresh even on the Bind screen, so both edge
+    // detectors always run -- only their nav-index side effects are skipped
+    // there, in favor of the combined-hold bind gesture.
+    const bool push1Edge = navButtonPressedEdge(g_push1State, RC_PUSH1_PIN, nowMs);
+    const bool push2Edge = navButtonPressedEdge(g_push2State, RC_PUSH2_PIN, nowMs);
+
+#ifdef XLRS_ENABLE_WIRELESS_BIND
+    if (currentDisplayScreen(nowMs) == rc_handset::display::Screen::BindingStatus) {
+        serviceBindHoldGesture(nowMs, g_push1State.pressed && g_push2State.pressed);
+        return;
+    }
+#endif  // XLRS_ENABLE_WIRELESS_BIND
+
+    bool pressed = false;
+    if (push1Edge) {
+        g_manualScreenIndex = static_cast<uint8_t>((g_manualScreenIndex + 1) % kNavScreenCount);
+        pressed = true;
+    }
+    if (push2Edge) {
+        g_manualScreenIndex =
+            static_cast<uint8_t>((g_manualScreenIndex + kNavScreenCount - 1) % kNavScreenCount);
+        pressed = true;
+    }
+    if (pressed) {
+        g_manualNavActive = true;
+        g_manualNavExpiresAtMs = nowMs + RC_NAV_MANUAL_TIMEOUT_MS;
+    } else if (g_manualNavActive && static_cast<int32_t>(nowMs - g_manualNavExpiresAtMs) >= 0) {
+        g_manualNavActive = false;
     }
 }
 
@@ -970,9 +1108,15 @@ static void populateDisplayState(rc_handset::display::DisplayState& state,
     state.rxBattery.available = telemetry.rxBatteryStatus == handset_telemetry::FieldStatus::Valid;
     state.rxBattery.millivolts = telemetry.rxBattery.millivolts;
     state.rxBattery.percent = telemetry.rxBattery.percent;
+    // linkQuality > 0 is required too: TX sends a LINK_STATISTICS frame over
+    // the wired link to RC on a regular cadence regardless of whether it has
+    // an RF connection to RX -- with RX off, that frame still arrives fine,
+    // just reporting LQ 0 -- so linkStatsStatus alone only proves "TX is
+    // alive," not "RX is connected".
     state.link.connected = telemetry.txPresent &&
                            telemetry.txStatus == handset_telemetry::FieldStatus::Valid &&
-                           telemetry.linkStatsStatus == handset_telemetry::FieldStatus::Valid;
+                           telemetry.linkStatsStatus == handset_telemetry::FieldStatus::Valid &&
+                           telemetry.linkQuality > 0;
     state.link.metricsAvailable = telemetry.linkStatsStatus == handset_telemetry::FieldStatus::Valid;
     state.link.bindingMismatch = telemetry.faults.bindingUidMismatch;
     state.link.rateName = handset_telemetry::rateName(telemetry.activeRate);
@@ -1008,6 +1152,32 @@ static void populateDisplayState(rc_handset::display::DisplayState& state,
     } else {
         state.binding.message = "No receiver telemetry";
     }
+
+#ifdef XLRS_ENABLE_WIRELESS_BIND
+    static char bindMsgBuf[32];
+    state.binding.bindMode = g_wirelessBindActive;
+    if (g_wirelessBindAccepted) {
+        state.binding.message = "Binding successful";
+    } else if (g_wirelessBindActive) {
+        const uint32_t elapsedMs = millis() - g_wirelessBindStartMs;
+        const uint32_t remainingS = elapsedMs >= RC_BIND_WINDOW_MS
+                                        ? 0u
+                                        : (RC_BIND_WINDOW_MS - elapsedMs) / 1000u;
+        snprintf(bindMsgBuf, sizeof(bindMsgBuf), "Binding... %lus left", static_cast<unsigned long>(remainingS));
+        state.binding.message = bindMsgBuf;
+    } else if (g_wirelessBindTimedOut) {
+        state.binding.message = "No response, try again";
+    }
+    if (screen == rc_handset::display::Screen::BindingStatus) {
+        if (g_bindHoldPhase == BindHoldPhase::ReadyToRelease) {
+            state.binding.hint = "Release to bind!";
+        } else if (g_bindHoldPhase == BindHoldPhase::Holding) {
+            state.binding.hint = "Keep holding...";
+        } else if (!g_wirelessBindActive) {
+            state.binding.hint = "Hold both to bind";
+        }
+    }
+#endif  // XLRS_ENABLE_WIRELESS_BIND
 }
 
 static void serviceDisplay() {
@@ -1016,7 +1186,7 @@ static void serviceDisplay() {
     g_lastDisplayMs = nowMs;
 
     rc_handset::display::DisplayState state;
-    populateDisplayState(state, displayScreenForTime(nowMs));
+    populateDisplayState(state, currentDisplayScreen(nowMs));
     g_display.show(state);
 }
 
@@ -1042,6 +1212,108 @@ static void serviceStateStream() {
     printStateStreamLine();
 }
 
+// Blocking power-on/power-off confirmation beep (RC_BUZZER_PIN, see
+// rc_power_config.h). Blocking is required at both call sites: power-off in
+// particular must not return with the buzzer still sounding, since nothing
+// services it once POWMAN sleep is entered right after.
+static void buzzerBeepBlocking(uint16_t durationMs) {
+    digitalWrite(RC_BUZZER_PIN, HIGH);
+    delay(durationMs);
+    digitalWrite(RC_BUZZER_PIN, LOW);
+}
+
+// Non-blocking buzzer, serviced from loop() (see buzzerServiceNonBlocking).
+// Used for the RX-link connected/disconnected beeps, which must not stall
+// CRSF/USB/power-button servicing the way a delay()-based beep would.
+static uint32_t g_buzzerOffAtMs = 0;
+static bool g_buzzerOn = false;
+
+static void buzzerStartNonBlocking(uint16_t durationMs) {
+    digitalWrite(RC_BUZZER_PIN, HIGH);
+    g_buzzerOn = true;
+    g_buzzerOffAtMs = millis() + durationMs;
+}
+
+static void buzzerServiceNonBlocking() {
+    if (g_buzzerOn && static_cast<int32_t>(millis() - g_buzzerOffAtMs) >= 0) {
+        digitalWrite(RC_BUZZER_PIN, LOW);
+        g_buzzerOn = false;
+    }
+}
+
+// Connected: one beep, then silence. Disconnected: a short chirp every
+// RC_BUZZER_DISCONNECTED_INTERVAL_MS. The first disconnected chirp is
+// deferred by one interval rather than firing immediately, so it doesn't
+// collide with the power-on beep or fire the instant a link drops.
+static bool g_buzzerWasRxLinkActive = false;
+static bool g_buzzerDisconnectedChirpArmed = false;
+static uint32_t g_buzzerNextDisconnectedChirpMs = 0;
+
+static void serviceConnectionBuzzer(bool rxLinkActive, uint32_t nowMs) {
+    if (rxLinkActive) {
+        if (!g_buzzerWasRxLinkActive) {
+            buzzerStartNonBlocking(RC_BUZZER_CONNECTED_BEEP_MS);
+        }
+        g_buzzerDisconnectedChirpArmed = false;
+    } else if (!g_buzzerDisconnectedChirpArmed) {
+        g_buzzerNextDisconnectedChirpMs = nowMs + RC_BUZZER_DISCONNECTED_INTERVAL_MS;
+        g_buzzerDisconnectedChirpArmed = true;
+    } else if (static_cast<int32_t>(nowMs - g_buzzerNextDisconnectedChirpMs) >= 0) {
+        if (!g_buzzerOn) buzzerStartNonBlocking(RC_BUZZER_DISCONNECTED_CHIRP_MS);
+        g_buzzerNextDisconnectedChirpMs = nowMs + RC_BUZZER_DISCONNECTED_INTERVAL_MS;
+    }
+    g_buzzerWasRxLinkActive = rxLinkActive;
+}
+
+#ifdef XLRS_ENABLE_WIRELESS_BIND
+static void startWirelessBindFromRc() {
+    BindingControlRequest request{};
+    request.op = BindingControlOp::WirelessBindStart;
+    BindingStatus status{};
+    BindingResult result = BindingResult::InvalidCommand;
+    BindingControlOp responseOp = BindingControlOp::WirelessBindStart;
+    const bool ok = proxyTxBindingRequest(request, status, result, responseOp);
+
+    g_wirelessBindStartMs = millis();
+    g_wirelessBindLastPollMs = g_wirelessBindStartMs;
+    g_wirelessBindAccepted = false;
+    g_wirelessBindActive = ok && result == BindingResult::Ok && status.wirelessBindActive;
+    g_wirelessBindTimedOut = !g_wirelessBindActive;
+    buzzerStartNonBlocking(g_wirelessBindActive ? RC_BUZZER_BIND_START_MS : RC_BUZZER_BIND_FAIL_MS);
+}
+
+// Polls TX for wireless-bind progress via the existing Get path (TX folds
+// wirelessBindActive/wirelessBindAccepted into every binding response while
+// its broadcast is running -- see serviceTxCrsfInput in src/main.cpp) --
+// no separate poll op needed.
+static void serviceWirelessBindPoll() {
+    if (!g_wirelessBindActive) return;
+    const uint32_t nowMs = millis();
+    if (static_cast<uint32_t>(nowMs - g_wirelessBindLastPollMs) < RC_BIND_POLL_INTERVAL_MS) return;
+    g_wirelessBindLastPollMs = nowMs;
+
+    BindingControlRequest request{};
+    request.op = BindingControlOp::Get;
+    BindingStatus status{};
+    BindingResult result = BindingResult::InvalidCommand;
+    BindingControlOp responseOp = BindingControlOp::Get;
+    if (proxyTxBindingRequest(request, status, result, responseOp) && result == BindingResult::Ok) {
+        if (status.wirelessBindAccepted) {
+            g_wirelessBindActive = false;
+            g_wirelessBindAccepted = true;
+            buzzerStartNonBlocking(RC_BUZZER_BIND_SUCCESS_MS);
+            return;
+        }
+        g_wirelessBindActive = status.wirelessBindActive;
+    }
+    if (g_wirelessBindActive && static_cast<uint32_t>(nowMs - g_wirelessBindStartMs) >= RC_BIND_WINDOW_MS) {
+        g_wirelessBindActive = false;
+        g_wirelessBindTimedOut = true;
+        buzzerStartNonBlocking(RC_BUZZER_BIND_FAIL_MS);
+    }
+}
+#endif  // XLRS_ENABLE_WIRELESS_BIND
+
 static void showBootScreen(uint8_t progressPercent, const char* message) {
     rc_handset::display::DisplayState state;
     state.screen = rc_handset::display::Screen::Boot;
@@ -1050,12 +1322,76 @@ static void showBootScreen(uint8_t progressPercent, const char* message) {
     g_display.show(state);
 }
 
+// Fires on every poll of the hold-to-boot gate (see rcPowerBegin), so the
+// bar animates live instead of sitting static for the whole hold.
+static void showBootHoldProgress(uint8_t percent, bool readyToRelease) {
+    if (readyToRelease) {
+        showBootScreen(100, "Release to power on");
+        return;
+    }
+    showBootScreen(percent, "Hold power button");
+}
+
+// Fires on every poll of the hold-to-power-off gate (see rcPowerService).
+static void showPowerOffProgress(uint8_t percent, bool readyToRelease, bool blocked) {
+    if (blocked) {
+        showBootScreen(percent, "RX connected: cannot power off");
+        return;
+    }
+    if (readyToRelease) {
+        showBootScreen(100, "Release to power off");
+        return;
+    }
+    showBootScreen(percent, "Hold to power off");
+}
+
+#ifdef XLRS_ENABLE_TX_SLEEP
+// EXPERIMENTAL (rc-rp2350-pwrmgmt / tx_lora_pico_pwrmgmt only): tells TX to
+// put its radio in standby to stop draining the handset's battery while RC
+// is powered off. Fire-and-forget -- no response is expected or waited for,
+// RC is about to sleep itself right after this. If Serial2 isn't up yet
+// (e.g. an aborted boot hold, before CRSF init) this silently does nothing,
+// which is fine: TX just stays awake, the safe direction to fail in. See
+// BindingControlOp::Sleep in protocol.h for why there's no matching wake
+// call here -- TX wakes itself once real CRSF resumes. Not yet proven
+// through repeated real power cycles on hardware -- see AGENTS.md.
+static void sendTxSleepCommand() {
+    BindingControlRequest request{};
+    request.op = BindingControlOp::Sleep;
+    uint8_t frame[64];
+    const size_t len = encodeCrsfBindingRequestFrame(request, frame, sizeof(frame));
+    if (len) {
+        Serial2.write(frame, len);
+        Serial2.flush();
+    }
+}
+#endif  // XLRS_ENABLE_TX_SLEEP
+
 void setup() {
+#ifdef RC_ENABLE_HID_JOYSTICK
+    // Must run before Serial.begin() -- the HID interface has to be
+    // registered before TinyUSB enumerates, or the composite descriptor
+    // race loses to the host and enumeration breaks.
+    handset_usb::hidJoystickBegin();
+#endif
     Serial.begin(115200);
+#ifndef USE_TINYUSB
     Serial.ignoreFlowControl(true);
+#endif
+    pinMode(RC_BUZZER_PIN, OUTPUT);
+    digitalWrite(RC_BUZZER_PIN, LOW);
+    pinMode(RC_PUSH1_PIN, INPUT_PULLUP);
+    pinMode(RC_PUSH2_PIN, INPUT_PULLUP);
     g_display.begin();
-    showBootScreen(15, "Power init");
-    handset_power::rcPowerBegin();
+    handset_power::rcPowerSetSleepHook([]() {
+#ifdef XLRS_ENABLE_TX_SLEEP
+        sendTxSleepCommand();
+#endif
+        buzzerBeepBlocking(RC_BUZZER_POWER_BEEP_MS);
+        g_display.sleep();
+    });
+    handset_power::rcPowerBegin(showBootHoldProgress);
+    buzzerBeepBlocking(RC_BUZZER_POWER_BEEP_MS);
     showBootScreen(25, "Core 0 init");
     loadRcConfig();
     publishActiveConfig();
@@ -1072,13 +1408,40 @@ void setup() {
 }
 
 void loop() {
-    handset_power::rcPowerService();
+    // Refreshed unconditionally (not just when a USB client polls state) so
+    // linkStatsStatus staleness -- and therefore the power-off block below --
+    // stays accurate even with no USB host attached.
+    g_handsetTelemetry.refresh(millis());
+    // TX sends link-stats telemetry continuously whether or not it has an RX,
+    // reporting linkQuality=0 (not silence) when disconnected -- so freshness
+    // alone ("a frame arrived recently") is true any time a TX is attached at
+    // all. The actual RX-connected signal is a *nonzero* quality value.
+    const handset_telemetry::HandsetTelemetryState& telemetryState = g_handsetTelemetry.state();
+    const bool rxLinkActive = telemetryState.linkStatsStatus == handset_telemetry::FieldStatus::Valid &&
+                              telemetryState.linkQuality > 0;
+#if RC_BUZZER_CONNECTION_ENABLED
+    serviceConnectionBuzzer(rxLinkActive, millis());
+#endif
+    buzzerServiceNonBlocking();
+    serviceScreenNavButtons(millis());
+#ifdef XLRS_ENABLE_WIRELESS_BIND
+    serviceWirelessBindPoll();
+#endif
+#ifdef RC_ENABLE_HID_JOYSTICK
+    refreshLiveState();
+    handset_usb::hidJoystickService(g_liveState.channels, millis());
+#endif
+    handset_power::rcPowerService(showPowerOffProgress, rxLinkActive);
     rc_handset::core1::loopOnceFallback();
     serviceCrsfTelemetry();
     serviceCli();
     serviceTxBindingProbe();
     serviceStateStream();
-    serviceDisplay();
+    // The power-off countdown owns the display for the duration of the hold;
+    // don't fight it with the normal screen-rotation refresh.
+    if (!handset_power::rcPowerOffHoldActive()) {
+        serviceDisplay();
+    }
     yield();
 }
 

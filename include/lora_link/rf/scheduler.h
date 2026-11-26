@@ -151,6 +151,10 @@ public:
     uint16_t nonce() const { return nextExpectedSequence_; }
     const FhssState& fhss() const { return fhss_; }
     SchedulerStats stats() const;
+    // True once a valid sync/RC frame has already landed for the tock that's about to
+    // fire; callers use this to avoid re-emitting CRSF output the packet arrival already
+    // triggered. Read before onTimerEvent(), which clears it as part of advancing the tock.
+    bool receivedFrameForCurrentTock() const { return receivedFrameForCurrentTock_; }
 
 private:
     FhssState fhss_{};

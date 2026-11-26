@@ -4,6 +4,7 @@ import { parseRcLine, RcMessage, RcSerialTransport, TransportStatus } from "./rc
 type DeviceKey = "rc" | "rx";
 type BindingTarget = "tx" | "rx";
 type StatusLevel = "info" | "ok" | "warn" | "bad";
+type CalStep = "idle" | "assign" | "center" | "extremes";
 
 interface RcConfig {
   version: number;
@@ -65,13 +66,25 @@ interface DeviceSession {
   streamEnabled: boolean;
   pollTimer: number;
   polling: boolean;
+  calStep: CalStep;
+  calIntroOpen: boolean;
+  calAssignIndex: number;
+  calAssignedAxes: number[];
+  calAssignBaseline: number[] | null;
+  calAssignHits: number;
+  calMeasuredCenter: number[] | null;
+  calExtremesEndAt: number;
+  calAxisLastGrowth: number[];
+  calAxisPrevSpan: number[];
+  calSampling: boolean;
+  calTimer: number;
   dirty: boolean;
   dirtyFields: Set<string>;
   logLines: string[];
 }
 
 interface UiState {
-  activeScreen: "calibration" | "channels" | "filters" | "binding";
+  activeScreen: "calibration" | "channels" | "filters" | "binding" | "module";
   phrase: string;
   statusText: string;
   statusLevel: StatusLevel;
@@ -86,6 +99,21 @@ const MAX_LOG_LINES = 80;
 const CRSF_RAW_MIN = 172;
 const CRSF_RAW_MID = 992;
 const CRSF_RAW_MAX = 1811;
+
+// Function enum values match FUNCTION_OPTIONS indices (0=Aileron/roll, 1=Elevator/pitch, 2=Rudder/yaw, 3=Throttle).
+const ASSIGN_SEQUENCE: Array<{ label: string; func: number }> = [
+  { label: "Throttle", func: 3 },
+  { label: "Roll", func: 0 },
+  { label: "Yaw", func: 2 },
+  { label: "Pitch", func: 1 },
+];
+const CAL_TICK_MS = 120;
+const CAL_EXTREMES_MAX_MS = 20000;
+const CAL_PLATEAU_MS = 700;
+const CAL_MIN_SPAN = 150;
+const CAL_ASSIGN_THRESHOLD = 400;
+const CAL_ASSIGN_DOMINANCE = 1.5;
+const CAL_ASSIGN_CONFIRM_TICKS = 2;
 
 const defaultConfig: RcConfig = {
   version: 0,
@@ -211,6 +239,18 @@ function createSession(key: DeviceKey, label: string): DeviceSession {
     streamEnabled: false,
     pollTimer: 0,
     polling: false,
+    calStep: "idle",
+    calIntroOpen: false,
+    calAssignIndex: 0,
+    calAssignedAxes: [],
+    calAssignBaseline: null,
+    calAssignHits: 0,
+    calMeasuredCenter: null,
+    calExtremesEndAt: 0,
+    calAxisLastGrowth: [0, 0, 0, 0],
+    calAxisPrevSpan: [0, 0, 0, 0],
+    calSampling: false,
+    calTimer: 0,
     dirty: false,
     dirtyFields: new Set(),
     logLines: [],
@@ -279,6 +319,7 @@ function render(): void {
         ${tabButton("channels", "Channels")}
         ${tabButton("filters", "Filters")}
         ${tabButton("binding", "Binding Wizard")}
+        ${tabButton("module", "TX/RX Module")}
       </nav>
 
       ${activeScreen()}
@@ -375,6 +416,7 @@ function updateLiveStatePanel(session: DeviceSession): void {
   }
   updateLiveTables(session);
   updateStickMonitors(session);
+  updateCalibrationProgress(session);
 }
 
 function setLiveField(root: HTMLElement, field: string, value: string): void {
@@ -420,61 +462,206 @@ function activeScreen(): string {
   if (ui.activeScreen === "channels") return channelsScreen();
   if (ui.activeScreen === "filters") return filtersScreen();
   if (ui.activeScreen === "binding") return bindingScreen();
+  if (ui.activeScreen === "module") return moduleScreen();
   return calibrationScreen();
 }
 
 function calibrationScreen(): string {
-  const config = ui.rc.config;
+  const session = ui.rc;
+  const config = session.config;
+  const connected = isConnected(session);
   return `
     <section class="panel screen-panel">
       <div class="panel-title split">
         <div>
           <h2>Calibration Wizard</h2>
-          <p class="muted">Center, sample full stick travel, then finish. Manual edits persist immediately.</p>
+          <p class="muted">Guided setup: assigns each stick automatically, then captures full travel — no manual entry needed.</p>
         </div>
-        <button class="secondary" data-action="load-config" ${disabled(!isConnected(ui.rc))}>Load current config</button>
+        <button class="secondary" data-action="load-config" ${disabled(!connected)}>Load current config</button>
       </div>
-      <ol class="wizard">
-        <li>
-          <strong>1. Start</strong>
-          <span>Center sticks and initialize firmware min/max from current ADC.</span>
-          <button data-action="cal-start" ${disabled(!isConnected(ui.rc))}>Start</button>
-        </li>
-        <li>
-          <strong>2. Sample</strong>
-          <span>Move every axis through full travel. Press sample repeatedly while moving sticks.</span>
-          <button data-action="cal-sample" ${disabled(!isConnected(ui.rc))}>Sample</button>
-        </li>
-        <li>
-          <strong>3. Finish</strong>
-          <span>Return sticks to center, then finish and save calibration.</span>
-          <span class="inline-actions">
-            <button data-action="cal-finish" ${disabled(!isConnected(ui.rc))}>Finish calibration</button>
-          </span>
-        </li>
-      </ol>
-      ${stickMonitor(ui.rc)}
+      ${session.calStep === "idle" ? calibrationStepPanel(session) : ""}
+      ${session.calIntroOpen ? calibrationIntroModal() : ""}
+      ${session.calStep !== "idle" ? calibrationWizardModal(session) : ""}
+      ${stickMonitor(session)}
+      <h3>Capture progress</h3>
+      <div class="channel-bars">
+        ${AXES.map((axis, index) => calibrationProgressBar(axis, index, session)).join("")}
+      </div>
       ${filterTuningPanel("Calibration filter tuning")}
+      <h3>Min / Center / Max</h3>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Axis</th><th>Min</th><th>Center</th><th>Max</th><th>Raw ADC</th><th>Filtered ADC</th><th>Output</th></tr></thead>
+          <thead><tr><th>Axis</th><th>Function</th><th>Min</th><th>Center</th><th>Max</th><th>Raw ADC</th><th>Filtered ADC</th><th>Output</th></tr></thead>
           <tbody>
             ${AXES.map((axis, index) => `
               <tr>
                 <td>${axis}</td>
+                <td>${FUNCTION_OPTIONS[config.functions[index]] ?? "-"}</td>
                 <td>${calibrationControl(`cal.min.${index}`, config.calMin[index] ?? 0)}</td>
                 <td>${calibrationControl(`cal.center.${index}`, config.calCenter[index] ?? 2048)}</td>
                 <td>${calibrationControl(`cal.max.${index}`, config.calMax[index] ?? 4095)}</td>
-                <td data-live-adc-index="${index}">${ui.rc.state?.adc[index] ?? "-"}</td>
-                <td data-live-adc-filtered-index="${index}">${ui.rc.state?.adcFiltered[index] ?? "-"}</td>
-                <td data-live-ch-index="${index}">${ui.rc.state?.ch[index] ?? "-"}</td>
+                <td data-live-adc-index="${index}">${session.state?.adc[index] ?? "-"}</td>
+                <td data-live-adc-filtered-index="${index}">${session.state?.adcFiltered[index] ?? "-"}</td>
+                <td data-live-ch-index="${index}">${session.state?.ch[index] ?? "-"}</td>
               </tr>
             `).join("")}
           </tbody>
         </table>
       </div>
+      <div class="inline-actions">
+        <button class="secondary" data-action="cal-sample" ${disabled(!connected || session.calStep !== "extremes")}>Force sample now</button>
+        <button class="secondary" data-action="cal-finish" ${disabled(!connected || session.calStep !== "extremes")}>Finish now</button>
+      </div>
     </section>
   `;
+}
+
+function calibrationWizardModal(session: DeviceSession): string {
+  return `
+    <div class="modal-backdrop" data-cal-wizard>
+      <div class="modal modal-wide">
+        ${calibrationStepPanel(session)}
+        ${stickMonitor(session)}
+        <button class="secondary" data-action="cal-cancel">Cancel</button>
+      </div>
+    </div>
+  `;
+}
+
+function calibrationStepPanel(session: DeviceSession): string {
+  const connected = isConnected(session);
+  if (session.calStep === "idle") {
+    return `
+      <div class="wizard-step">
+        <p>Leave the sticks anywhere and press Start. The wizard asks you to move each stick in turn, then captures full travel automatically.</p>
+        <button data-action="cal-intro-open" ${disabled(!connected)}>Start calibration</button>
+      </div>
+    `;
+  }
+  if (session.calStep === "assign") {
+    const target = ASSIGN_SEQUENCE[session.calAssignIndex];
+    return `
+      <div class="wizard-step active">
+        ${stickHintIcon(target?.label)}
+        <div>
+          <h3>Move ${target?.label ?? ""} axis</h3>
+          <p class="muted">Wiggle the stick that controls ${(target?.label ?? "").toLowerCase()} — it's detected automatically, no button to press.</p>
+        </div>
+      </div>
+    `;
+  }
+  if (session.calStep === "center") {
+    return `
+      <div class="wizard-step active">
+        <h3>Center all the sticks and press OK</h3>
+        <button data-action="cal-center-ok" ${disabled(!connected)}>OK</button>
+      </div>
+    `;
+  }
+  const pending = pendingExtremesAxes(session);
+  return `
+    <div class="wizard-step active">
+      ${stickHintIcon()}
+      <div>
+        <h3>Move all sticks to their limits</h3>
+        <p class="muted" data-cal-pending>${extremesStatusText(pending)}</p>
+        <p class="muted">up to <span data-cal-countdown>${remainingExtremesSeconds(session).toFixed(1)}</span>s remaining</p>
+      </div>
+    </div>
+  `;
+}
+
+function calibrationIntroModal(): string {
+  return `
+    <div class="modal-backdrop" data-cal-intro>
+      <div class="modal">
+        ${stickHintIcon()}
+        <h3>Checking controller calibration</h3>
+        <p>The wizard asks you to move one stick at a time so it can figure out which physical stick is throttle, roll, yaw, and pitch.</p>
+        <p>Then you'll center all sticks, and finally move everything to its limits — the range is captured automatically while you do it.</p>
+        <div class="inline-actions">
+          <button class="secondary" data-action="cal-intro-cancel">Cancel</button>
+          <button data-action="cal-intro-begin">Begin</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+// Mode 2 convention: left stick = throttle (vertical) / yaw (horizontal),
+// right stick = pitch (vertical) / roll (horizontal).
+const ASSIGN_DEMO: Record<string, { stick: "left" | "right"; axis: "h" | "v" }> = {
+  Throttle: { stick: "left", axis: "v" },
+  Yaw: { stick: "left", axis: "h" },
+  Pitch: { stick: "right", axis: "v" },
+  Roll: { stick: "right", axis: "h" },
+};
+
+function stickHintIcon(label?: string): string {
+  const demo = label ? ASSIGN_DEMO[label] : undefined;
+  if (demo) {
+    return `
+      <div class="stick-hint-pair" aria-hidden="true">
+        ${stickHintPad(demo.stick === "left" ? demo.axis : null)}
+        ${stickHintPad(demo.stick === "right" ? demo.axis : null)}
+      </div>
+    `;
+  }
+  return `
+    <div class="stick-hint-pair" aria-hidden="true">
+      ${stickHintPad("both")}
+      ${stickHintPad("both")}
+    </div>
+  `;
+}
+
+function stickHintPad(axis: "h" | "v" | "both" | null): string {
+  const dotClass = axis ? `stick-hint-dot active-${axis}` : "stick-hint-dot";
+  return `
+    <div class="stick-hint">
+      <span class="stick-hint-axis horizontal"></span>
+      <span class="stick-hint-axis vertical"></span>
+      <span class="${dotClass}"></span>
+    </div>
+  `;
+}
+
+function isAxisSettled(session: DeviceSession, axis: number): boolean {
+  const span = Math.max(0, (session.config.calMax[axis] ?? 0) - (session.config.calMin[axis] ?? 0));
+  return span >= CAL_MIN_SPAN && Date.now() - session.calAxisLastGrowth[axis] >= CAL_PLATEAU_MS;
+}
+
+function pendingExtremesAxes(session: DeviceSession): string[] {
+  const pending: string[] = [];
+  for (let axis = 0; axis < AXES.length; axis++) {
+    if (!isAxisSettled(session, axis)) pending.push(FUNCTION_OPTIONS[session.config.functions[axis]] ?? AXES[axis]);
+  }
+  return pending;
+}
+
+function extremesStatusText(pending: string[]): string {
+  return pending.length ? `Still need: ${pending.join(", ")}` : "All axes captured — finishing…";
+}
+
+function remainingExtremesSeconds(session: DeviceSession): number {
+  return Math.max(0, (session.calExtremesEndAt - Date.now()) / 1000);
+}
+
+function calibrationProgressBar(axis: string, index: number, session: DeviceSession): string {
+  const percent = calibrationPercent(session.config.calMin[index] ?? 0, session.config.calMax[index] ?? 0);
+  const settled = isAxisSettled(session, index);
+  return `
+    <div class="channel-bar" data-cal-progress-index="${index}">
+      <span>${axis}</span>
+      <div class="bar-track"><span class="bar-fill ${settled ? "done" : ""}" data-cal-progress-fill style="width: ${percent}%"></span></div>
+      <strong data-cal-progress-value>${percent}%</strong>
+    </div>
+  `;
+}
+
+function calibrationPercent(min: number, max: number): number {
+  const span = Math.max(0, max - min);
+  return Math.round(Math.min(100, Math.max(0, (span / 4095) * 100)));
 }
 
 function channelsScreen(): string {
@@ -644,6 +831,227 @@ function filterTuningPanel(title: string): string {
   `;
 }
 
+// ---------------------------------------------------------------------------
+// TX/RX Module tab. Talks to a standalone switchable TX/RX module over its own
+// USB port (the "RX USB" connection slot). Fixed-role firmware answers `hello`
+// without `switchable=1`; the tab then explains how to move to module firmware.
+// ---------------------------------------------------------------------------
+
+function moduleScreen(): string {
+  const session = ui.rx;
+  const connected = isConnected(session);
+  const known = connected && Boolean(session.info.role);
+  const switchable = session.info.switchable === "1";
+  const role = session.info.role ?? "-";
+  const roleTag = known ? (role === "tx" ? "TX (transmitter)" : "RX (receiver)") : "-";
+  return `
+    <section class="panel screen-panel">
+      <div class="panel-title split">
+        <div>
+          <h2>TX/RX Module</h2>
+          <p class="muted">Plug the module in over USB, press <strong>Connect</strong> on the RX USB card above, then choose its role or update its firmware.</p>
+        </div>
+        <span class="tag ${!known ? "" : switchable ? "ok" : "bad"}">${!known ? "no module" : switchable ? "switchable" : "fixed-role firmware"}</span>
+      </div>
+
+      <dl class="summary-list">
+        <div><dt>Current role</dt><dd>${escapeHtml(roleTag)}</dd></div>
+        <div><dt>Firmware version</dt><dd>${escapeHtml(session.info.fw ?? "-")}</dd></div>
+        <div><dt>Firmware build</dt><dd>${escapeHtml(session.info.build ?? "-")}</dd></div>
+        <div><dt>Module type</dt><dd>${escapeHtml(session.info.module ?? (known ? "single-role" : "-"))}</dd></div>
+      </dl>
+
+      ${known && !switchable ? `<div class="comparison bad"><strong>Role switching unavailable</strong><p>This device runs fixed-role firmware. Flash the TX/RX module firmware (<code>txrx_module</code>) below, then reconnect.</p></div>` : ""}
+
+      <article class="subpanel">
+        <h3>Role</h3>
+        <p class="muted">Switching saves the role and reboots the module; no reflash needed. The module keeps its binding phrase.</p>
+        <div class="actions">
+          <button data-action="module-discover" ${disabled(!connected)}>Refresh</button>
+          <button data-action="module-set-role" data-role="tx" ${disabled(!connected || !switchable || role === "tx")}>Make TX</button>
+          <button data-action="module-set-role" data-role="rx" ${disabled(!connected || !switchable || role === "rx")}>Make RX</button>
+        </div>
+      </article>
+
+      <article class="subpanel">
+        <h3>Firmware</h3>
+        <p class="muted">Pick a <code>.uf2</code> file (e.g. <code>.pio/build/txrx_module/firmware.uf2</code>). The module reboots into its USB flash drive (<code>RPI-RP2</code>); select that drive when asked and the file is copied to it. Needs Chrome or Edge.</p>
+        <div class="actions">
+          <button data-action="module-flash" ${disabled(!connected)}>Flash firmware (.uf2)&hellip;</button>
+          <button class="secondary" data-action="module-bootsel" ${disabled(!connected || !session.caps.has("bootsel"))}>Reboot to flash mode only</button>
+        </div>
+      </article>
+    </section>
+  `;
+}
+
+async function moduleSetRole(role: BindingTarget): Promise<void> {
+  const session = ui.rx;
+  if (!isConnected(session)) return;
+  const ok = await confirmDialog({
+    title: `Switch module to ${role.toUpperCase()}?`,
+    body: `The module will save the new role and reboot, so it is unreachable for a few seconds. Any link running through it drops. Binding settings are kept. Do not do this while a vehicle is in use.`,
+    confirmLabel: `Switch to ${role.toUpperCase()}`,
+    danger: true,
+  });
+  if (!ok) return;
+  try {
+    await session.transport.request("role_set", { role }, 5000);
+  } catch (error) {
+    setStatus(`Role switch failed: ${errorToString(error)}`, "bad");
+    render();
+    return;
+  }
+  setStatus(`Module is rebooting as ${role.toUpperCase()}. Reconnecting...`, "info");
+  session.info = {};
+  render();
+  // The USB port re-enumerates on reboot; the transport auto-reconnects.
+  for (let attempt = 0; attempt < 8; attempt++) {
+    await new Promise((resolve) => window.setTimeout(resolve, 1000));
+    if (!isConnected(session)) continue;
+    try {
+      await discover(session);
+      return;
+    } catch {
+      // not ready yet
+    }
+  }
+  setStatus("Module rebooted. Press Connect to reconnect and confirm its new role.", "warn");
+  render();
+}
+
+async function moduleEnterBootsel(): Promise<void> {
+  const session = ui.rx;
+  try {
+    await session.transport.request("bootsel", {}, 3000);
+  } catch (error) {
+    setStatus(`Could not enter flash mode: ${errorToString(error)}`, "bad");
+    render();
+    return;
+  }
+  setStatus("Module is in flash mode (RPI-RP2 drive). Copy a .uf2 onto it, or use Flash firmware.", "ok");
+  render();
+}
+
+async function moduleFlashUf2(): Promise<void> {
+  const picker = (window as unknown as { showDirectoryPicker?: unknown }).showDirectoryPicker;
+  if (!picker) {
+    setStatus("Direct flashing needs Chrome or Edge. Use 'Reboot to flash mode only' and drag the .uf2 onto the RPI-RP2 drive.", "warn");
+    render();
+    return;
+  }
+  const file = await pickUf2File();
+  if (!file) return;
+  if (!(await readUf2Header(file))) {
+    setStatus(`${file.name} is not a valid UF2 file.`, "bad");
+    render();
+    return;
+  }
+  const flashOk = await confirmDialog({
+    title: "Flash firmware?",
+    body: `${file.name} (${Math.round(file.size / 1024)} KB) will be written to the module. It reboots into flash mode first; then you select the RPI-RP2 drive. Any link through it drops. The module keeps its role and binding settings.`,
+    confirmLabel: "Flash firmware",
+    danger: true,
+  });
+  if (!flashOk) return;
+  try {
+    await ui.rx.transport.request("bootsel", {}, 3000);
+  } catch (error) {
+    setStatus(`Could not enter flash mode: ${errorToString(error)}`, "bad");
+    render();
+    return;
+  }
+  setStatus("Module is in flash mode. Select the RPI-RP2 drive in the dialog...", "info");
+  render();
+  await new Promise((resolve) => window.setTimeout(resolve, 1500));
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const dir = await (window as any).showDirectoryPicker({ mode: "readwrite" });
+    if (dir.name && !/rpi-rp2|rp2350/i.test(dir.name)) {
+      const sure = await confirmDialog({
+        title: "Not the RPI-RP2 drive",
+        body: `The selected folder is "${dir.name}". Firmware should only be written to the RPI-RP2 drive. Write it there anyway?`,
+        confirmLabel: "Write anyway",
+        danger: true,
+      });
+      if (!sure) return;
+    }
+    const handle = await dir.getFileHandle(file.name, { create: true });
+    const writable = await handle.createWritable();
+    await writable.write(await file.arrayBuffer());
+    await writable.close();
+    setStatus(`${file.name} written. The module is rebooting into the new firmware; reconnect in a few seconds.`, "ok");
+  } catch (error) {
+    // The drive disappears the instant the last block lands, which can surface as an error even on success.
+    setStatus(`Flash finished or was interrupted (${errorToString(error)}). Reconnect to check the firmware version.`, "warn");
+  }
+  render();
+}
+
+interface ConfirmOptions {
+  title: string;
+  body: string;
+  confirmLabel: string;
+  danger?: boolean;
+}
+
+// Themed modal. Mounted on document.body (outside #app) so the periodic
+// render() of the app shell cannot wipe it while it is open.
+function confirmDialog(options: ConfirmOptions): Promise<boolean> {
+  return new Promise((resolve) => {
+    const previousFocus = document.activeElement as HTMLElement | null;
+    const overlay = document.createElement("div");
+    overlay.className = "modal-backdrop";
+    overlay.innerHTML = `
+      <div class="modal" role="alertdialog" aria-modal="true" aria-labelledby="modal-title" aria-describedby="modal-body">
+        <h3 id="modal-title">${escapeHtml(options.title)}</h3>
+        <p id="modal-body">${escapeHtml(options.body)}</p>
+        <div class="actions modal-actions">
+          <button class="secondary" data-modal="cancel">Cancel</button>
+          <button class="${options.danger ? "danger" : ""}" data-modal="confirm">${escapeHtml(options.confirmLabel)}</button>
+        </div>
+      </div>`;
+    const finish = (result: boolean) => {
+      document.removeEventListener("keydown", onKey, true);
+      overlay.remove();
+      previousFocus?.focus?.();
+      resolve(result);
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        finish(false);
+      }
+    };
+    overlay.addEventListener("click", (event) => {
+      const target = event.target as HTMLElement;
+      if (target === overlay || target.dataset.modal === "cancel") finish(false);
+      else if (target.dataset.modal === "confirm") finish(true);
+    });
+    document.addEventListener("keydown", onKey, true);
+    document.body.appendChild(overlay);
+    // Safe default focus: Cancel, so a stray Enter never confirms a reboot.
+    overlay.querySelector<HTMLButtonElement>('[data-modal="cancel"]')?.focus();
+  });
+}
+
+function pickUf2File(): Promise<File | null> {
+  return new Promise((resolve) => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = ".uf2";
+    input.addEventListener("change", () => resolve(input.files?.[0] ?? null), { once: true });
+    input.addEventListener("cancel", () => resolve(null), { once: true });
+    input.click();
+  });
+}
+
+async function readUf2Header(file: File): Promise<boolean> {
+  if (file.size < 512 || file.size % 512 !== 0) return false;
+  const view = new DataView(await file.slice(0, 512).arrayBuffer());
+  return view.getUint32(0, true) === 0x0a324655 && view.getUint32(4, true) === 0x9e5d5157;
+}
+
 function bindingScreen(): string {
   const comparison = bindingComparison();
   return `
@@ -716,6 +1124,10 @@ async function handleAction(target: HTMLElement): Promise<void> {
   if (action === "connect" && session) await connect(session);
   if (action === "disconnect" && session) {
     stopStatePolling(session);
+    if (session.key === "rc") {
+      stopCalWizardTimer(session);
+      session.calStep = "idle";
+    }
     await session.transport.streamState(250, false).catch(() => undefined);
     await session.transport.disconnect();
   }
@@ -733,10 +1145,18 @@ async function handleAction(target: HTMLElement): Promise<void> {
   if (action === "apply-config") await applyConfig();
   if (action === "save-config") await saveConfig();
   if (action === "defaults") await resetDefaults();
-  if (action === "cal-start") await calibrationStart();
+  if (action === "cal-intro-open") calibrationIntroOpen();
+  if (action === "cal-intro-cancel") calibrationIntroCancel();
+  if (action === "cal-intro-begin") await calibrationWizardStart();
+  if (action === "cal-center-ok") await calibrationCenterConfirm();
   if (action === "cal-sample") await calibrationSample();
-  if (action === "cal-finish") await calibrationFinish();
+  if (action === "cal-finish") await calibrationWizardFinish();
+  if (action === "cal-cancel") await calibrationCancel();
   if (action === "tx-hello") await txHello();
+  if (action === "module-discover") await discover(ui.rx);
+  if (action === "module-set-role") await moduleSetRole(target.dataset.role as BindingTarget);
+  if (action === "module-bootsel") await moduleEnterBootsel();
+  if (action === "module-flash") await moduleFlashUf2();
   if (action === "binding-get") await bindingCommand(target.dataset.target as BindingTarget, "get");
   if (action === "binding-set") await bindingCommand(target.dataset.target as BindingTarget, "set");
   if (action === "binding-verify") await bindingCommand(target.dataset.target as BindingTarget, "verify");
@@ -882,31 +1302,272 @@ async function resetDefaults(): Promise<void> {
   render();
 }
 
-async function calibrationStart(): Promise<void> {
-  const response = await ui.rc.transport.calibrationStart();
-  mergeLiveStateFields(ui.rc, response.fields);
-  queueLiveStateUpdate(ui.rc);
-  setStatus("Calibration started. Move sticks through full travel.", "ok");
+function calibrationIntroOpen(): void {
+  if (!isConnected(ui.rc)) return;
+  ui.rc.calIntroOpen = true;
+  render();
+}
+
+function calibrationIntroCancel(): void {
+  ui.rc.calIntroOpen = false;
+  render();
+}
+
+async function calibrationWizardStart(): Promise<void> {
+  const session = ui.rc;
+  if (!isConnected(session)) return;
+  const response = await session.transport.getState();
+  session.state = normalizeState(response.fields);
+  session.calIntroOpen = false;
+  session.calStep = "assign";
+  session.calAssignIndex = 0;
+  session.calAssignedAxes = [];
+  session.calAssignBaseline = [...session.state.adcFiltered];
+  session.calAssignHits = 0;
+  session.calMeasuredCenter = null;
+  queueLiveStateUpdate(session);
+  startCalWizardTimer(session);
+  setStatus(`Calibration started. Move the ${ASSIGN_SEQUENCE[0].label.toLowerCase()} stick.`, "ok");
+  render();
+}
+
+async function calibrationCenterConfirm(): Promise<void> {
+  const session = ui.rc;
+  if (!isConnected(session) || session.calStep !== "center") return;
+  const response = await session.transport.calibrationStart();
+  mergeLiveStateFields(session, response.fields);
+  queueLiveStateUpdate(session);
+  // The firmware's "adc" reply here is the true resting position, captured the instant
+  // the sticks were centered — snapshot it now, before extremes-phase movement overwrites it.
+  session.calMeasuredCenter = parseNumberArray(response.fields.adc, session.state?.adcFiltered ?? [2048, 2048, 2048, 2048]);
+  session.calStep = "extremes";
+  session.calExtremesEndAt = Date.now() + CAL_EXTREMES_MAX_MS;
+  const now = Date.now();
+  session.calAxisLastGrowth = [now, now, now, now];
+  session.calAxisPrevSpan = [0, 0, 0, 0];
+  setStatus("Move every stick to its limits — capturing automatically.", "ok");
   render();
 }
 
 async function calibrationSample(): Promise<void> {
-  const sample = await ui.rc.transport.calibrationSample();
-  mergeCalibrationFields(ui.rc, sample.fields);
-  mergeLiveStateFields(ui.rc, sample.fields);
-  const response = await ui.rc.transport.getState();
-  ui.rc.state = normalizeState(response.fields);
-  queueLiveStateUpdate(ui.rc);
+  await performCalSample(ui.rc);
   setStatus("Captured calibration sample.", "ok");
   render();
 }
 
-async function calibrationFinish(): Promise<void> {
-  await ui.rc.transport.calibrationFinish(true);
+async function calibrationWizardFinish(): Promise<void> {
+  const session = ui.rc;
+  stopCalWizardTimer(session);
+  session.calStep = "idle";
+  await session.transport.calibrationFinish(true);
   await loadConfig();
+  const warnings = await applyCalibrationTrim(session);
+  await session.transport.save();
   await refreshStateSnapshot();
-  setStatus("Calibration finished and saved.", "ok");
+  await resumeLiveUpdates(session);
+  if (warnings.length > 0) {
+    // Still saved -- blocking entirely would trap the user in the wizard with
+    // no way to proceed while they go fix a mechanical issue on the bench --
+    // but this needs to be impossible to miss, not a passing status line.
+    setStatus(`Calibration saved, but needs attention: ${warnings.join("; ")}`, "bad");
+  } else {
+    setStatus("Calibration finished and saved.", "ok");
+  }
   render();
+}
+
+// Trims a small margin off each raw endpoint and rounds to clean numbers, so a single
+// noise sample at the very edge of a sweep doesn't become the permanent endpoint.
+const CAL_TRIM_MARGIN_RATIO = 0.015;
+const CAL_ROUND_STEP = 5;
+
+// A biased Hall-effect magnet leaves one side of an axis with much less usable
+// raw range than the other. Because each side is stretched independently to
+// fill the full output range, a small usable range on one side means a tiny
+// physical movement there swings the output from center to full deflection --
+// the exact "sudden jump" symptom a biased magnet produces. Catching this at
+// calibration time (on a bench) beats discovering it as a control problem in
+// the air.
+const CAL_MIN_USABLE_SPAN = 200; // raw ADC counts; below this, that side is oversensitive regardless of the other side
+const CAL_ASYMMETRY_MIN_RATIO = 0.4; // smaller side's span must be at least this fraction of the larger side's
+
+function calibrationAsymmetryWarning(min: number, center: number, max: number): string | null {
+  const leftSpan = center - min;
+  const rightSpan = max - center;
+  if (leftSpan <= 0 || rightSpan <= 0) {
+    return "one side has no usable range at all -- check magnet alignment";
+  }
+  const smaller = Math.min(leftSpan, rightSpan);
+  const larger = Math.max(leftSpan, rightSpan);
+  if (smaller < CAL_MIN_USABLE_SPAN) {
+    return `usable range on one side is only ${smaller} raw counts (needs >= ${CAL_MIN_USABLE_SPAN}) -- that side will be oversensitive`;
+  }
+  if (smaller / larger < CAL_ASYMMETRY_MIN_RATIO) {
+    return `sides are asymmetric (${leftSpan} vs ${rightSpan} raw counts) -- one side will be much more sensitive than the other`;
+  }
+  return null;
+}
+
+async function applyCalibrationTrim(session: DeviceSession): Promise<string[]> {
+  const warnings: string[] = [];
+  for (let axis = 0; axis < AXES.length; axis++) {
+    const measuredCenter = session.calMeasuredCenter?.[axis];
+    const trimmed = trimAndRoundCalibration(session.config.calMin[axis] ?? 0, session.config.calMax[axis] ?? 4095, measuredCenter);
+    session.config.calMin[axis] = trimmed.min;
+    session.config.calCenter[axis] = trimmed.center;
+    session.config.calMax[axis] = trimmed.max;
+    await persistConfigPath(`cal.axis.${axis}`);
+    const warning = calibrationAsymmetryWarning(trimmed.min, trimmed.center, trimmed.max);
+    if (warning) warnings.push(`${AXES[axis]}: ${warning}`);
+  }
+  return warnings;
+}
+
+function trimAndRoundCalibration(min: number, max: number, measuredCenter?: number): { min: number; center: number; max: number } {
+  const span = Math.max(0, max - min);
+  const margin = Math.round(span * CAL_TRIM_MARGIN_RATIO);
+  const trimmedMin = clampInt(roundToStep(min + margin, CAL_ROUND_STEP), 0, 4093);
+  const trimmedMax = clampInt(roundToStep(max - margin, CAL_ROUND_STEP), trimmedMin + 2, 4095);
+  // Prefer the actually-measured rest position over the geometric midpoint — gimbal
+  // travel is rarely perfectly symmetric, so min/max midpoint can sit off true center.
+  const centerSource = measuredCenter ?? (trimmedMin + trimmedMax) / 2;
+  const center = clampInt(roundToStep(centerSource, CAL_ROUND_STEP), trimmedMin + 1, trimmedMax - 1);
+  return { min: trimmedMin, center, max: trimmedMax };
+}
+
+function roundToStep(value: number, step: number): number {
+  return Math.round(value / step) * step;
+}
+
+async function calibrationCancel(): Promise<void> {
+  const session = ui.rc;
+  if (session.calStep === "extremes") {
+    // cal_start already armed safety hold on the firmware; finishing (not abandoning)
+    // is the only way to clear that state and restore normal CRSF output.
+    await calibrationWizardFinish();
+    setStatus("Calibration ended early and saved.", "warn");
+    return;
+  }
+  stopCalWizardTimer(session);
+  session.calStep = "idle";
+  await resumeLiveUpdates(session);
+  setStatus("Calibration cancelled.", "warn");
+  render();
+}
+
+async function resumeLiveUpdates(session: DeviceSession): Promise<void> {
+  // The wizard's own polling was the only thing refreshing session.state while it ran;
+  // once it stops, the stick display goes stale unless normal streaming/polling is (re)started.
+  if (!session.streamEnabled && isConnected(session)) {
+    await streamState(session).catch((error: unknown) => appendLog(session, `! resume live state: ${errorToString(error)}`));
+  }
+}
+
+async function performCalSample(session: DeviceSession): Promise<void> {
+  const sample = await session.transport.calibrationSample();
+  mergeCalibrationFields(session, sample.fields);
+  mergeLiveStateFields(session, sample.fields);
+  queueLiveStateUpdate(session);
+}
+
+function startCalWizardTimer(session: DeviceSession): void {
+  stopCalWizardTimer(session);
+  session.calTimer = window.setInterval(() => void calWizardTick(session), CAL_TICK_MS);
+}
+
+function stopCalWizardTimer(session: DeviceSession): void {
+  if (session.calTimer !== 0) {
+    window.clearInterval(session.calTimer);
+    session.calTimer = 0;
+  }
+  session.calSampling = false;
+}
+
+async function calWizardTick(session: DeviceSession): Promise<void> {
+  if (session.calSampling || !isConnected(session)) return;
+  session.calSampling = true;
+  try {
+    if (session.calStep === "assign" || session.calStep === "center") {
+      const response = await session.transport.getState();
+      session.state = normalizeState(response.fields);
+      queueLiveStateUpdate(session);
+      if (session.calStep === "assign") evaluateAxisAssignment(session);
+    } else if (session.calStep === "extremes") {
+      await performCalSample(session);
+      updateAxisGrowthTracking(session);
+      updateExtremesStatus(session);
+      if (Date.now() >= session.calExtremesEndAt || isExtremesCaptureComplete(session)) {
+        await calibrationWizardFinish();
+      }
+    }
+  } catch (error) {
+    appendLog(session, `! calibration: ${errorToString(error)}`);
+  } finally {
+    session.calSampling = false;
+  }
+}
+
+function evaluateAxisAssignment(session: DeviceSession): void {
+  if (!session.state || !session.calAssignBaseline) return;
+  const baseline = session.calAssignBaseline;
+  const candidates = [0, 1, 2, 3].filter((index) => !session.calAssignedAxes.includes(index));
+  const deltas = candidates
+    .map((index) => ({ index, delta: Math.abs(session.state!.adcFiltered[index] - baseline[index]) }))
+    .sort((a, b) => b.delta - a.delta);
+  const top = deltas[0];
+  const runnerUp = deltas[1];
+  const dominant = !!top && top.delta >= CAL_ASSIGN_THRESHOLD && (!runnerUp || top.delta >= runnerUp.delta * CAL_ASSIGN_DOMINANCE);
+  session.calAssignHits = dominant ? session.calAssignHits + 1 : 0;
+  if (dominant && top && session.calAssignHits >= CAL_ASSIGN_CONFIRM_TICKS) {
+    void commitAxisAssignment(session, top.index);
+  }
+}
+
+async function commitAxisAssignment(session: DeviceSession, axisIndex: number): Promise<void> {
+  const target = ASSIGN_SEQUENCE[session.calAssignIndex];
+  if (!target) return;
+  updateConfig(`axis.function.${axisIndex}`, target.func);
+  await persistConfigPath(`axis.function.${axisIndex}`);
+  session.calAssignedAxes.push(axisIndex);
+  session.calAssignIndex += 1;
+  session.calAssignHits = 0;
+
+  if (session.calAssignIndex >= ASSIGN_SEQUENCE.length) {
+    session.calStep = "center";
+    setStatus("Axes assigned. Center all sticks, then press OK.", "ok");
+  } else {
+    session.calAssignBaseline = session.state ? [...session.state.adcFiltered] : session.calAssignBaseline;
+    setStatus(`Assigned ${target.label}. Now move the ${ASSIGN_SEQUENCE[session.calAssignIndex].label.toLowerCase()} stick.`, "ok");
+  }
+  render();
+}
+
+function updateAxisGrowthTracking(session: DeviceSession): void {
+  const now = Date.now();
+  for (let axis = 0; axis < AXES.length; axis++) {
+    const span = Math.max(0, (session.config.calMax[axis] ?? 0) - (session.config.calMin[axis] ?? 0));
+    if (span > session.calAxisPrevSpan[axis] + 1) {
+      session.calAxisLastGrowth[axis] = now;
+      session.calAxisPrevSpan[axis] = span;
+    }
+  }
+}
+
+function isExtremesCaptureComplete(session: DeviceSession): boolean {
+  const now = Date.now();
+  for (let axis = 0; axis < AXES.length; axis++) {
+    const span = Math.max(0, (session.config.calMax[axis] ?? 0) - (session.config.calMin[axis] ?? 0));
+    if (span < CAL_MIN_SPAN) return false;
+    if (now - session.calAxisLastGrowth[axis] < CAL_PLATEAU_MS) return false;
+  }
+  return true;
+}
+
+function updateExtremesStatus(session: DeviceSession): void {
+  const countdown = document.querySelector<HTMLElement>("[data-cal-countdown]");
+  if (countdown) countdown.textContent = remainingExtremesSeconds(session).toFixed(1);
+  const pendingLabel = document.querySelector<HTMLElement>("[data-cal-pending]");
+  if (pendingLabel) pendingLabel.textContent = extremesStatusText(pendingExtremesAxes(session));
 }
 
 async function txHello(): Promise<void> {
@@ -999,6 +1660,22 @@ function updateLiveTables(session: DeviceSession): void {
   updateIndexedText("[data-live-adc-index]", session.state.adc);
   updateIndexedText("[data-live-adc-filtered-index]", session.state.adcFiltered);
   updateIndexedText("[data-live-ch-index]", session.state.ch);
+}
+
+function updateCalibrationProgress(session: DeviceSession): void {
+  if (session.key !== "rc") return;
+  document.querySelectorAll<HTMLElement>("[data-cal-progress-index]").forEach((row) => {
+    const index = Number(row.dataset.calProgressIndex);
+    if (!Number.isInteger(index)) return;
+    const percent = calibrationPercent(session.config.calMin[index] ?? 0, session.config.calMax[index] ?? 0);
+    const fill = row.querySelector<HTMLElement>("[data-cal-progress-fill]");
+    const label = row.querySelector<HTMLElement>("[data-cal-progress-value]");
+    if (fill) {
+      fill.style.width = `${percent}%`;
+      fill.classList.toggle("done", isAxisSettled(session, index));
+    }
+    if (label) label.textContent = `${percent}%`;
+  });
 }
 
 function updateIndexedText(selector: string, values: number[]): void {

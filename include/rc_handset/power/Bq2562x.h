@@ -24,14 +24,16 @@ enum class Bq2562xChargeStatus : uint8_t {
     TopOff = 3,
 };
 
+// Values match BQ25895's VBUS_STAT[7:5] field (REG0B) exactly -- see
+// Bq2562x.cpp for why this driver targets a BQ25895 despite its name.
 enum class Bq2562xVbusStatus : uint8_t {
     NoInput = 0,
     UsbSdp = 1,
     UsbCdp = 2,
     UsbDcp = 3,
-    UnknownAdapter = 4,
-    NonStandardAdapter = 5,
-    Hvdcp = 6,
+    Hvdcp = 4,
+    UnknownAdapter = 5,
+    NonStandardAdapter = 6,
     OtgMode = 7,
 };
 
@@ -56,6 +58,16 @@ public:
     Bq2562xResult readChargeStatus(Bq2562xChargeStatus& status);
     Bq2562xResult readVbusStatus(Bq2562xVbusStatus& status);
     Bq2562xResult readBatteryVoltageMv(uint16_t& voltageMv);
+
+    // Non-blocking split of the same one-shot ADC conversion readBatteryVoltageMv()
+    // busy-waits for -- see Bq2562x.cpp for why the blocking version is unsuitable
+    // for a per-second poll on the main loop. Drive as: start once, then poll
+    // isBatteryVoltageConversionDone() on later ticks until it reports done,
+    // then call readBatteryVoltageResultMv() exactly once.
+    Bq2562xResult startBatteryVoltageConversion();
+    Bq2562xResult isBatteryVoltageConversionDone(bool& done);
+    Bq2562xResult readBatteryVoltageResultMv(uint16_t& voltageMv);
+
     Bq2562xResult readSnapshot(BatterySnapshot& snapshot);
     Bq2562xResult requestShipModeForPowerOff();
     Bq2562xResult readChargerControl3(uint8_t& value);

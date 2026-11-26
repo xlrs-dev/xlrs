@@ -21,6 +21,19 @@ PowerButtonUpdate PowerButtonController::updateBootGate(bool pressed, uint32_t n
         out.progressPercent = 100;
         return out;
     }
+    if (bootGateState_ == BootGateState::ReadyToRelease) {
+        if (!pressed) {
+            bootGateState_ = BootGateState::Satisfied;
+            out.bootGateState = bootGateState_;
+            out.progressPercent = 100;
+            out.event = PowerButtonEvent::BootHoldSatisfied;
+            return out;
+        }
+        out.bootGateState = bootGateState_;
+        out.progressPercent = 100;
+        out.powerUiActive = true;
+        return out;
+    }
     if (bootGateState_ != BootGateState::Waiting) {
         out.bootGateState = bootGateState_;
         out.progressPercent = bootGateState_ == BootGateState::Satisfied ? 100 : 0;
@@ -37,10 +50,9 @@ PowerButtonUpdate PowerButtonController::updateBootGate(bool pressed, uint32_t n
     out.progressPercent = percent(elapsed, config_.powerOnHoldMs);
     out.powerUiActive = true;
     if (elapsed >= config_.powerOnHoldMs) {
-        bootGateState_ = BootGateState::Satisfied;
+        bootGateState_ = BootGateState::ReadyToRelease;
         out.bootGateState = bootGateState_;
         out.progressPercent = 100;
-        out.event = PowerButtonEvent::BootHoldSatisfied;
     }
     return out;
 }
@@ -50,10 +62,18 @@ void PowerButtonController::resetPowerOff() {
     powerOffState_ = PowerOffState::Idle;
 }
 
-PowerButtonUpdate PowerButtonController::updatePowerOff(bool pressed, uint32_t nowMs) {
+PowerButtonUpdate PowerButtonController::updatePowerOff(bool pressed, uint32_t nowMs, bool rxLinkActive) {
     PowerButtonUpdate out{};
     out.bootGateState = bootGateState_;
     out.powerOffState = powerOffState_;
+
+    if (pressed && rxLinkActive) {
+        if (powerOffState_ != PowerOffState::Idle) resetPowerOff();
+        out.powerOffState = powerOffState_;
+        out.event = PowerButtonEvent::PowerOffBlocked;
+        out.powerUiActive = true;
+        return out;
+    }
 
     if (pressed) {
         if (powerOffState_ == PowerOffState::Idle) {
@@ -80,7 +100,9 @@ PowerButtonUpdate PowerButtonController::updatePowerOff(bool pressed, uint32_t n
     }
 
     if (powerOffState_ == PowerOffState::ReadyToRelease) {
-        out.event = PowerButtonEvent::PowerOffConfirmed;
+        // Re-checked here, not just on the way in: rxLinkActive could have gone
+        // true in the instant between reaching 100% and the button releasing.
+        out.event = rxLinkActive ? PowerButtonEvent::PowerOffBlocked : PowerButtonEvent::PowerOffConfirmed;
     } else if (powerOffState_ == PowerOffState::Holding) {
         out.event = PowerButtonEvent::PowerOffCancelled;
     }

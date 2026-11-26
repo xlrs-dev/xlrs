@@ -13,6 +13,7 @@ struct PowerButtonConfig {
 
 enum class BootGateState : uint8_t {
     Waiting = 0,
+    ReadyToRelease,
     Satisfied,
     Aborted,
 };
@@ -32,6 +33,10 @@ enum class PowerButtonEvent : uint8_t {
     PowerOffReady,
     PowerOffCancelled,
     PowerOffConfirmed,
+    // Power-off was held (or released) while rxLinkActive was true. Refused --
+    // powering off here would leave the drone flying with no way to regain
+    // control. Any in-progress hold is reset, same as a cancel.
+    PowerOffBlocked,
 };
 
 struct PowerButtonUpdate {
@@ -50,7 +55,10 @@ public:
     PowerButtonUpdate updateBootGate(bool pressed, uint32_t nowMs);
 
     void resetPowerOff();
-    PowerButtonUpdate updatePowerOff(bool pressed, uint32_t nowMs);
+    // rxLinkActive: true while the handset has a live RX link. Held or released
+    // while true, power-off is refused (PowerOffBlocked) instead of counting
+    // down or confirming.
+    PowerButtonUpdate updatePowerOff(bool pressed, uint32_t nowMs, bool rxLinkActive = false);
 
     BootGateState bootGateState() const { return bootGateState_; }
     PowerOffState powerOffState() const { return powerOffState_; }

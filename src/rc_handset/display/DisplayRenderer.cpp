@@ -115,6 +115,7 @@ void renderBindingStatus(const DisplayState& state, DisplayLayout& layout) {
         addLine(layout, "Waiting receiver");
     }
     addLine(layout, "%s", safeText(state.binding.message, "No bind update"));
+    if (state.binding.hint) addLine(layout, "%s", state.binding.hint);
 }
 
 } // namespace
@@ -136,6 +137,12 @@ void renderDisplayLayout(const DisplayState& state, DisplayLayout& layout) {
             break;
         case Screen::BindingStatus:
             renderBindingStatus(state, layout);
+            break;
+        case Screen::BatteryStatus:
+            // Custom-drawn in OledDisplay.cpp, never actually routed through
+            // here (see OledDisplay::show) -- text fallback only in case that
+            // ever changes.
+            addLine(layout, "BATTERY");
             break;
     }
 }

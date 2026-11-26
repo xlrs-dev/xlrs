@@ -197,6 +197,8 @@ const char* rateName(lora_link::RateId rate) {
     switch (rate) {
     case lora_link::RateId::L250:
         return "L250";
+    case lora_link::RateId::L50:
+        return "L50";
     case lora_link::RateId::L100:
     default:
         return "L100";

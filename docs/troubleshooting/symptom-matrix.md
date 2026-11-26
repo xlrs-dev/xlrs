@@ -12,5 +12,6 @@
 | TX telemetry stale or zero | Downlink telemetry slots missing, RX not transmitting telemetry | Watch TX `LQdown`, RX state, and PHY counters on both sides |
 | Controller input ignored | TX UART wiring/protocol issue | Verify controller UART at 420000 8N1 and TX app ACK/PONG behavior |
 | RX status LED dark or never changes | Wrong LED pin/polarity or LED wiring | Confirm `rx_lora_pico` uses `STATUS_LED_PIN=10`, active high; check GP10 wiring |
+| Sticks/channels unresponsive for many seconds after switching TX or RX power source (e.g. USB to battery, or the reverse) | A momentary gap on `VCC_5V` causes a full MCU reboot (USB and the CRSF connector's 5V pin share one un-isolated net with no backup cap — see [docs/hardware/pinout.md](../hardware/pinout.md) Power section). Firmware's own reconnect path finishes in well under 1s (`kFailsafeTimeoutMs` = 250 ms, disarm burst 500 ms), so a stall much longer than that is downstream of firmware | Keep both supplies briefly overlapping during the switch if a clean handoff matters; separately check the flight controller's Betaflight Failsafe tab → "Stage 2 failsafe procedure", which is the most likely source of a multi-second hold |
 
 See [index.md](index.md) for the full troubleshooting flow.

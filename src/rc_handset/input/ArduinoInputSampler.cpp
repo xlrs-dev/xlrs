@@ -3,6 +3,7 @@
 #if !defined(UNIT_TEST)
 
 #include <Arduino.h>
+#include <hardware/gpio.h>
 
 namespace rc_handset {
 namespace input {
@@ -42,6 +43,14 @@ void ArduinoInputSampler::begin(const ArduinoInputSamplerConfig& config) {
         pinMode(pin, INPUT_PULLUP);
     }
     analogReadResolution(12);
+    // Explicitly disable the digital input buffer and pull resistors on each
+    // analog pin -- leaving either enabled is a documented RP2040/RP2350 ADC
+    // noise source (the digital input circuitry loads the analog signal).
+    // Doesn't rely on the Arduino core doing this for us implicitly.
+    for (uint8_t pin : config_.pins.analog) {
+        gpio_disable_pulls(pin);
+        gpio_set_input_enabled(pin, false);
+    }
 }
 
 void ArduinoInputSampler::configure(const ArduinoInputSamplerConfig& config) {
@@ -71,6 +80,12 @@ InputSnapshot ArduinoInputSampler::read() {
 }
 
 uint16_t ArduinoInputSampler::readAveragedAdc(uint8_t pin) const {
+    // Discard the first conversion after the ADC mux switches to this pin --
+    // the sample-and-hold capacitor still carries residual charge from
+    // whichever pin was read last (read() cycles through all 4 axes), which
+    // otherwise leaks a bit of the previous axis's voltage into this one's
+    // first sample on every single read cycle.
+    (void)analogRead(pin);
     uint32_t sum = 0;
     for (uint8_t i = 0; i < config_.adcSamples; ++i) {
         sum += analogRead(pin);

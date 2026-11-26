@@ -5,6 +5,7 @@
 #include "lora_link/control/frame.h"
 #include "lora_link/protocol.h"
 #include "lora_link/rf/scheduler.h"
+#include "lora_link/role_store.h"
 #include "rc_handset/input/InputPipeline.h"
 #include "rc_handset/core1/Snapshot.h"
 #include "rc_handset/config/config.h"
@@ -17,7 +18,6 @@
 
 using namespace lora_link;
 using namespace rc_handset::input;
-namespace control = lora_link::control;
 namespace link_rf = lora_link::rf;
 namespace handset_config = rc_handset::config;
 namespace handset_core1 = rc_handset::core1;
@@ -536,6 +536,42 @@ static void test_rf_scheduler_rx_tick_tock_event_sequencing() {
     TEST_ASSERT_EQUAL_UINT32(1, scheduler.stats().missedRcFrames);
 }
 
+// Regression: rxLoop() writes CRSF channels immediately on a decoded packet, then again
+// on that packet's own Tock event. Without this flag it double-writes every frame, which
+// is irregular enough to confuse Betaflight's Auto RC Smoothing cutoff detection.
+static void test_rf_scheduler_rx_tracks_received_frame_for_current_tock() {
+    uint8_t uid[kUidSize];
+    deriveUid("scheduler-rx-tock-frame-flag", uid);
+    link_rf::RxScheduler scheduler;
+    scheduler.begin(uid, kRates[0]);
+    OtaSyncPayload sync{};
+    sync.nonce = 5;
+    sync.fhssIndex = 2;
+    sync.rateIndex = static_cast<uint8_t>(RateId::L250);
+    sync.nextRateIndex = static_cast<uint8_t>(RateId::L250);
+    sync.telemetryRatio = kRates[0].telemetryRatio;
+    sync.fhssHopInterval = kRates[0].fhssHopInterval;
+
+    // A sync frame counts as "received" for its tock -- callers must not double-write.
+    TEST_ASSERT_TRUE(scheduler.onValidSyncFrame(sync, 10000));
+    TEST_ASSERT_TRUE(scheduler.receivedFrameForCurrentTock());
+    scheduler.onTimerEvent(link_rf::RxTimerHalfEvent::Tock,
+                           scheduler.packetTockReferenceUs(10000), true, 10);
+    // The flag clears once the tock it belonged to has been consumed.
+    TEST_ASSERT_FALSE(scheduler.receivedFrameForCurrentTock());
+
+    // An RC frame likewise marks its tock as already served...
+    TEST_ASSERT_TRUE(scheduler.onValidRcFrame(6, 20000, 20));
+    TEST_ASSERT_TRUE(scheduler.receivedFrameForCurrentTock());
+    scheduler.onTimerEvent(link_rf::RxTimerHalfEvent::Tock, 20000, true, 20);
+    TEST_ASSERT_FALSE(scheduler.receivedFrameForCurrentTock());
+
+    // ...but a tock with no frame in between must NOT report one, so the fallback
+    // (held-channel) output path still runs for a genuinely missed frame.
+    scheduler.onTimerEvent(link_rf::RxTimerHalfEvent::Tock, 30000, true, 30);
+    TEST_ASSERT_FALSE(scheduler.receivedFrameForCurrentTock());
+}
+
 static void test_rf_scheduler_rx_rejects_invalid_sync_metadata() {
     uint8_t uid[kUidSize];
     deriveUid("scheduler-rx-bad-sync", uid);
@@ -786,6 +822,69 @@ static void test_spike_gate_holds_one_frame_channel_outlier() {
     TEST_ASSERT_FALSE(gate.havePending);
 }
 
+static void test_spike_gate_accepts_single_throttle_jump() {
+    uint16_t previous[kRcChannelCount];
+    uint16_t candidate[kRcChannelCount];
+    for (uint8_t i = 0; i < kRcChannelCount; ++i) {
+        previous[i] = kCrsfRawMid;
+        candidate[i] = kCrsfRawMid;
+    }
+    candidate[3] = kCrsfRaw2000;
+
+    RcSpikeGate gate{};
+    TEST_ASSERT_TRUE(acceptRcChannelsWithSpikeGate(previous, true, candidate, gate, 160, 80));
+    TEST_ASSERT_FALSE(gate.havePending);
+}
+
+// Regression: arming (an AUX/switch channel flip) landing in the same or an
+// adjacent frame as the throttle motion it triggers must not defeat the
+// throttle bypass -- switches snap instantly by design, so a large jump on
+// one alongside throttle isn't a spike or corrupt data.
+static void test_spike_gate_accepts_throttle_jump_with_simultaneous_aux_switch() {
+    uint16_t previous[kRcChannelCount];
+    uint16_t candidate[kRcChannelCount];
+    for (uint8_t i = 0; i < kRcChannelCount; ++i) {
+        previous[i] = kCrsfRawMid;
+        candidate[i] = kCrsfRawMid;
+    }
+    candidate[3] = kCrsfRaw2000;  // throttle jumps
+    candidate[4] = kCrsfRaw2000;  // AUX1/arm switch also jumps
+
+    RcSpikeGate gate{};
+    TEST_ASSERT_TRUE(acceptRcChannelsWithSpikeGate(previous, true, candidate, gate, 160, 80));
+    TEST_ASSERT_FALSE(gate.havePending);
+}
+
+// A large jump on roll/pitch/yaw alongside throttle still looks like a real
+// spike or corrupt frame, so this combination must remain gated.
+static void test_spike_gate_holds_throttle_jump_with_simultaneous_roll_jump() {
+    uint16_t previous[kRcChannelCount];
+    uint16_t candidate[kRcChannelCount];
+    for (uint8_t i = 0; i < kRcChannelCount; ++i) {
+        previous[i] = kCrsfRawMid;
+        candidate[i] = kCrsfRawMid;
+    }
+    candidate[3] = kCrsfRaw2000;  // throttle jumps
+    candidate[0] = kCrsfRaw2000;  // roll also jumps
+
+    RcSpikeGate gate{};
+    TEST_ASSERT_FALSE(acceptRcChannelsWithSpikeGate(previous, true, candidate, gate, 160, 80));
+    TEST_ASSERT_TRUE(gate.havePending);
+}
+
+static void test_spike_gate_accepts_large_jump_from_neutral_previous() {
+    uint16_t previous[kRcChannelCount];
+    uint16_t candidate[kRcChannelCount];
+    for (uint8_t i = 0; i < kRcChannelCount; ++i) {
+        previous[i] = (i == 3) ? kCrsfRaw1000 : kCrsfRawMid;
+        candidate[i] = kCrsfRaw2000;
+    }
+
+    RcSpikeGate gate{};
+    TEST_ASSERT_TRUE(acceptRcChannelsWithSpikeGate(previous, true, candidate, gate, 160, 80));
+    TEST_ASSERT_FALSE(gate.havePending);
+}
+
 static void test_spike_gate_accepts_confirmed_large_channel_step() {
     uint16_t previous[kRcChannelCount];
     uint16_t first[kRcChannelCount];
@@ -822,6 +921,80 @@ static void test_spike_gate_accepts_fast_continuous_ramp() {
     TEST_ASSERT_FALSE(gate.havePending);
 }
 
+// Regression: TX cold-boots with failsafe channels while the handset is already
+// streaming real stick positions. Its first CRSF frame ever (havePrevious=false,
+// mirrored from g_lastRcInputMs==0 in serviceTxCrsfInput) is a huge simultaneous
+// jump on every channel and must be accepted immediately, not walked in slowly
+// by the spike gate.
+static void test_spike_gate_accepts_cold_boot_first_frame_without_previous() {
+    uint16_t previous[kRcChannelCount];
+    uint16_t candidate[kRcChannelCount];
+    fillFailsafeRcChannels(previous);
+    for (uint8_t i = 0; i < kRcChannelCount; ++i) candidate[i] = kCrsfRaw2000;
+
+    TEST_ASSERT_TRUE(sanitizeRcChannels(previous, false, candidate));
+
+    RcSpikeGate gate{};
+    TEST_ASSERT_TRUE(acceptRcChannelsWithSpikeGate(previous, false, candidate, gate, 160, 80));
+    TEST_ASSERT_FALSE(gate.havePending);
+}
+
+// Regression: TX CRSF goes stale after the first boot (>250 ms gap), the timer
+// resets g_channels to failsafe values and sets g_txCrsfInFailsafe.  When CRSF
+// resumes, the next frame must be accepted immediately even though g_lastRcInputMs
+// is already non-zero (so the old havePrevious=true path would have blocked it).
+//
+// Simulated here by calling the gate with havePrevious=false (the new flag
+// behaviour) against a failsafe-positioned previous and a full-throw candidate.
+static void test_spike_gate_bypassed_when_tx_recovers_from_failsafe() {
+    // "previous" is what g_channels looks like after setDefaultChannels() fires.
+    uint16_t previous[kRcChannelCount];
+    fillFailsafeRcChannels(previous);
+
+    // Pilot has already moved sticks to full throws on all axes.
+    uint16_t candidate[kRcChannelCount];
+    for (uint8_t i = 0; i < kRcChannelCount; ++i) candidate[i] = kCrsfRaw2000;
+
+    // Sanitiser must pass with havePrevious=false (reacquire bypass).
+    uint16_t sanitized[kRcChannelCount];
+    memcpy(sanitized, candidate, sizeof(sanitized));
+    TEST_ASSERT_TRUE(sanitizeRcChannels(previous, false, sanitized));
+
+    // Gate must accept immediately — no hold, no ramp.
+    RcSpikeGate gate{};
+    // Simulate a previous frame having been held (gate has a stale pending value)
+    // to confirm that setDefaultChannels() clears havePending before reacquire.
+    memcpy(gate.pending, previous, sizeof(gate.pending));
+    gate.havePending = true;
+    TEST_ASSERT_TRUE(acceptRcChannelsWithSpikeGate(previous, false, candidate, gate, 160, 80));
+    TEST_ASSERT_FALSE(gate.havePending);
+}
+
+// After a successful reacquire (g_txCrsfInFailsafe cleared, havePrevious=true
+// restored), the spike gate must still protect against single-frame outliers on
+// non-throttle channels — i.e., normal operation is not broken by the fix.
+static void test_spike_gate_active_after_tx_failsafe_recovery() {
+    // Pilot has settled sticks at arbitrary mid positions after reacquire.
+    uint16_t previous[kRcChannelCount];
+    for (uint8_t i = 0; i < kRcChannelCount; ++i) previous[i] = kCrsfRawMid;
+    previous[3] = kCrsfRaw1000;  // throttle low
+
+    // A single-frame outlier spikes ch6 to maximum — should be gated.
+    uint16_t outlier[kRcChannelCount];
+    memcpy(outlier, previous, sizeof(outlier));
+    outlier[6] = kCrsfRaw2000;
+
+    // Normal follow-up frame matches previous — outlier is suppressed.
+    uint16_t normal[kRcChannelCount];
+    memcpy(normal, previous, sizeof(normal));
+
+    RcSpikeGate gate{};
+    TEST_ASSERT_FALSE(acceptRcChannelsWithSpikeGate(previous, true, outlier, gate, 160, 80));
+    TEST_ASSERT_TRUE(gate.havePending);
+    TEST_ASSERT_TRUE(acceptRcChannelsWithSpikeGate(previous, true, normal, gate, 160, 80));
+    TEST_ASSERT_FALSE(gate.havePending);
+}
+
 static void test_radio_transmitter_address_frame_is_accepted_as_crsf_raw() {
     uint16_t channels[kRcChannelCount];
     for (uint8_t i = 0; i < kRcChannelCount; ++i) channels[i] = kCrsfRawMid;
@@ -854,6 +1027,11 @@ static void test_config_record_validation() {
     TEST_ASSERT_TRUE(readConfigRecord(record, out));
     TEST_ASSERT_EQUAL_STRING("default-phrase", out.bindingPhrase);
     TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RateId::L100), static_cast<uint8_t>(out.rate));
+
+    cfg.rate = RateId::L50;
+    record = makeConfigRecord(cfg);
+    TEST_ASSERT_TRUE(readConfigRecord(record, out));
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RateId::L50), static_cast<uint8_t>(out.rate));
 
     record.bindingPhrase[0] ^= 0x01;
     TEST_ASSERT_FALSE(readConfigRecord(record, out));
@@ -952,12 +1130,14 @@ static void test_crsf_binding_request_and_response_frames() {
     TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(BindingResult::Ok), response[9]);
     TEST_ASSERT_EQUAL_UINT8(1, response[10]);
     TEST_ASSERT_EQUAL_UINT8(1, response[11]);
-    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(status.uidCheck >> 24), response[12]);
-    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(status.uidCheck >> 16), response[13]);
-    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(status.uidCheck >> 8), response[14]);
-    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(status.uidCheck), response[15]);
-    TEST_ASSERT_EQUAL_UINT8_ARRAY(status.uid, &response[16], kUidSize);
-    TEST_ASSERT_EQUAL_UINT8(strlen(status.phrase), response[24]);
+    TEST_ASSERT_EQUAL_UINT8(0, response[12]); // wirelessBindActive, unset by makeBindingStatus
+    TEST_ASSERT_EQUAL_UINT8(0, response[13]); // wirelessBindAccepted, unset by makeBindingStatus
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(status.uidCheck >> 24), response[14]);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(status.uidCheck >> 16), response[15]);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(status.uidCheck >> 8), response[16]);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(status.uidCheck), response[17]);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(status.uid, &response[18], kUidSize);
+    TEST_ASSERT_EQUAL_UINT8(strlen(status.phrase), response[26]);
     TEST_ASSERT_EQUAL_UINT8(crsfCrc8(&response[2], response[1] - 1), response[responseLen - 1]);
 }
 
@@ -1004,6 +1184,124 @@ static void test_crsf_binding_request_encoder_and_response_parser() {
     TEST_ASSERT_FALSE(parsedStatus.requiresReboot);
 }
 
+static void test_crsf_binding_response_carries_wireless_bind_fields() {
+    BindingStatus status{};
+    makeBindingStatus("wireless-test", true, false, status);
+    status.wirelessBindActive = true;
+    status.wirelessBindAccepted = true;
+
+    uint8_t responseFrame[64] = {};
+    const size_t responseLen = encodeCrsfBindingResponseFrame(
+        status, BindingResult::Ok, BindingControlOp::Get, responseFrame, sizeof(responseFrame));
+    TEST_ASSERT_GREATER_THAN_UINT(0, responseLen);
+
+    BindingStatus parsedStatus{};
+    BindingResult parsedResult = BindingResult::InvalidCommand;
+    BindingControlOp parsedOp = BindingControlOp::Set;
+    bool parsed = false;
+    for (size_t i = 0; i < responseLen; ++i) {
+        parsed = parseCrsfBindingResponseFrame(responseFrame[i], parsedStatus, parsedResult, parsedOp) || parsed;
+    }
+    TEST_ASSERT_TRUE(parsed);
+    TEST_ASSERT_TRUE(parsedStatus.wirelessBindActive);
+    TEST_ASSERT_TRUE(parsedStatus.wirelessBindAccepted);
+    TEST_ASSERT_EQUAL_STRING("wireless-test", parsedStatus.phrase);
+
+    // A response with both fields unset (every non-wireless-bind op today)
+    // must still round-trip as false, not stale/garbage.
+    BindingStatus idleStatus{};
+    makeBindingStatus("wireless-test", true, false, idleStatus);
+    uint8_t idleFrame[64] = {};
+    const size_t idleLen = encodeCrsfBindingResponseFrame(
+        idleStatus, BindingResult::Ok, BindingControlOp::Get, idleFrame, sizeof(idleFrame));
+    BindingStatus parsedIdle{};
+    parsed = false;
+    for (size_t i = 0; i < idleLen; ++i) {
+        parsed = parseCrsfBindingResponseFrame(idleFrame[i], parsedIdle, parsedResult, parsedOp) || parsed;
+    }
+    TEST_ASSERT_TRUE(parsed);
+    TEST_ASSERT_FALSE(parsedIdle.wirelessBindActive);
+    TEST_ASSERT_FALSE(parsedIdle.wirelessBindAccepted);
+}
+
+static void test_ota_bind_frame_round_trip() {
+    uint8_t bindUid[kUidSize];
+    bindIdentityUid(bindUid);
+    const uint32_t bindUidCheck = uidCheck(bindUid);
+
+    uint8_t realUid[kUidSize];
+    deriveUid("offered-by-tx", realUid);
+
+    OtaBindPayload offer{};
+    offer.marker = OtaBindMarker::Offer;
+    memcpy(offer.uid, realUid, kUidSize);
+
+    OtaFrame frame{};
+    frame.type = OtaType::Bind;
+    frame.sequence = 7;
+    frame.uidCheck = bindUidCheck;
+    TEST_ASSERT_TRUE(encodeOtaBindPayload(offer, frame.payload, frame.payloadLen));
+
+    uint8_t bytes[kOtaFrameSize];
+    TEST_ASSERT_TRUE(encodeOtaFrame(frame, bytes));
+
+    OtaFrame decodedFrame{};
+    TEST_ASSERT_TRUE(decodeOtaFrame(bytes, bindUidCheck, decodedFrame));
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(OtaType::Bind), static_cast<uint8_t>(decodedFrame.type));
+
+    OtaBindPayload decodedPayload{};
+    TEST_ASSERT_TRUE(decodeOtaBindPayload(decodedFrame, decodedPayload));
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(OtaBindMarker::Offer),
+                            static_cast<uint8_t>(decodedPayload.marker));
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(realUid, decodedPayload.uid, kUidSize);
+
+    // The whole point of the bind identity: a frame built for it must not be
+    // acceptable against a real, phrase-derived link UID.
+    uint8_t realLinkUid[kUidSize];
+    deriveUid("some-real-phrase", realLinkUid);
+    OtaFrame rejected{};
+    TEST_ASSERT_FALSE(decodeOtaFrame(bytes, uidCheck(realLinkUid), rejected));
+
+    // And decodeOtaBindPayload must reject a non-Bind frame even if the
+    // marker byte and length happen to line up.
+    OtaFrame notBind = decodedFrame;
+    notBind.type = OtaType::Rc;
+    OtaBindPayload ignored{};
+    TEST_ASSERT_FALSE(decodeOtaBindPayload(notBind, ignored));
+}
+
+static void test_config_record_learned_uid_round_trip() {
+    uint8_t learnedUid[kUidSize];
+    deriveUid("learned-over-the-air", learnedUid);
+
+    DeviceConfig cfg{};
+    configDefaults(cfg, "phrase-fallback");
+    cfg.hasLearnedUid = true;
+    memcpy(cfg.learnedUid, learnedUid, kUidSize);
+    ConfigRecord record = makeConfigRecord(cfg);
+
+    DeviceConfig out{};
+    TEST_ASSERT_TRUE(readConfigRecord(record, out));
+    TEST_ASSERT_TRUE(out.hasLearnedUid);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(learnedUid, out.learnedUid, kUidSize);
+    TEST_ASSERT_EQUAL_STRING("phrase-fallback", out.bindingPhrase);
+
+    // Phrase-only binding (today's default path) must still round-trip with
+    // hasLearnedUid explicitly false, not stale/uninitialized.
+    DeviceConfig phraseOnly{};
+    configDefaults(phraseOnly, "phrase-fallback");
+    ConfigRecord phraseRecord = makeConfigRecord(phraseOnly);
+    DeviceConfig phraseOut{};
+    TEST_ASSERT_TRUE(readConfigRecord(phraseRecord, phraseOut));
+    TEST_ASSERT_FALSE(phraseOut.hasLearnedUid);
+
+    // Corrupting a learnedUid byte without updating the record's CRC must be
+    // caught -- this is the property that keeps unwritten/stale flash from
+    // ever being silently accepted as a real learned UID.
+    record.learnedUid[0] ^= 0x01;
+    TEST_ASSERT_FALSE(readConfigRecord(record, out));
+}
+
 static void test_failsafe_freshness_helper_uses_named_timeout() {
     const uint32_t lastUplinkMs = 1000;
     TEST_ASSERT_EQUAL_UINT32(250, kFailsafeTimeoutMs);
@@ -1022,8 +1320,8 @@ static void test_failsafe_rc_channels_drop_throttle_and_aux_low() {
 
     TEST_ASSERT_EQUAL_UINT16(kCrsfRawMid, channels[0]);
     TEST_ASSERT_EQUAL_UINT16(kCrsfRawMid, channels[1]);
-    TEST_ASSERT_EQUAL_UINT16(kCrsfRaw1000, channels[2]);
-    TEST_ASSERT_EQUAL_UINT16(kCrsfRawMid, channels[3]);
+    TEST_ASSERT_EQUAL_UINT16(kCrsfRawMid, channels[2]);
+    TEST_ASSERT_EQUAL_UINT16(kCrsfRaw1000, channels[3]);
     for (uint8_t i = 4; i < kRcChannelCount; ++i) {
         TEST_ASSERT_EQUAL_UINT16(kCrsfRaw1000, channels[i]);
     }
@@ -1149,7 +1447,8 @@ static void test_handset_channel_function_mapping_places_values_in_crsf_slots() 
     TEST_ASSERT_TRUE(mapChannelFunction(ChannelFunction::Aux4, kCrsfRaw2000, channels));
     TEST_ASSERT_FALSE(mapChannelFunction(ChannelFunction::None, 1500, channels));
 
-    TEST_ASSERT_EQUAL_UINT16(1234, channels[3]);
+    // CRSF slot order is AETR: Throttle is channel index 2, Rudder is channel index 3.
+    TEST_ASSERT_EQUAL_UINT16(1234, channels[2]);
     TEST_ASSERT_EQUAL_UINT16(kCrsfRaw2000, channels[7]);
     TEST_ASSERT_EQUAL_UINT16(kCrsfRawMid, channels[8]);
 }
@@ -1818,10 +2117,12 @@ static void test_power_battery_percent_handles_invalid_range() {
     TEST_ASSERT_EQUAL_UINT8(0, handset_power::batteryPercentFromVoltageMv(3700, 3300, 3300));
 }
 
+// BQ25895 REG0E (VBAT ADC) is a single 8-bit register: THERM_STAT[7],
+// BATV[6:0], mV = 2304 (offset) + BATV * 20 (LSB). 0x50 = 80 -> 2304+1600 =
+// 3904mV. THERM_STAT (bit 7) set in the raw byte to confirm it's masked off.
 static void test_power_bq2562x_vbat_decode_uses_datasheet_lsb() {
-    const uint16_t shiftedAdc = 2000;
-    const uint16_t rawRegister = static_cast<uint16_t>(shiftedAdc << 1);
-    TEST_ASSERT_EQUAL_UINT16(3980, handset_power::Bq2562x::decodeBatteryVoltageMv(rawRegister));
+    const uint16_t rawRegister = 0xD0;  // THERM_STAT=1, BATV=0x50
+    TEST_ASSERT_EQUAL_UINT16(3904, handset_power::Bq2562x::decodeBatteryVoltageMv(rawRegister));
 }
 
 static void test_power_hold_to_boot_satisfies_after_required_time() {
@@ -1834,6 +2135,13 @@ static void test_power_hold_to_boot_satisfies_after_required_time() {
     TEST_ASSERT_EQUAL_UINT8(40, update.progressPercent);
 
     update = power.updateBootGate(true, 6000);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(handset_power::PowerButtonEvent::None),
+                            static_cast<uint8_t>(update.event));
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(handset_power::BootGateState::ReadyToRelease),
+                            static_cast<uint8_t>(update.bootGateState));
+    TEST_ASSERT_EQUAL_UINT8(100, update.progressPercent);
+
+    update = power.updateBootGate(false, 6100);
     TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(handset_power::PowerButtonEvent::BootHoldSatisfied),
                             static_cast<uint8_t>(update.event));
     TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(handset_power::BootGateState::Satisfied),
@@ -1886,6 +2194,88 @@ static void test_power_off_short_press_cancels() {
                             static_cast<uint8_t>(update.powerOffState));
 }
 
+// Safety regression: powering off while the handset still has a live RX link
+// would leave the drone flying with no way to regain control. Holding the
+// button must never be allowed to count down while rxLinkActive is true.
+static void test_power_off_blocked_while_rx_link_active_never_counts_down() {
+    handset_power::PowerButtonController power({false, 5000, 2500});
+
+    handset_power::PowerButtonUpdate update = power.updatePowerOff(true, 100, true);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(handset_power::PowerButtonEvent::PowerOffBlocked),
+                            static_cast<uint8_t>(update.event));
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(handset_power::PowerOffState::Idle),
+                            static_cast<uint8_t>(update.powerOffState));
+
+    // Hold well past the normal 2500ms threshold -- still blocked, never reaches
+    // ReadyToRelease, because rxLinkActive stays true the whole time.
+    update = power.updatePowerOff(true, 5000, true);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(handset_power::PowerButtonEvent::PowerOffBlocked),
+                            static_cast<uint8_t>(update.event));
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(handset_power::PowerOffState::Idle),
+                            static_cast<uint8_t>(update.powerOffState));
+
+    // Releasing while blocked is a no-op, not a confirm.
+    update = power.updatePowerOff(false, 5100, true);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(handset_power::PowerOffState::Idle),
+                            static_cast<uint8_t>(update.powerOffState));
+    TEST_ASSERT_FALSE(update.event == handset_power::PowerButtonEvent::PowerOffConfirmed);
+}
+
+// A link that comes up mid-hold must cancel the countdown immediately rather
+// than letting an already-in-progress hold complete.
+static void test_power_off_blocked_cancels_in_progress_hold_when_link_appears() {
+    handset_power::PowerButtonController power({false, 5000, 2500});
+
+    handset_power::PowerButtonUpdate update = power.updatePowerOff(true, 100, false);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(handset_power::PowerOffState::Holding),
+                            static_cast<uint8_t>(update.powerOffState));
+
+    // RX link appears partway through the hold.
+    update = power.updatePowerOff(true, 1000, true);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(handset_power::PowerButtonEvent::PowerOffBlocked),
+                            static_cast<uint8_t>(update.event));
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(handset_power::PowerOffState::Idle),
+                            static_cast<uint8_t>(update.powerOffState));
+
+    // Continuing to hold past the original threshold still doesn't confirm.
+    update = power.updatePowerOff(true, 2700, true);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(handset_power::PowerButtonEvent::PowerOffBlocked),
+                            static_cast<uint8_t>(update.event));
+}
+
+// The race this guards: link comes up in the exact instant between reaching
+// 100% and the physical release. Confirm must be refused even though the
+// hold itself was entirely legitimate (rxLinkActive was false the whole time
+// it was counting down).
+static void test_power_off_blocked_at_release_race_after_link_appears() {
+    handset_power::PowerButtonController power({false, 5000, 2500});
+    (void)power.updatePowerOff(true, 100, false);
+    handset_power::PowerButtonUpdate update = power.updatePowerOff(true, 2600, false);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(handset_power::PowerOffState::ReadyToRelease),
+                            static_cast<uint8_t>(update.powerOffState));
+
+    // Link appears in the same instant the button is released.
+    update = power.updatePowerOff(false, 2700, true);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(handset_power::PowerButtonEvent::PowerOffBlocked),
+                            static_cast<uint8_t>(update.event));
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(handset_power::PowerOffState::Idle),
+                            static_cast<uint8_t>(update.powerOffState));
+}
+
+// Baseline: explicitly passing rxLinkActive=false preserves the original,
+// already-tested normal power-off behavior.
+static void test_power_off_confirms_normally_when_rx_link_inactive() {
+    handset_power::PowerButtonController power({false, 5000, 2500});
+    (void)power.updatePowerOff(true, 100, false);
+    handset_power::PowerButtonUpdate update = power.updatePowerOff(true, 2600, false);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(handset_power::PowerOffState::ReadyToRelease),
+                            static_cast<uint8_t>(update.powerOffState));
+
+    update = power.updatePowerOff(false, 2700, false);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(handset_power::PowerButtonEvent::PowerOffConfirmed),
+                            static_cast<uint8_t>(update.event));
+}
+
 void run_power_tests() {
     RUN_TEST(test_power_battery_percent_clamps_and_interpolates);
     RUN_TEST(test_power_battery_percent_handles_invalid_range);
@@ -1894,12 +2284,57 @@ void run_power_tests() {
     RUN_TEST(test_power_hold_to_boot_aborts_on_release);
     RUN_TEST(test_power_off_requires_release_after_long_press);
     RUN_TEST(test_power_off_short_press_cancels);
+    RUN_TEST(test_power_off_blocked_while_rx_link_active_never_counts_down);
+    RUN_TEST(test_power_off_blocked_cancels_in_progress_hold_when_link_appears);
+    RUN_TEST(test_power_off_blocked_at_release_race_after_link_appears);
+    RUN_TEST(test_power_off_confirms_normally_when_rx_link_inactive);
+}
+
+void setUp(void) {}
+void tearDown(void) {}
+
+static void test_role_record_roundtrip_and_validation() {
+    ModuleRole role = ModuleRole::Tx;
+    RoleRecord rx = makeRoleRecord(ModuleRole::Rx);
+    TEST_ASSERT_TRUE(readRoleRecord(rx, role));
+    TEST_ASSERT_EQUAL(static_cast<int>(ModuleRole::Rx), static_cast<int>(role));
+
+    RoleRecord tx = makeRoleRecord(ModuleRole::Tx);
+    TEST_ASSERT_TRUE(readRoleRecord(tx, role));
+    TEST_ASSERT_EQUAL(static_cast<int>(ModuleRole::Tx), static_cast<int>(role));
+
+    RoleRecord blank{};  // erased/zero EEPROM must read as "unset"
+    TEST_ASSERT_FALSE(readRoleRecord(blank, role));
+    memset(&blank, 0xFF, sizeof(blank));
+    TEST_ASSERT_FALSE(readRoleRecord(blank, role));
+
+    RoleRecord corrupt = rx;  // inverse byte must match
+    corrupt.roleInverse = 0;
+    TEST_ASSERT_FALSE(readRoleRecord(corrupt, role));
+
+    RoleRecord badRole = makeRoleRecord(static_cast<ModuleRole>(7));
+    TEST_ASSERT_FALSE(readRoleRecord(badRole, role));
+}
+
+static void test_role_text_parsing() {
+    ModuleRole role = ModuleRole::Tx;
+    TEST_ASSERT_TRUE(parseModuleRole("rx", role));
+    TEST_ASSERT_EQUAL(static_cast<int>(ModuleRole::Rx), static_cast<int>(role));
+    TEST_ASSERT_TRUE(parseModuleRole("tx", role));
+    TEST_ASSERT_EQUAL(static_cast<int>(ModuleRole::Tx), static_cast<int>(role));
+    TEST_ASSERT_FALSE(parseModuleRole("RX", role));
+    TEST_ASSERT_FALSE(parseModuleRole("", role));
+    TEST_ASSERT_FALSE(parseModuleRole(nullptr, role));
+    TEST_ASSERT_EQUAL_STRING("rx", moduleRoleName(ModuleRole::Rx));
+    TEST_ASSERT_EQUAL_STRING("tx", moduleRoleName(ModuleRole::Tx));
 }
 
 int main(int argc, char** argv) {
     (void)argc;
     (void)argv;
     UNITY_BEGIN();
+    RUN_TEST(test_role_record_roundtrip_and_validation);
+    RUN_TEST(test_role_text_parsing);
     RUN_TEST(test_uid_is_deterministic);
     RUN_TEST(test_sync_word_is_eight_bit_and_guards_effective_zero);
     RUN_TEST(test_uid_check_uses_all_uid_bytes);
@@ -1924,6 +2359,7 @@ int main(int argc, char** argv) {
     RUN_TEST(test_rf_scheduler_rx_locks_only_after_dwell_and_low_derivative);
     RUN_TEST(test_rf_scheduler_rx_locked_frequency_trim_runs_every_8_nonces);
     RUN_TEST(test_rf_scheduler_rx_tick_tock_event_sequencing);
+    RUN_TEST(test_rf_scheduler_rx_tracks_received_frame_for_current_tock);
     RUN_TEST(test_rf_scheduler_rx_rejects_invalid_sync_metadata);
     RUN_TEST(test_rf_scheduler_rx_disconnected_scan_stays_on_sync_channel);
     RUN_TEST(test_ota_sync_payload_round_trip_and_validation);
@@ -1936,8 +2372,15 @@ int main(int argc, char** argv) {
     RUN_TEST(test_channel_sanitizer_allows_recovery_frame_without_previous);
     RUN_TEST(test_channel_sanitizer_accepts_single_fast_channel_move);
     RUN_TEST(test_spike_gate_holds_one_frame_channel_outlier);
+    RUN_TEST(test_spike_gate_accepts_single_throttle_jump);
+    RUN_TEST(test_spike_gate_accepts_throttle_jump_with_simultaneous_aux_switch);
+    RUN_TEST(test_spike_gate_holds_throttle_jump_with_simultaneous_roll_jump);
+    RUN_TEST(test_spike_gate_accepts_large_jump_from_neutral_previous);
     RUN_TEST(test_spike_gate_accepts_confirmed_large_channel_step);
     RUN_TEST(test_spike_gate_accepts_fast_continuous_ramp);
+    RUN_TEST(test_spike_gate_accepts_cold_boot_first_frame_without_previous);
+    RUN_TEST(test_spike_gate_bypassed_when_tx_recovers_from_failsafe);
+    RUN_TEST(test_spike_gate_active_after_tx_failsafe_recovery);
     RUN_TEST(test_radio_transmitter_address_frame_is_accepted_as_crsf_raw);
     RUN_TEST(test_config_record_validation);
     RUN_TEST(test_default_rate_has_downlink_telemetry_for_handset_metrics);
@@ -1945,6 +2388,9 @@ int main(int argc, char** argv) {
     RUN_TEST(test_binding_status_derives_uid_check);
     RUN_TEST(test_crsf_binding_request_and_response_frames);
     RUN_TEST(test_crsf_binding_request_encoder_and_response_parser);
+    RUN_TEST(test_crsf_binding_response_carries_wireless_bind_fields);
+    RUN_TEST(test_ota_bind_frame_round_trip);
+    RUN_TEST(test_config_record_learned_uid_round_trip);
     RUN_TEST(test_failsafe_freshness_helper_uses_named_timeout);
     RUN_TEST(test_failsafe_rc_channels_drop_throttle_and_aux_low);
     RUN_TEST(test_telemetry_listen_window_is_short_and_scheduled_by_ratio);

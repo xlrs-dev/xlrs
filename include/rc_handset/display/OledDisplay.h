@@ -9,6 +9,7 @@ class OledDisplay {
 public:
     bool begin();
     void show(const DisplayState& state);
+    void sleep();
     bool available() const { return available_; }
 
 private:

@@ -15,6 +15,9 @@ enum class Screen : uint8_t {
     ChannelMonitor,
     ConfigSummary,
     BindingStatus,
+    // Custom-drawn (bypass the text-line renderer -- see OledDisplay.cpp),
+    // reusing BatteryState, no new DisplayState fields.
+    BatteryStatus,
 };
 
 struct BatteryState {
@@ -56,6 +59,10 @@ struct BindingStatusState {
     bool bindMode = false;
     bool mismatch = false;
     const char* message = nullptr;
+    // Optional extra line -- e.g. a wireless-bind gesture hint. Null on
+    // builds/screens that don't have anything more to say; renderer skips it
+    // when null so this stays a no-op everywhere else.
+    const char* hint = nullptr;
 };
 
 struct DisplayState {
